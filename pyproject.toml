@@ -1,0 +1,22 @@
+[project]
+name = "efp-opencode-adapter"
+version = "0.1.0"
+description = "EFP-compatible adapter for OpenCode runtime"
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.9,<4",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.23,<1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

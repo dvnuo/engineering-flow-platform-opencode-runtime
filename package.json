@@ -1,0 +1,12 @@
+{
+  "name": "engineering-flow-platform-opencode-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "EFP-compatible OpenCode runtime adapter image",
+  "scripts": {
+    "smoke": "bash scripts/smoke.sh"
+  },
+  "dependencies": {
+    "opencode-ai": "1.14.29"
+  }
+}

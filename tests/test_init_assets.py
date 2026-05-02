@@ -1,0 +1,38 @@
+import json
+
+from efp_opencode_adapter.init_assets import init_assets
+from efp_opencode_adapter.settings import Settings
+
+
+def test_init_assets_creates_dirs_and_config(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    skills = tmp_path / "skills"
+    tools = tmp_path / "tools"
+    state = tmp_path / "state"
+    config = workspace / ".opencode" / "opencode.json"
+
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
+    monkeypatch.setenv("EFP_TOOLS_DIR", str(tools))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(config))
+
+    settings = Settings.from_env()
+    init_assets(settings)
+
+    assert (workspace / ".opencode").exists()
+    assert (workspace / ".opencode" / "skills").exists()
+    assert (workspace / ".opencode" / "tools").exists()
+    assert (workspace / ".opencode" / "agents").exists()
+    assert config.exists()
+
+    payload = json.loads(config.read_text())
+    assert payload["autoupdate"] is False
+    assert payload["share"] == "disabled"
+    assert payload["server"]["hostname"] == "127.0.0.1"
+    assert payload["server"]["port"] == 4096
+    assert payload["permission"]["*"] == "ask"
+    assert payload["permission"]["external_directory"] == "deny"
+    assert payload["permission"]["bash"]["rm *"] == "deny"
+    assert payload["permission"]["bash"]["sudo *"] == "deny"
+    assert payload["permission"]["bash"]["git push *"] == "deny"
