@@ -18,7 +18,7 @@ RUN groupadd --gid 10001 opencode \
   && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash opencode
 
 WORKDIR /app/runtime
-COPY pyproject.toml README.md package.json ./
+COPY pyproject.toml README.md package*.json ./
 COPY efp_opencode_adapter ./efp_opencode_adapter
 RUN python3 -m venv /opt/venv \
   && /opt/venv/bin/pip install --upgrade pip \

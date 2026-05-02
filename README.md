@@ -77,3 +77,16 @@ opencode --version
 ```
 
 Expected output contains `1.14.29`.
+
+Package lock verification:
+
+```bash
+node -e "const p=require('./package-lock.json'); console.log(p.packages?.['node_modules/opencode-ai']?.version || p.dependencies?.['opencode-ai']?.version)"
+```
+
+Expected output:
+
+```text
+1.14.29
+```
+
