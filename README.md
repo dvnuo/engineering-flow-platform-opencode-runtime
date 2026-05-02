@@ -56,6 +56,20 @@ docker run --rm -p 8000:8000 -e OPENCODE_SERVER_PASSWORD=test-password efp-openc
 curl http://localhost:8000/health
 ```
 
+Automated smoke validation:
+
+```bash
+bash scripts/smoke.sh
+```
+
+`bash scripts/smoke.sh` will:
+
+- build the image
+- run the container with only `8000` mapped (no `4096` host mapping)
+- verify `/health` returns `status=ok`, `engine=opencode`, `opencode_version=1.14.29`
+- verify container runtime UID is `10001`
+- verify generated `/workspace/.opencode/opencode.json` security defaults (`autoupdate=false`, `share=disabled`, `permission["*"]="ask"`, `external_directory="deny"`)
+
 Version verification:
 
 ```bash

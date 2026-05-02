@@ -2,7 +2,9 @@
 set -euo pipefail
 
 NAME="efp-opencode-runtime-smoke"
+HEALTH_FILE="$(mktemp)"
 cleanup() {
+  rm -f "${HEALTH_FILE}" >/dev/null 2>&1 || true
   docker rm -f "${NAME}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -10,16 +12,24 @@ trap cleanup EXIT
 docker build -t efp-opencode-runtime:test .
 docker run -d --name "${NAME}" -p 8000:8000 -e OPENCODE_SERVER_PASSWORD=test-password efp-opencode-runtime:test >/dev/null
 
+READY=0
 for _ in $(seq 1 60); do
-  if curl -fsS http://localhost:8000/health >/tmp/efp-health.json; then
+  if curl -fsS http://localhost:8000/health >"${HEALTH_FILE}"; then
+    READY=1
     break
   fi
   sleep 1
 done
 
-jq -e '.status == "ok"' /tmp/efp-health.json >/dev/null
-jq -e '.engine == "opencode"' /tmp/efp-health.json >/dev/null
-jq -e '.opencode_version == "1.14.29"' /tmp/efp-health.json >/dev/null
+if [[ "${READY}" != "1" ]]; then
+  docker logs "${NAME}" >&2 || true
+  echo "health endpoint did not become ready within 60 seconds" >&2
+  exit 1
+fi
+
+jq -e '.status == "ok"' "${HEALTH_FILE}" >/dev/null
+jq -e '.engine == "opencode"' "${HEALTH_FILE}" >/dev/null
+jq -e '.opencode_version == "1.14.29"' "${HEALTH_FILE}" >/dev/null
 
 LOGS="$(docker logs "${NAME}" 2>&1)"
 [[ "${LOGS}" == *"adapter listening on 0.0.0.0:8000"* ]]
