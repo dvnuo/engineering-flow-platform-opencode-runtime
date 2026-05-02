@@ -17,6 +17,9 @@ def test_init_assets_creates_dirs_and_config(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_CONFIG", str(config))
 
+    (skills / "sample-skill").mkdir(parents=True, exist_ok=True)
+    (skills / "sample-skill" / "skill.md").write_text("---\nname: sample-skill\ndescription: Sample\n---\n\nBody\n", encoding="utf-8")
+
     settings = Settings.from_env()
     init_assets(settings)
 
@@ -25,6 +28,8 @@ def test_init_assets_creates_dirs_and_config(tmp_path, monkeypatch):
     assert (workspace / ".opencode" / "tools").exists()
     assert (workspace / ".opencode" / "agents").exists()
     assert config.exists()
+    assert (workspace / ".opencode" / "skills" / "sample-skill" / "SKILL.md").exists()
+    assert (state / "skills-index.json").exists()
 
     payload = json.loads(config.read_text())
     assert payload["autoupdate"] is False
@@ -55,9 +60,14 @@ def test_init_assets_does_not_overwrite_existing_config(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_CONFIG", str(config))
 
+    (skills / "existing-sync").mkdir(parents=True, exist_ok=True)
+    (skills / "existing-sync" / "skill.md").write_text("---\nname: existing-sync\ndescription: Existing\n---\n\nBody\n", encoding="utf-8")
+
     init_assets(Settings.from_env())
 
     assert json.loads(config.read_text(encoding="utf-8")) == sentinel
+    assert (workspace / ".opencode" / "skills" / "existing-sync" / "SKILL.md").exists()
+    assert (state / "skills-index.json").exists()
     assert (workspace / ".opencode" / "skills").exists()
     assert (workspace / ".opencode" / "tools").exists()
     assert (workspace / ".opencode" / "agents").exists()

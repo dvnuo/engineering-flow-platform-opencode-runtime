@@ -5,6 +5,7 @@ description = "EFP-compatible adapter for OpenCode runtime"
 requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.9,<4",
+  "PyYAML>=6,<7",
 ]
 
 [project.optional-dependencies]

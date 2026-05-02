@@ -9,7 +9,7 @@ This repository contains the **T05 scaffold** for an EFP-compatible OpenCode run
 - Portal **must not** call OpenCode native API directly.
 - OpenCode version is pinned to **`1.14.29`**.
 
-## T05 scope
+## T05 + T08 scope
 
 Implemented in this task:
 
@@ -18,14 +18,21 @@ Implemented in this task:
 - asset initialization scaffold (`python -m efp_opencode_adapter.init_assets`)
 - OpenCode readiness check via `/global/health`
 
+Implemented in T08:
+
+- EFP skills converter:
+  `/app/skills/<skill>/skill.md` -> `/workspace/.opencode/skills/<normalized-name>/SKILL.md`
+- skills-index.json:
+  `$EFP_ADAPTER_STATE_DIR/skills-index.json`
+- optional generated subagent prompts:
+  `/workspace/.opencode/agents/skill-<name>.md`
+
 Not implemented in this task:
 
 - `/api/chat`
-- `/api/chat/stream`
 - `/api/tasks`
 - runtime profile mapping
 - tools wrapper
-- skills converter
 - files / attachments / context integrations
 
 ## Security defaults
@@ -44,6 +51,13 @@ Generated minimal `opencode.json` defaults include:
 ```bash
 python -m pytest -q
 python -m efp_opencode_adapter.init_assets
+
+# T08 skill sync smoke
+python -m efp_opencode_adapter.skill_sync \
+  --skills-dir /app/skills \
+  --opencode-skills-dir /workspace/.opencode/skills \
+  --state-dir /home/opencode/.local/share/efp-compat
+
 ```
 
 ## Docker
