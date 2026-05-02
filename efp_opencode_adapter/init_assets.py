@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from .settings import Settings
+from .skill_sync import sync_skills
 
 
 def _minimal_config() -> dict:
@@ -50,6 +51,12 @@ def init_assets(settings: Settings) -> None:
     ]
     for d in required_dirs:
         d.mkdir(parents=True, exist_ok=True)
+
+    sync_skills(
+        settings.skills_dir,
+        settings.workspace_dir / ".opencode" / "skills",
+        settings.adapter_state_dir,
+    )
 
     config_path = settings.opencode_config_path
     if config_path.exists():
