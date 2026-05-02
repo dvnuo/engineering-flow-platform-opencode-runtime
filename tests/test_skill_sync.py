@@ -114,3 +114,59 @@ def test_missing_description_warning_and_fallback(tmp_path):
 def _parse_frontmatter(text: str) -> dict:
     end = text.find("\n---\n", 4)
     return yaml.safe_load(text[4:end])
+
+
+def test_stale_generated_skill_is_removed(tmp_path):
+    skills_dir = tmp_path / "skills"
+    opencode_skills_dir = tmp_path / "workspace" / ".opencode" / "skills"
+    state_dir = tmp_path / "state"
+
+    stale_dir = opencode_skills_dir / "old-skill"
+    stale_dir.mkdir(parents=True, exist_ok=True)
+    (stale_dir / "SKILL.md").write_text("This skill was generated from an EFP skill asset.\n", encoding="utf-8")
+
+    _write_skill(
+        skills_dir / "new-skill" / "skill.md",
+        {"name": "new-skill", "description": "New skill"},
+    )
+
+    sync_skills(skills_dir, opencode_skills_dir, state_dir)
+
+    assert not stale_dir.exists()
+    assert (opencode_skills_dir / "new-skill" / "SKILL.md").exists()
+
+    payload = json.loads((state_dir / "skills-index.json").read_text(encoding="utf-8"))
+    assert [x["opencode_name"] for x in payload["skills"]] == ["new-skill"]
+
+
+def test_manual_opencode_skill_is_not_removed(tmp_path):
+    skills_dir = tmp_path / "skills"
+    opencode_skills_dir = tmp_path / "workspace" / ".opencode" / "skills"
+    state_dir = tmp_path / "state"
+
+    manual_dir = opencode_skills_dir / "manual-skill"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    (manual_dir / "SKILL.md").write_text("# Manual skill\n", encoding="utf-8")
+
+    _write_skill(
+        skills_dir / "new-skill" / "skill.md",
+        {"name": "new-skill", "description": "New skill"},
+    )
+
+    sync_skills(skills_dir, opencode_skills_dir, state_dir)
+
+    assert (manual_dir / "SKILL.md").exists()
+    assert (opencode_skills_dir / "new-skill" / "SKILL.md").exists()
+
+
+def test_missing_skills_dir_writes_empty_index(tmp_path):
+    skills_dir = tmp_path / "does-not-exist"
+    opencode_skills_dir = tmp_path / "workspace" / ".opencode" / "skills"
+    state_dir = tmp_path / "state"
+
+    with pytest.warns(UserWarning, match="skills directory does not exist"):
+        index = sync_skills(skills_dir, opencode_skills_dir, state_dir)
+
+    payload = json.loads((state_dir / "skills-index.json").read_text(encoding="utf-8"))
+    assert payload["skills"] == []
+    assert index.warnings

@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import warnings
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ KNOWN_FIELDS = {
 
 SUBAGENT_ALLOWLIST = {"review-pull-request", "create-pull-request"}
 SKIP_DIRS = {".git", ".github", "scripts", "__pycache__"}
+GENERATED_MARKER = "This skill was generated from an EFP skill asset."
 
 
 @dataclass(frozen=True)
@@ -146,7 +148,7 @@ def _render_skill_markdown(opencode_name: str, entry: SkillIndexEntry, frontmatt
     return (
         f"---\n{fm}\n---\n\n"
         f"# {title}\n\n"
-        "This skill was generated from an EFP skill asset.\n"
+        f"{GENERATED_MARKER}\n"
         f"Original EFP skill name: `{entry.efp_name}`\n"
         f"Original source path: `{entry.source_path}`\n\n"
         f"{body.rstrip()}\n\n"
@@ -207,8 +209,28 @@ def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path) ->
             f.write("\n")
         return index
 
+    discovered = _discover_skill_files(skills_dir)
+    current_opencode_names: set[str] = set()
+    for source_path in discovered:
+        content = source_path.read_text(encoding="utf-8")
+        parsed = _split_frontmatter(content)
+        if parsed is None:
+            continue
+        frontmatter, _ = parsed
+        raw_efp_name = str(frontmatter.get("name") or (source_path.parent.name if source_path.name == "skill.md" else source_path.stem))
+        current_opencode_names.add(normalize_skill_name(raw_efp_name, str(source_path.resolve())))
+
+    for child in opencode_skills_dir.iterdir():
+        if not child.is_dir() or child.name in current_opencode_names:
+            continue
+        candidate = child / "SKILL.md"
+        if not candidate.exists():
+            continue
+        if GENERATED_MARKER in candidate.read_text(encoding="utf-8"):
+            shutil.rmtree(child)
+
     name_to_source: dict[str, Path] = {}
-    for source_path in _discover_skill_files(skills_dir):
+    for source_path in discovered:
         content = source_path.read_text(encoding="utf-8")
         parsed = _split_frontmatter(content)
         if parsed is None:
