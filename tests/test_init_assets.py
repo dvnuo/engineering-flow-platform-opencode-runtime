@@ -36,3 +36,28 @@ def test_init_assets_creates_dirs_and_config(tmp_path, monkeypatch):
     assert payload["permission"]["bash"]["rm *"] == "deny"
     assert payload["permission"]["bash"]["sudo *"] == "deny"
     assert payload["permission"]["bash"]["git push *"] == "deny"
+
+
+def test_init_assets_does_not_overwrite_existing_config(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    skills = tmp_path / "skills"
+    tools = tmp_path / "tools"
+    state = tmp_path / "state"
+    config = workspace / ".opencode" / "opencode.json"
+
+    config.parent.mkdir(parents=True, exist_ok=True)
+    sentinel = {"existing": True, "permission": {"*": "deny"}}
+    config.write_text(json.dumps(sentinel), encoding="utf-8")
+
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
+    monkeypatch.setenv("EFP_TOOLS_DIR", str(tools))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(config))
+
+    init_assets(Settings.from_env())
+
+    assert json.loads(config.read_text(encoding="utf-8")) == sentinel
+    assert (workspace / ".opencode" / "skills").exists()
+    assert (workspace / ".opencode" / "tools").exists()
+    assert (workspace / ".opencode" / "agents").exists()

@@ -21,13 +21,17 @@ async def test_health_ok(monkeypatch):
     app = create_app(Settings.from_env(), opencode_client=FakeHealthyClient())
     client = TestClient(TestServer(app))
     await client.start_server()
-    resp = await client.get("/health")
-    assert resp.status == 200
-    payload = await resp.json()
-    assert payload["status"] == "ok"
-    assert payload["engine"] == "opencode"
-    assert payload["opencode_version"] == "1.14.29"
-    assert payload["opencode"]["healthy"] is True
+
+    for endpoint in ["/health", "/actuator/health"]:
+        resp = await client.get(endpoint)
+        assert resp.status == 200
+        payload = await resp.json()
+        assert payload["status"] == "ok"
+        assert payload["service"] == "efp-opencode-runtime"
+        assert payload["engine"] == "opencode"
+        assert payload["opencode_version"] == "1.14.29"
+        assert payload["opencode"]["healthy"] is True
+
     await client.close()
 
 
@@ -37,12 +41,16 @@ async def test_health_degraded(monkeypatch):
     app = create_app(Settings.from_env(), opencode_client=FakeUnhealthyClient())
     client = TestClient(TestServer(app))
     await client.start_server()
-    resp = await client.get("/health")
-    assert resp.status == 503
-    payload = await resp.json()
-    assert payload["status"] == "degraded"
-    assert payload["opencode"]["healthy"] is False
 
-    resp2 = await client.get("/actuator/health")
-    assert resp2.status == 503
+    for endpoint in ["/health", "/actuator/health"]:
+        resp = await client.get(endpoint)
+        assert resp.status == 503
+        payload = await resp.json()
+        assert payload["status"] == "degraded"
+        assert payload["service"] == "efp-opencode-runtime"
+        assert payload["engine"] == "opencode"
+        assert payload["opencode_version"] == "1.14.29"
+        assert payload["opencode"]["healthy"] is False
+        assert payload["opencode"]["error"]
+
     await client.close()

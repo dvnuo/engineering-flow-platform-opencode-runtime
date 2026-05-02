@@ -27,14 +27,14 @@ LOGS="$(docker logs "${NAME}" 2>&1)"
 [[ "${LOGS}" == *"opencode version"* ]]
 
 docker exec "${NAME}" bash -lc 'test "$(id -u)" = "10001"'
-docker exec "${NAME}" bash -lc 'test -d /workspace/.opencode/skills'
-docker exec "${NAME}" bash -lc 'test -d /workspace/.opencode/tools'
-docker exec "${NAME}" bash -lc 'test -d /workspace/.opencode/agents'
-docker exec "${NAME}" bash -lc 'test -f /workspace/.opencode/opencode.json'
-docker exec "${NAME}" bash -lc 'jq -e ".autoupdate == false" /workspace/.opencode/opencode.json >/dev/null'
-docker exec "${NAME}" bash -lc 'jq -e ".share == "disabled"" /workspace/.opencode/opencode.json >/dev/null'
-docker exec "${NAME}" bash -lc 'jq -e ".permission[\"*\"] == \"ask\"" /workspace/.opencode/opencode.json >/dev/null'
-docker exec "${NAME}" bash -lc 'jq -e ".permission.external_directory == \"deny\"" /workspace/.opencode/opencode.json >/dev/null'
+docker exec "${NAME}" test -d /workspace/.opencode/skills
+docker exec "${NAME}" test -d /workspace/.opencode/tools
+docker exec "${NAME}" test -d /workspace/.opencode/agents
+docker exec "${NAME}" test -f /workspace/.opencode/opencode.json
+docker exec "${NAME}" jq -e '.autoupdate == false' /workspace/.opencode/opencode.json >/dev/null
+docker exec "${NAME}" jq -e '.share == "disabled"' /workspace/.opencode/opencode.json >/dev/null
+docker exec "${NAME}" jq -e '.permission["*"] == "ask"' /workspace/.opencode/opencode.json >/dev/null
+docker exec "${NAME}" jq -e '.permission.external_directory == "deny"' /workspace/.opencode/opencode.json >/dev/null
 docker exec "${NAME}" bash -lc 'opencode --version | grep -F "1.14.29"'
 
 echo "smoke passed"

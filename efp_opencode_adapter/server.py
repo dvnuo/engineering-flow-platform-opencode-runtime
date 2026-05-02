@@ -58,6 +58,9 @@ def main() -> None:
     parser.add_argument("--opencode-url", default=None)
     args = parser.parse_args()
     settings = Settings.from_env(opencode_url=args.opencode_url)
+    print(f"adapter listening on {args.host}:{args.port}")
+    print(f"opencode url {settings.opencode_url}")
+    print(f"opencode version {settings.opencode_version}")
     web.run_app(create_app(settings), host=args.host, port=args.port)
 
 
