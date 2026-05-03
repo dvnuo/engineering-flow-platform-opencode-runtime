@@ -15,6 +15,18 @@ def test_skill_allow_unknown_deny():
     assert "beta" not in perm["skill"] and perm["skill"]["*"] == "deny"
 
 
+def test_denied_skill_type_overrides_allowed_skill():
+    p = build_permission({"allowed_capability_ids": ["opencode.skill.alpha"], "denied_capability_types": ["skill"]}, {"skills": [{"opencode_name": "alpha"}]}, None)
+    assert p["skill"]["alpha"] == "deny"
+    assert p["skill"]["*"] == "deny"
+
+
+def test_allowed_capability_type_skill_allows_known_skills_only():
+    p = build_permission({"allowed_capability_types": ["skill"]}, {"skills": [{"opencode_name": "alpha"}]}, None)
+    assert p["skill"]["alpha"] == "allow"
+    assert "beta" not in p["skill"]
+
+
 def test_llm_tools_list_and_dict_and_tool_loop_no_auto_allow():
     tools = {"tools": [{"capability_id": "tool.read", "name": "efp_read", "policy_tags": ["read_only"]}, {"capability_id": "tool.upd", "name": "efp_upd", "policy_tags": ["mutation"]}]}
     p1 = build_permission({"llm": {"tools": ["tool.read", "tool.upd"], "tool_loop": True}}, None, tools)
@@ -38,3 +50,20 @@ def test_reserved_bash_not_overridden():
     assert p["bash"]["rm *"] == "deny"
     assert p["bash"]["sudo *"] == "deny"
     assert p["bash"]["git push *"] == "deny"
+
+
+def test_allowed_external_systems_filter_tools():
+    tools = {"tools": [{"capability_id": "tool.github.read", "name": "efp_github_read", "domain": "github", "policy_tags": ["read_only", "github"]}, {"capability_id": "tool.jira.read", "name": "efp_jira_read", "domain": "jira", "policy_tags": ["read_only", "jira"]}]}
+    p = build_permission({"allowed_capability_types": ["adapter_action"], "allowed_external_systems": ["jira"]}, None, tools)
+    assert p["efp_jira_read"] == "allow"
+    assert p["efp_github_read"] == "deny"
+    p2 = build_permission({"allowed_capability_types": ["adapter_action"]}, None, tools)
+    assert p2["efp_jira_read"] == "allow" and p2["efp_github_read"] == "allow"
+
+
+def test_runtime_compat_and_opencode_name_priority():
+    tools = {"tools": [{"capability_id": "tool.native", "name": "native_read", "opencode_name": "efp_native_read", "policy_tags": ["read_only"], "runtime_compat": ["native"]}, {"capability_id": "tool.github.get_pr", "name": "github_get_pr", "opencode_name": "efp_github_get_pr", "policy_tags": ["read_only"], "runtime_compat": ["opencode"]}]}
+    p = build_permission({"allowed_capability_types": ["adapter_action"], "allowed_capability_ids": ["tool.github.get_pr", "tool.native"]}, None, tools)
+    assert p["efp_github_get_pr"] == "allow"
+    assert "github_get_pr" not in p
+    assert "efp_native_read" not in p

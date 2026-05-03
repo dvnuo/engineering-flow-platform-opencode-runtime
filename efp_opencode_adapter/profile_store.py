@@ -35,6 +35,27 @@ def redact_secrets(value: Any) -> Any:
     return value
 
 
+def strip_secret_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if any(marker in key.lower() for marker in SECRET_KEYS):
+                continue
+            if key == "required" and isinstance(item, list):
+                out[key] = [x for x in item if not (isinstance(x, str) and any(marker in x.lower() for marker in SECRET_KEYS))]
+            else:
+                out[key] = strip_secret_fields(item)
+        return out
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            if isinstance(item, str) and any(marker in item.lower() for marker in SECRET_KEYS):
+                continue
+            result.append(strip_secret_fields(item))
+        return result
+    return value
+
+
 class ProfileOverlayStore:
     def __init__(self, settings: Settings):
         self.path = settings.adapter_state_dir / "runtime-profile-overlay.json"

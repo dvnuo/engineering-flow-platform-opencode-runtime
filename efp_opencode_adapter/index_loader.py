@@ -33,6 +33,19 @@ def load_skills_index(settings: Settings) -> dict[str, Any]:
     return read_json_file(settings.adapter_state_dir / "skills-index.json") or {"skills": []}
 
 
+def is_opencode_compatible_tool(tool: dict[str, Any]) -> bool:
+    compat = tool.get("runtime_compat")
+    if compat is None:
+        return True
+    if isinstance(compat, str):
+        values = {compat.lower()}
+    elif isinstance(compat, list):
+        values = {str(x).lower() for x in compat}
+    else:
+        return True
+    return "opencode" in values
+
+
 def normalize_tool_descriptor(raw: dict) -> dict[str, Any] | None:
     cap_id = raw.get("capability_id") or raw.get("tool_id") or raw.get("action_id")
     name = raw.get("opencode_name") or raw.get("name")
@@ -47,7 +60,7 @@ def normalize_tool_descriptor(raw: dict) -> dict[str, Any] | None:
         "policy_tags": [str(x) for x in (raw.get("policy_tags") or []) if isinstance(x, (str, int, float))],
         "source_ref": str(raw.get("source_ref") or "tools_repo"),
     }
-    for key in ("input_schema", "output_schema", "requires_identity_binding", "domain", "runtime_compat"):
+    for key in ("input_schema", "output_schema", "requires_identity_binding", "domain", "runtime_compat", "external_system", "system_type"):
         if key in raw:
             descriptor[key] = raw[key]
     return descriptor
@@ -74,17 +87,13 @@ def load_tools_index(settings: Settings) -> dict[str, Any]:
     ]
     for path in paths:
         data: dict[str, Any] | list[Any] | None
-        if path.suffix in {".yaml", ".yml"}:
-            data = read_yaml_file(path)
-        else:
-            loaded = read_json_file(path)
-            data = loaded
+        data = read_yaml_file(path) if path.suffix in {".yaml", ".yml"} else read_json_file(path)
         if data is None:
             continue
         normalized = []
         for item in _extract_tool_items(data):
             tool = normalize_tool_descriptor(item)
-            if tool is not None:
+            if tool is not None and is_opencode_compatible_tool(tool):
                 normalized.append(tool)
         return {"tools": normalized}
     return {"tools": []}
