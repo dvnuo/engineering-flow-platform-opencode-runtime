@@ -122,7 +122,10 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
     if not isinstance(message, str) or not message.strip():
         raise web.HTTPBadRequest(text=json.dumps({"error": "message_required"}), content_type="application/json")
 
-    metadata = payload.get("metadata") or {}
+    metadata_raw = payload.get("metadata") or {}
+    if not isinstance(metadata_raw, dict):
+        raise web.HTTPBadRequest(text=json.dumps({"error": "metadata_must_be_object"}), content_type="application/json")
+    metadata = metadata_raw
     portal_session_id = payload.get("session_id") or str(uuid4())
     request_id = payload.get("request_id") or f"chat-{uuid4()}"
     title = _normalize_title(metadata.get("title") or metadata.get("name") or message[:60])
@@ -231,13 +234,23 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
 
 
 async def chat_handler(request: web.Request) -> web.Response:
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        raise web.HTTPBadRequest(text=json.dumps({"error": "invalid_json"}), content_type="application/json")
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text=json.dumps({"error": "invalid_json"}), content_type="application/json")
     result = await handle_chat_payload(request, payload)
     return web.json_response(result)
 
 
 async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
-    payload = dict(await request.json())
+    try:
+        raw_payload = await request.json()
+    except Exception:
+        raw_payload = None
+
+    payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
     payload.setdefault("request_id", f"chat-{uuid4()}")
     payload.setdefault("session_id", str(uuid4()))
     resp = web.StreamResponse(
@@ -257,6 +270,10 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     }
     await resp.write(f"event: runtime_event\ndata: {json.dumps(runtime_evt, ensure_ascii=False)}\n\n".encode())
     try:
+        if raw_payload is None:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "invalid_json"}), content_type="application/json")
+        if not isinstance(raw_payload, dict):
+            raise web.HTTPBadRequest(text=json.dumps({"error": "invalid_json"}), content_type="application/json")
         result = await handle_chat_payload(request, payload)
         await resp.write(f"event: final\ndata: {json.dumps(result, ensure_ascii=False)}\n\n".encode())
         await resp.write(b"event: done\ndata: {\"ok\":true}\n\n")
