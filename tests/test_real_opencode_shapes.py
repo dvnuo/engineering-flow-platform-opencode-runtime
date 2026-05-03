@@ -250,3 +250,92 @@ def test_usage_tracker_malformed_numeric_usage_defaults_to_zero(tmp_path):
     assert rec["input_tokens"] == 0
     assert rec["output_tokens"] == 0
     assert rec["cost"] == 0.0
+
+
+class NonFiniteUsageOpenCodeClient(FakeOpenCodeClient):
+    async def send_message(self, session_id, *, parts, model, agent, system=None):
+        return {
+            "message": {
+                "role": "assistant",
+                "parts": [{"type": "text", "text": "ok"}],
+            },
+            "usage": {
+                "input_tokens": "inf",
+                "output_tokens": "nan",
+                "cost": "nan",
+            },
+            "model": "non-finite-model",
+            "provider": "non-finite-provider",
+        }
+
+
+@pytest.mark.asyncio
+async def test_chat_api_treats_non_finite_usage_as_zero_not_500(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+
+    app = create_app(Settings.from_env(), opencode_client=NonFiniteUsageOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    resp = await client.post("/api/chat", json={"message": "hello", "session_id": "s-non-finite"})
+    assert resp.status == 200
+    text = await resp.text()
+    assert "NaN" not in text
+    assert "Infinity" not in text
+
+    body = json.loads(text)
+    assert body["response"] == "ok"
+    assert body["usage"]["model"] == "non-finite-model"
+    assert body["usage"]["provider"] == "non-finite-provider"
+    assert body["usage"]["input_tokens"] == 0
+    assert body["usage"]["output_tokens"] == 0
+    assert body["usage"]["cost"] == 0.0
+
+    usage_resp = await client.get("/api/usage?days=30")
+    assert usage_resp.status == 200
+    usage_text = await usage_resp.text()
+    assert "NaN" not in usage_text
+    assert "Infinity" not in usage_text
+
+    usage = json.loads(usage_text)
+    assert usage["global"]["total_requests"] >= 1
+    assert usage["global"]["total_input_tokens"] == 0
+    assert usage["global"]["total_output_tokens"] == 0
+    assert usage["global"]["total_cost"] == 0.0
+
+    await client.close()
+
+
+def test_usage_tracker_non_finite_numeric_usage_defaults_to_zero(tmp_path):
+    tracker = UsageTracker(tmp_path / "usage.jsonl")
+
+    rec = tracker.record_chat(
+        session_id="s",
+        request_id="r",
+        model=None,
+        provider=None,
+        response_payload={
+            "usage": {
+                "input_tokens": "inf",
+                "output_tokens": "nan",
+                "cost": "1e309",
+            },
+            "model": "m",
+            "provider": "p",
+        },
+        input_text="hello",
+        output_text="ok",
+    )
+
+    assert rec["model"] == "m"
+    assert rec["provider"] == "p"
+    assert rec["input_tokens"] == 0
+    assert rec["output_tokens"] == 0
+    assert rec["cost"] == 0.0
+
+    summary = tracker.summarize(days=30)
+    assert summary["global"]["total_input_tokens"] == 0
+    assert summary["global"]["total_output_tokens"] == 0
+    assert summary["global"]["total_cost"] == 0.0

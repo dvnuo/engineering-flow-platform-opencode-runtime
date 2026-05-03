@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -59,8 +60,11 @@ def _safe_int(value: Any, default: int = 0) -> int:
             value = value.strip()
             if not value:
                 return default
-        return int(float(value))
-    except (TypeError, ValueError):
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return default
+        return int(numeric)
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -72,8 +76,11 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
             value = value.strip()
             if not value:
                 return default
-        return float(value)
-    except (TypeError, ValueError):
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return default
+        return numeric
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -125,19 +132,21 @@ class UsageTracker:
             out = {}
             for r in items:
                 k = r.get(key, "unknown") or "unknown"
+                if not isinstance(k, str):
+                    k = str(k)
                 x = out.setdefault(k, {key: k, "total_requests": 0, "total_messages": 0, "total_input_tokens": 0, "total_output_tokens": 0, "total_cost": 0.0})
-                x["total_requests"] += int(r.get("requests", 0))
-                x["total_messages"] += int(r.get("messages", 0))
-                x["total_input_tokens"] += int(r.get("input_tokens", 0))
-                x["total_output_tokens"] += int(r.get("output_tokens", 0))
-                x["total_cost"] += float(r.get("cost", 0.0))
+                x["total_requests"] += _safe_int(r.get("requests"))
+                x["total_messages"] += _safe_int(r.get("messages"))
+                x["total_input_tokens"] += _safe_int(r.get("input_tokens"))
+                x["total_output_tokens"] += _safe_int(r.get("output_tokens"))
+                x["total_cost"] += _safe_float(r.get("cost"))
             return list(out.values())
 
         g = {
-            "total_requests": sum(int(r.get("requests", 0)) for r in rows),
-            "total_messages": sum(int(r.get("messages", 0)) for r in rows),
-            "total_input_tokens": sum(int(r.get("input_tokens", 0)) for r in rows),
-            "total_output_tokens": sum(int(r.get("output_tokens", 0)) for r in rows),
-            "total_cost": sum(float(r.get("cost", 0.0)) for r in rows),
+            "total_requests": sum(_safe_int(r.get("requests")) for r in rows),
+            "total_messages": sum(_safe_int(r.get("messages")) for r in rows),
+            "total_input_tokens": sum(_safe_int(r.get("input_tokens")) for r in rows),
+            "total_output_tokens": sum(_safe_int(r.get("output_tokens")) for r in rows),
+            "total_cost": sum(_safe_float(r.get("cost")) for r in rows),
         }
         return {"period_days": days, "global": g, "by_model": agg(rows, "model"), "by_provider": agg(rows, "provider")}
