@@ -27,6 +27,7 @@ def test_init_assets_creates_dirs_and_config(tmp_path, monkeypatch):
     assert (workspace / ".opencode" / "skills").exists()
     assert (workspace / ".opencode" / "tools").exists()
     assert (workspace / ".opencode" / "agents").exists()
+    assert (workspace / ".opencode" / "agents" / "efp-main.md").exists()
     assert config.exists()
     assert (workspace / ".opencode" / "skills" / "sample-skill" / "SKILL.md").exists()
     assert (state / "skills-index.json").exists()
@@ -41,6 +42,7 @@ def test_init_assets_creates_dirs_and_config(tmp_path, monkeypatch):
     assert payload["permission"]["bash"]["rm *"] == "deny"
     assert payload["permission"]["bash"]["sudo *"] == "deny"
     assert payload["permission"]["bash"]["git push *"] == "deny"
+    assert "efp-main" in payload["agent"]
 
 
 def test_init_assets_does_not_overwrite_existing_config(tmp_path, monkeypatch):
