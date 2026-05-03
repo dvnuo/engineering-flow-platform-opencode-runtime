@@ -1,3 +1,4 @@
+import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -286,4 +287,137 @@ async def test_chat_stream_request_id_must_be_string_emits_error(tmp_path, monke
     assert res.status == 200
     assert "event: error" in body
     assert "request_id_must_be_string" in body
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_with_corrupted_existing_chatlog_recovers_and_succeeds(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    chatlogs_dir = state_dir / "chatlogs"
+    chatlogs_dir.mkdir(parents=True)
+    (chatlogs_dir / "s-corrupt.json").write_text("{ bad json", encoding="utf-8")
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state_dir))
+
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    before = await client.get("/api/sessions/s-corrupt/chatlog")
+    assert before.status == 200
+    before_body = await before.json()
+    assert before_body["success"] is True
+    assert before_body["chatlog"] is None
+    assert before_body["metadata"]["corrupted_chatlog"] is True
+
+    resp = await client.post(
+        "/api/chat",
+        json={"message": "hello", "session_id": "s-corrupt"},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["response"]
+    assert body["usage"]["requests"] == 1
+
+    event_types = [event["type"] for event in body["runtime_events"]]
+    assert "execution.started" in event_types
+    assert "llm_thinking" in event_types
+    assert "complete" in event_types
+    assert "execution.completed" in event_types
+
+    after = await client.get("/api/sessions/s-corrupt/chatlog")
+    assert after.status == 200
+    after_body = await after.json()
+    assert after_body["success"] is True
+    assert after_body["status"] == "success"
+    assert after_body["chatlog"]["entries"][-1]["status"] == "success"
+    assert after_body["chatlog"]["entries"][-1]["response"] == body["response"]
+
+    backups = list(chatlogs_dir.glob("s-corrupt.json.corrupt-*"))
+    assert backups
+    assert backups[0].read_text(encoding="utf-8") == "{ bad json"
+
+    await client.close()
+
+
+
+@pytest.mark.asyncio
+async def test_app_starts_with_corrupted_session_index_and_chat_succeeds(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    sessions_dir = state_dir / "sessions"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "index.json").write_text("{ bad json", encoding="utf-8")
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state_dir))
+
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    health = await client.get("/health")
+    assert health.status == 200
+
+    resp = await client.post(
+        "/api/chat",
+        json={"message": "hello", "session_id": "s-after-corrupt-index"},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["response"]
+    assert body["usage"]["requests"] == 1
+    assert any(e["type"] == "execution.completed" for e in body["runtime_events"])
+
+    chatlog = await (await client.get("/api/sessions/s-after-corrupt-index/chatlog")).json()
+    assert chatlog["success"] is True
+    assert chatlog["status"] == "success"
+
+    backups = list(sessions_dir.glob("index.json.corrupt-*"))
+    assert backups
+    assert backups[0].read_text(encoding="utf-8") == "{ bad json"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_app_starts_with_malformed_session_record_and_lists_sessions(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    sessions_dir = state_dir / "sessions"
+    sessions_dir.mkdir(parents=True)
+
+    (sessions_dir / "index.json").write_text(
+        json.dumps(
+            {
+                "sessions": {
+                    "s1": {
+                        "portal_session_id": "s1",
+                        "opencode_session_id": "missing-opencode-session",
+                        "title": "Recovered Session",
+                        "message_count": "bad",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state_dir))
+
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    res = await client.get("/api/sessions")
+    assert res.status == 200
+    body = await res.json()
+
+    assert body["sessions"]
+    row = body["sessions"][0]
+    assert row["session_id"] == "s1"
+    assert row["name"] == "Recovered Session"
+    assert row["message_count"] == 0
+
+    detail = await client.get("/api/sessions/s1/chatlog")
+    assert detail.status == 200
+
     await client.close()

@@ -13,6 +13,9 @@ class CompatStatePaths:
     sessions_dir: Path
     attachments_dir: Path
     usage_dir: Path
+    chatlogs_dir: Path
+    usage_file: Path
+    portal_metadata_pending_file: Path
 
 
 def ensure_state_dirs(settings: Settings) -> CompatStatePaths:
@@ -23,7 +26,10 @@ def ensure_state_dirs(settings: Settings) -> CompatStatePaths:
         sessions_dir=root / "sessions",
         attachments_dir=root / "attachments",
         usage_dir=root / "usage",
+        chatlogs_dir=root / "chatlogs",
+        usage_file=root / "usage.jsonl",
+        portal_metadata_pending_file=root / "portal_metadata_pending.jsonl",
     )
-    for p in [paths.root, paths.tasks_dir, paths.sessions_dir, paths.attachments_dir, paths.usage_dir]:
+    for p in [paths.root, paths.tasks_dir, paths.sessions_dir, paths.attachments_dir, paths.usage_dir, paths.chatlogs_dir]:
         p.mkdir(parents=True, exist_ok=True)
     return paths

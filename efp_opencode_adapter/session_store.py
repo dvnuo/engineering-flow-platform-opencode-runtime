@@ -10,6 +10,19 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _safe_int(value, default: int = 0) -> int:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return default
+        return int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 @dataclass
 class SessionRecord:
     portal_session_id: str
@@ -33,34 +46,67 @@ class SessionStore:
         self._sessions: dict[str, SessionRecord] = {}
         self.load()
 
+    def _quarantine_corrupt_index(self) -> Path | None:
+        if not self.index_path.exists():
+            return None
+
+        stamp = _utc_now_iso().replace(":", "").replace("+", "_").replace("/", "_")
+        backup = self.index_path.with_name(f"{self.index_path.name}.corrupt-{stamp}")
+
+        try:
+            self.index_path.replace(backup)
+            return backup
+        except Exception:
+            return None
+
     def load(self) -> None:
         if not self.index_path.exists():
             self._sessions = {}
             return
+
         try:
             payload = json.loads(self.index_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid session index json: {exc}") from exc
+        except Exception:
+            self._quarantine_corrupt_index()
+            self._sessions = {}
+            return
+
+        if not isinstance(payload, dict):
+            self._quarantine_corrupt_index()
+            self._sessions = {}
+            return
+
         sessions = payload.get("sessions", {})
+        if not isinstance(sessions, dict):
+            self._sessions = {}
+            return
+
         loaded: dict[str, SessionRecord] = {}
+
         for portal_id, raw in sessions.items():
             if not isinstance(raw, dict):
                 continue
-            kwargs = {
-                "portal_session_id": raw.get("portal_session_id", portal_id),
-                "opencode_session_id": raw.get("opencode_session_id", ""),
-                "title": raw.get("title", "Chat"),
-                "agent": raw.get("agent"),
-                "model": raw.get("model"),
-                "created_at": raw.get("created_at", _utc_now_iso()),
-                "updated_at": raw.get("updated_at", _utc_now_iso()),
-                "last_message": raw.get("last_message", ""),
-                "message_count": int(raw.get("message_count", 0) or 0),
-                "deleted": bool(raw.get("deleted", False)),
-                "partial_recovery": bool(raw.get("partial_recovery", False)),
-            }
+
+            try:
+                kwargs = {
+                    "portal_session_id": str(raw.get("portal_session_id", portal_id)),
+                    "opencode_session_id": str(raw.get("opencode_session_id", "") or ""),
+                    "title": str(raw.get("title", "Chat") or "Chat"),
+                    "agent": raw.get("agent") if isinstance(raw.get("agent"), str) else None,
+                    "model": raw.get("model") if isinstance(raw.get("model"), str) else None,
+                    "created_at": raw.get("created_at") if isinstance(raw.get("created_at"), str) else _utc_now_iso(),
+                    "updated_at": raw.get("updated_at") if isinstance(raw.get("updated_at"), str) else _utc_now_iso(),
+                    "last_message": raw.get("last_message") if isinstance(raw.get("last_message"), str) else "",
+                    "message_count": _safe_int(raw.get("message_count")),
+                    "deleted": bool(raw.get("deleted", False)),
+                    "partial_recovery": bool(raw.get("partial_recovery", False)),
+                }
+            except Exception:
+                continue
+
             if kwargs["opencode_session_id"]:
-                loaded[portal_id] = SessionRecord(**kwargs)
+                loaded[str(portal_id)] = SessionRecord(**kwargs)
+
         self._sessions = loaded
 
     reload = load

@@ -29,6 +29,31 @@ async def test_chat_and_stream(tmp_path, monkeypatch):
     assert index.exists()
 
     sid = p1["session_id"]
+    assert p1["runtime_events"]
+    assert any(e["type"] == "execution.started" for e in p1["runtime_events"])
+    assert any(e["type"] == "llm_thinking" for e in p1["runtime_events"])
+    assert any(e["type"] == "complete" for e in p1["runtime_events"])
+    assert any(e["type"] == "execution.completed" for e in p1["runtime_events"])
+    assert p1["usage"]["requests"] == 1
+    assert p1["context_state"]["summary"]
+
+    chatlog_resp = await client.get(f"/api/sessions/{sid}/chatlog")
+    chatlog = await chatlog_resp.json()
+    assert chatlog["success"] is True
+    assert chatlog["chatlog"]["entries"]
+    assert chatlog["runtime_events"]
+    assert chatlog["request_id"]
+    assert chatlog["status"] == "success"
+    assert chatlog["chatlog"]["entries"][-1]["status"] == "success"
+    assert chatlog["chatlog"]["entries"][-1]["response"] == "echo: hello"
+    assert chatlog["context_state"]["current_state"] == "completed"
+    assert chatlog["llm_debug"]["usage"]["requests"] == 1
+
+    chatlog_types = {e["type"] for e in chatlog["runtime_events"]}
+    assert "execution.started" in chatlog_types
+    assert "llm_thinking" in chatlog_types
+    assert "complete" in chatlog_types
+    assert "execution.completed" in chatlog_types
     op_sid = p1["_llm_debug"]["opencode_session_id"]
     r2 = await client.post("/api/chat", json={"message": "again", "session_id": sid})
     p2 = await r2.json()
