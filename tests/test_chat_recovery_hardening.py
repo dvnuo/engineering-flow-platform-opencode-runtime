@@ -179,3 +179,111 @@ async def test_chat_stream_runtime_profile_must_be_object_emits_error(tmp_path, 
     assert "event: error" in body
     assert "runtime_profile_must_be_object" in body
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_session_id_must_be_string(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    res = await client.post("/api/chat", json={"message": "hello", "session_id": ["bad"]})
+    payload = await res.json()
+
+    assert res.status == 400
+    assert payload["error"] == "session_id_must_be_string"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_session_id_dict_returns_400(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    res = await client.post("/api/chat", json={"message": "hello", "session_id": {"bad": "x"}})
+    payload = await res.json()
+    assert res.status == 400
+    assert payload["error"] == "session_id_must_be_string"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_request_id_must_be_string(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    res = await client.post("/api/chat", json={"message": "hello", "request_id": ["bad"]})
+    payload = await res.json()
+    assert res.status == 400
+    assert payload["error"] == "request_id_must_be_string"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_empty_session_and_request_ids_are_generated(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    res = await client.post("/api/chat", json={"message": "hello", "session_id": "   ", "request_id": "   "})
+    payload = await res.json()
+
+    assert res.status == 200
+    assert isinstance(payload["session_id"], str)
+    assert payload["session_id"].strip()
+    assert isinstance(payload["request_id"], str)
+    assert payload["request_id"].startswith("chat-")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_explicit_request_id_is_preserved(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    res = await client.post("/api/chat", json={"message": "hello", "request_id": "req-1"})
+    payload = await res.json()
+    assert res.status == 200
+    assert payload["request_id"] == "req-1"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_session_id_must_be_string_emits_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    res = await client.post("/api/chat/stream", json={"message": "hello", "session_id": ["bad"]})
+    body = await res.text()
+
+    assert res.status == 200
+    assert "text/event-stream" in res.headers.get("Content-Type", "")
+    assert "event: error" in body
+    assert "session_id_must_be_string" in body
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_request_id_must_be_string_emits_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    res = await client.post("/api/chat/stream", json={"message": "hello", "request_id": ["bad"]})
+    body = await res.text()
+
+    assert res.status == 200
+    assert "event: error" in body
+    assert "request_id_must_be_string" in body
+    await client.close()

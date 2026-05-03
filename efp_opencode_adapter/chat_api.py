@@ -57,6 +57,43 @@ def _optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+
+
+def _optional_nonempty_string_from_payload(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    generated: str,
+    error: str,
+) -> str:
+    if key not in payload or payload.get(key) is None:
+        return generated
+
+    value = payload.get(key)
+    if not isinstance(value, str):
+        raise _bad_request(error)
+
+    value = value.strip()
+    return value or generated
+
+
+def _portal_session_id_from_payload(payload: dict[str, Any]) -> str:
+    return _optional_nonempty_string_from_payload(
+        payload,
+        "session_id",
+        generated=str(uuid4()),
+        error="session_id_must_be_string",
+    )
+
+
+def _request_id_from_payload(payload: dict[str, Any]) -> str:
+    return _optional_nonempty_string_from_payload(
+        payload,
+        "request_id",
+        generated=f"chat-{uuid4()}",
+        error="request_id_must_be_string",
+    )
+
 def _normalize_title(raw: Any) -> str:
     text = re.sub(r"\s+", " ", raw if isinstance(raw, str) else "").strip()
     return text or "Chat"
@@ -151,8 +188,8 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
     metadata = _metadata_from_payload(payload)
     runtime_profile = _runtime_profile_from_metadata(metadata)
 
-    portal_session_id = payload.get("session_id") or str(uuid4())
-    request_id = payload.get("request_id") or f"chat-{uuid4()}"
+    portal_session_id = _portal_session_id_from_payload(payload)
+    request_id = _request_id_from_payload(payload)
     title_source = _optional_str(metadata.get("title")) or _optional_str(metadata.get("name")) or message[:60]
     title = _normalize_title(title_source)
     model = _optional_str(metadata.get("model")) or _optional_str(runtime_profile.get("model"))
@@ -276,9 +313,38 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     except Exception:
         raw_payload = None
 
-    payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
-    payload.setdefault("request_id", f"chat-{uuid4()}")
-    payload.setdefault("session_id", str(uuid4()))
+    if raw_payload is None or not isinstance(raw_payload, dict):
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+        await resp.prepare(request)
+        await resp.write(b'event: error\ndata: {"error":"invalid_json"}\n\n')
+        await resp.write_eof()
+        return resp
+
+    payload = dict(raw_payload)
+    try:
+        payload["session_id"] = _portal_session_id_from_payload(payload)
+        payload["request_id"] = _request_id_from_payload(payload)
+    except web.HTTPException as exc:
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+        await resp.prepare(request)
+        await resp.write(f"event: error\ndata: {exc.text}\n\n".encode())
+        await resp.write_eof()
+        return resp
+
     resp = web.StreamResponse(
         status=200,
         headers={
@@ -296,10 +362,6 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     }
     await resp.write(f"event: runtime_event\ndata: {json.dumps(runtime_evt, ensure_ascii=False)}\n\n".encode())
     try:
-        if raw_payload is None:
-            raise web.HTTPBadRequest(text=json.dumps({"error": "invalid_json"}), content_type="application/json")
-        if not isinstance(raw_payload, dict):
-            raise web.HTTPBadRequest(text=json.dumps({"error": "invalid_json"}), content_type="application/json")
         result = await handle_chat_payload(request, payload)
         await resp.write(f"event: final\ndata: {json.dumps(result, ensure_ascii=False)}\n\n".encode())
         await resp.write(b"event: done\ndata: {\"ok\":true}\n\n")
