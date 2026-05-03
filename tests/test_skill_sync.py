@@ -170,3 +170,17 @@ def test_missing_skills_dir_writes_empty_index(tmp_path):
     payload = json.loads((state_dir / "skills-index.json").read_text(encoding="utf-8"))
     assert payload["skills"] == []
     assert index.warnings
+
+
+def test_skill_sync_yaml_list_tools(tmp_path):
+    skills_dir = tmp_path / "skills"
+    opencode_skills_dir = tmp_path / "workspace/.opencode/skills"
+    state_dir = tmp_path / "state"
+    (skills_dir / "yaml-list").mkdir(parents=True)
+    (skills_dir / "yaml-list/skill.md").write_text(
+        "---\nname: yaml-list\ndescription: YAML list\ntools:\n  - github_get_pr\n  - github_get_pr_files\n---\n\nBody\n",
+        encoding="utf-8",
+    )
+    index = sync_skills(skills_dir, opencode_skills_dir, state_dir)
+    entry = next(x for x in index.skills if x.opencode_name == "yaml-list")
+    assert entry.tools == ["github_get_pr", "github_get_pr_files"]

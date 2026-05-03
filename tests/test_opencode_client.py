@@ -90,6 +90,27 @@ async def test_health_uses_basic_auth_when_password_set(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_put_auth_uses_basic_auth(monkeypatch):
+    app = web.Application()
+    expected = "Basic " + base64.b64encode(b"opencode:test-password").decode()
+
+    async def put_auth(request: web.Request):
+        if request.headers.get("Authorization") != expected:
+            return web.json_response({}, status=401)
+        return web.json_response({}, status=200)
+
+    app.router.add_put("/auth/anthropic", put_auth)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("OPENCODE_SERVER_USERNAME", "opencode")
+    monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "test-password")
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    result = await OpenCodeClient(Settings.from_env()).put_auth("anthropic", "secret-value")
+    assert result["success"] is True
+    await server.close()
+
+
+@pytest.mark.asyncio
 async def test_prompt_async_accepts_204(monkeypatch):
     app = web.Application()
 
@@ -104,6 +125,46 @@ async def test_prompt_async_accepts_204(monkeypatch):
     client = OpenCodeClient(Settings.from_env())
     result = await client.prompt_async("ses-1", {"parts": [{"type": "text", "text": "hi"}]})
     assert result is None
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_put_auth_redacts_secret_on_exception(monkeypatch):
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
+    result = await OpenCodeClient(Settings.from_env()).put_auth("anthropic", "SECRET-XYZ")
+    assert result["success"] is False
+    assert "SECRET-XYZ" not in result.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_patch_config_pending_restart(monkeypatch):
+    app = web.Application()
+
+    async def patch(_):
+        return web.json_response({}, status=404)
+
+    app.router.add_patch("/config", patch)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    result = await OpenCodeClient(Settings.from_env()).patch_config({"a": 1})
+    assert result["pending_restart"] is True
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_unsupported_returns_empty(monkeypatch):
+    app = web.Application()
+
+    async def mcp(_):
+        return web.json_response({}, status=404)
+
+    app.router.add_get("/mcp", mcp)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    result = await OpenCodeClient(Settings.from_env()).mcp()
+    assert result == {"success": False, "tools": []}
     await server.close()
 
 

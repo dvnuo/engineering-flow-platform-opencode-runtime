@@ -1,39 +1,11 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
+from .opencode_config import build_opencode_config, write_main_agent_prompt, write_opencode_config
 from .settings import Settings
 from .skill_sync import sync_skills
 
-
-def _minimal_config() -> dict:
-    return {
-        "$schema": "https://opencode.ai/config.json",
-        "autoupdate": False,
-        "share": "disabled",
-        "server": {"hostname": "127.0.0.1", "port": 4096},
-        "permission": {
-            "*": "ask",
-            "read": {"*": "allow", "*.env": "deny", "*.env.*": "deny", "*.env.example": "allow"},
-            "glob": "allow",
-            "grep": "allow",
-            "edit": "ask",
-            "bash": {
-                "*": "ask",
-                "git status*": "allow",
-                "git diff*": "allow",
-                "git log*": "allow",
-                "rm *": "deny",
-                "sudo *": "deny",
-                "git push *": "deny",
-                "curl *|*bash*": "deny",
-            },
-            "external_directory": "deny",
-            "webfetch": "ask",
-            "websearch": "ask",
-        },
-    }
 
 
 def init_assets(settings: Settings) -> None:
@@ -58,14 +30,13 @@ def init_assets(settings: Settings) -> None:
         settings.adapter_state_dir,
     )
 
+    write_main_agent_prompt(settings)
     config_path = settings.opencode_config_path
     if config_path.exists():
         print(f"{config_path} exists, leaving unchanged")
         return
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    with config_path.open("w", encoding="utf-8") as f:
-        json.dump(_minimal_config(), f, indent=2)
-        f.write("\n")
+    config, _, _ = build_opencode_config(settings, runtime_config=None)
+    write_opencode_config(settings, config)
     print(f"Created {config_path}")
 
 
