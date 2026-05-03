@@ -45,6 +45,8 @@ async def test_chat_and_stream(tmp_path, monkeypatch):
     body = await rs.text()
     assert rs.status == 200
     assert "text/event-stream" in rs.headers.get("Content-Type", "")
+    assert "event: runtime_event" in body
     assert "event: final" in body
     assert "event: done" in body
+    assert body.index("event: runtime_event") < body.index("event: final")
     await client.close()

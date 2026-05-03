@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 import aiohttp
@@ -110,8 +112,50 @@ class OpenCodeClient:
             payload["system"] = system
         return await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200, 201))
 
-    async def prompt_async(self, session_id: str, payload: dict[str, Any]) -> dict:
-        return await self._request_json("POST", f"/session/{session_id}/prompt_async", json=payload, expected_statuses=(200, 201, 202))
+    async def prompt_async(self, session_id: str, payload: dict[str, Any]) -> dict | None:
+        return await self._request_json("POST", f"/session/{session_id}/prompt_async", json=payload, expected_statuses=(200, 201, 202, 204))
+
+    async def event_stream(self, *, global_events: bool = False, timeout_seconds: int | None = None) -> AsyncIterator[dict[str, Any]]:
+        path = "/global/event" if global_events else "/event"
+        own_session = self._session is None
+        session = self._session or aiohttp.ClientSession()
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds) if timeout_seconds is not None else aiohttp.ClientTimeout(total=None)
+        try:
+            async with session.get(self._url(path), auth=self._auth(), timeout=timeout) as resp:
+                if resp.status != 200:
+                    try:
+                        payload = await resp.json()
+                    except Exception:
+                        payload = await resp.text()
+                    raise OpenCodeClientError(f"GET {path} failed with status {resp.status}", status=resp.status, payload=payload)
+
+                event_type: str | None = None
+                data_lines: list[str] = []
+                async for raw in resp.content:
+                    line = raw.decode("utf-8").rstrip("\r\n")
+                    if line.startswith("event:"):
+                        event_type = line[len("event:"):].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[len("data:"):].strip())
+                    elif line == "":
+                        if event_type or data_lines:
+                            raw_data = "\n".join(data_lines)
+                            try:
+                                event_payload = json.loads(raw_data) if raw_data else {}
+                                if not isinstance(event_payload, dict):
+                                    event_payload = {"data": event_payload}
+                            except Exception:
+                                event_payload = {"data": raw_data}
+                            if event_type:
+                                event_payload.setdefault("type", event_type)
+                            elif "type" not in event_payload:
+                                event_payload["type"] = "message"
+                            yield event_payload
+                        event_type = None
+                        data_lines = []
+        finally:
+            if own_session:
+                await session.close()
 
     async def wait_until_ready(self, timeout_seconds: int = 60) -> None:
         deadline = time.monotonic() + timeout_seconds

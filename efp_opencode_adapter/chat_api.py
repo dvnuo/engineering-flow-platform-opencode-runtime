@@ -17,7 +17,18 @@ def _utc_now_iso() -> str:
 
 
 def _extract_session_id(payload: dict[str, Any]) -> str:
-    return payload.get("id") or payload.get("session_id") or payload.get("uuid") or ""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("id", "session_id", "uuid"):
+        if payload.get(key):
+            return str(payload[key])
+    for key in ("session", "data", "info"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            nested_id = _extract_session_id(nested)
+            if nested_id:
+                return nested_id
+    return ""
 
 
 def _normalize_title(raw: str) -> str:
@@ -37,6 +48,20 @@ def message_parts_to_text(parts: list[dict[str, Any]]) -> str:
     return "\n".join(x for x in out if x)
 
 
+
+
+def _message_role(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        if isinstance(payload.get("role"), str):
+            return payload["role"]
+        info = payload.get("info")
+        if isinstance(info, dict) and isinstance(info.get("role"), str):
+            return info["role"]
+        message = payload.get("message")
+        if isinstance(message, dict):
+            return _message_role(message)
+    return None
+
 def extract_assistant_text(payload: Any) -> str:
     if isinstance(payload, str):
         return payload
@@ -46,21 +71,29 @@ def extract_assistant_text(payload: Any) -> str:
                 return payload[k]
         message = payload.get("message")
         if isinstance(message, dict):
-            if isinstance(message.get("content"), str) and message.get("content"):
-                return message["content"]
-            if isinstance(message.get("parts"), list):
-                return message_parts_to_text(message["parts"])
+            if _message_role(message) in (None, "assistant"):
+                if isinstance(message.get("content"), str) and message.get("content"):
+                    return message["content"]
+                if isinstance(message.get("parts"), list):
+                    text = message_parts_to_text(message["parts"])
+                    if text:
+                        return text
         msgs = payload.get("messages")
         if isinstance(msgs, list):
             return extract_assistant_text(msgs)
-        if isinstance(payload.get("parts"), list):
+        if isinstance(payload.get("parts"), list) and _message_role(payload) in (None, "assistant"):
             return message_parts_to_text(payload["parts"])
     if isinstance(payload, list):
         for msg in reversed(payload):
-            if isinstance(msg, dict) and msg.get("role") == "assistant":
-                return extract_assistant_text(msg)
-        if payload:
-            return extract_assistant_text(payload[-1])
+            if _message_role(msg) == "assistant":
+                text = extract_assistant_text(msg)
+                if text:
+                    return text
+        for msg in reversed(payload):
+            text = extract_assistant_text(msg)
+            if text:
+                return text
+        return ""
     return ""
 
 
@@ -86,6 +119,8 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
     if record is None:
         created = await client.create_session(title=title)
         opencode_session_id = _extract_session_id(created)
+        if not opencode_session_id:
+            raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": "create_session returned no session id"}), content_type="application/json")
         now = _utc_now_iso()
         record = SessionRecord(portal_session_id, opencode_session_id, title, agent, model, now, now, "", 0)
         store.upsert(record)
@@ -96,6 +131,8 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             if exc.status == 404:
                 created = await client.create_session(title=record.title)
                 opencode_session_id = _extract_session_id(created)
+                if not opencode_session_id:
+                    raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": "create_session returned no session id"}), content_type="application/json")
                 partial_recovery = True
                 record = SessionRecord(
                     **{
@@ -175,7 +212,9 @@ async def chat_handler(request: web.Request) -> web.Response:
 
 
 async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
-    payload = await request.json()
+    payload = dict(await request.json())
+    payload.setdefault("request_id", f"chat-{uuid4()}")
+    payload.setdefault("session_id", str(uuid4()))
     resp = web.StreamResponse(
         status=200,
         headers={
@@ -185,15 +224,15 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         },
     )
     await resp.prepare(request)
+    runtime_evt = {
+        "type": "execution.started",
+        "session_id": payload.get("session_id"),
+        "request_id": payload.get("request_id"),
+        "engine": "opencode",
+    }
+    await resp.write(f"event: runtime_event\ndata: {json.dumps(runtime_evt, ensure_ascii=False)}\n\n".encode())
     try:
         result = await handle_chat_payload(request, payload)
-        runtime_evt = {
-            "type": "execution.started",
-            "session_id": result.get("session_id"),
-            "request_id": result.get("request_id"),
-            "engine": "opencode",
-        }
-        await resp.write(f"event: runtime_event\ndata: {json.dumps(runtime_evt, ensure_ascii=False)}\n\n".encode())
         await resp.write(f"event: final\ndata: {json.dumps(result, ensure_ascii=False)}\n\n".encode())
         await resp.write(b"event: done\ndata: {\"ok\":true}\n\n")
     except web.HTTPException as exc:
