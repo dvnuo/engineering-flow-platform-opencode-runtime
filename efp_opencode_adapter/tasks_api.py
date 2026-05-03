@@ -37,16 +37,87 @@ def _extract_session_id(payload: Any) -> str:
 def _extract_response_id(payload: Any) -> str | None:
     if not isinstance(payload, dict):
         return None
-    for key in ("message_id", "id", "uuid"):
+    for key in ("message_id", "messageID", "messageId", "parentID", "id", "uuid"):
         value = payload.get(key)
         if isinstance(value, str) and value:
             return value
-    for key in ("message", "data", "info"):
+    for key in ("message", "data", "info", "properties", "payload"):
         nested = payload.get(key)
         rid = _extract_response_id(nested)
         if rid:
             return rid
     return None
+
+
+def _canonical_event(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("payload")
+    if isinstance(payload, dict) and isinstance(payload.get("type"), str):
+        return payload
+    return event
+
+
+def _collect_str_values(value: Any, keys: set[str]) -> list[str]:
+    out: list[str] = []
+    if isinstance(value, dict):
+        for key, val in value.items():
+            if key in keys and isinstance(val, str) and val:
+                out.append(val)
+            out.extend(_collect_str_values(val, keys))
+    elif isinstance(value, list):
+        for item in value:
+            out.extend(_collect_str_values(item, keys))
+    return out
+
+
+def _event_type(event: dict[str, Any]) -> str:
+    canonical = _canonical_event(event)
+    val = canonical.get("type") or canonical.get("event") or ""
+    return str(val).lower()
+
+
+def _session_ids_from_event_or_message(value: Any) -> list[str]:
+    return _collect_str_values(value, {"session_id", "sessionID", "opencode_session_id"})
+
+
+def _message_ids_from_event_or_message(value: Any) -> list[str]:
+    out: list[str] = []
+    if not isinstance(value, dict):
+        return out
+    for key in ("message_id", "messageID", "messageId", "parentID", "parent_id"):
+        val = value.get(key)
+        if isinstance(val, str) and val:
+            out.append(val)
+    info = value.get("info")
+    if isinstance(info, dict):
+        for key in ("id", "parentID", "parent_id", "messageID", "messageId", "message_id"):
+            val = info.get(key)
+            if isinstance(val, str) and val:
+                out.append(val)
+    part = value.get("part")
+    if isinstance(part, dict):
+        for key in ("messageID", "messageId", "message_id"):
+            val = part.get(key)
+            if isinstance(val, str) and val:
+                out.append(val)
+    properties = value.get("properties")
+    if isinstance(properties, dict):
+        out.extend(_message_ids_from_event_or_message(properties))
+    message = value.get("message")
+    if isinstance(message, dict):
+        out.extend(_message_ids_from_event_or_message(message))
+    data = value.get("data")
+    if isinstance(data, dict):
+        out.extend(_message_ids_from_event_or_message(data))
+    payload = value.get("payload")
+    if isinstance(payload, dict):
+        out.extend(_message_ids_from_event_or_message(payload))
+    permission = value.get("permission")
+    if isinstance(permission, dict):
+        for key in ("messageID", "messageId", "message_id"):
+            val = permission.get(key)
+            if isinstance(val, str) and val:
+                out.append(val)
+    return out
 
 
 def _message_role(payload: Any) -> str | None:
@@ -62,19 +133,33 @@ def _message_role(payload: Any) -> str | None:
     return None
 
 
-def _assistant_text_from_messages(messages: list[dict[str, Any]], start: int) -> str | None:
+def _message_matches_task(record: TaskRecord, message: dict[str, Any]) -> bool:
+    if _message_role(message) != "assistant":
+        return False
+    tracked = [x for x in [record.opencode_message_id, record.opencode_prompt_id] if x]
+    parent_ids = _collect_str_values(message, {"parentID", "parent_id"})
+    if tracked and parent_ids:
+        return any(pid in tracked for pid in parent_ids)
+    return True
+
+
+def _assistant_text_from_messages(messages: list[dict[str, Any]], start: int, record: TaskRecord) -> str | None:
     window = messages[start:] if start >= 0 else messages
-    assistant_messages = [m for m in window if _message_role(m) == "assistant"]
+    assistant_messages = [m for m in window if _message_matches_task(record, m)]
     text = extract_assistant_text(assistant_messages)
     return text or None
 
 
 def _assistant_text_from_event(event: dict[str, Any]) -> str | None:
+    canonical = _canonical_event(event)
+    event_type = _event_type(canonical)
+    if event_type == "message.part.updated" and isinstance(canonical.get("properties"), dict) and "delta" in canonical.get("properties", {}):
+        return None
     candidates: list[dict[str, Any]] = []
-    if _message_role(event) == "assistant":
-        candidates.append(event)
-    for key in ("message", "data"):
-        val = event.get(key)
+    if _message_role(canonical) == "assistant":
+        candidates.append(canonical)
+    for key in ("message", "data", "properties"):
+        val = canonical.get(key)
         if isinstance(val, dict):
             if _message_role(val) == "assistant":
                 candidates.append(val)
@@ -85,38 +170,47 @@ def _assistant_text_from_event(event: dict[str, Any]) -> str | None:
 
 
 def _event_matches_task(record: TaskRecord, event: dict[str, Any]) -> bool:
-    if event.get("task_id") == record.task_id:
+    canonical = _canonical_event(event)
+    if canonical.get("task_id") == record.task_id:
         return True
-    session_candidates = [event.get("session_id"), event.get("opencode_session_id")]
-    for key in ("message", "data"):
-        val = event.get(key)
-        if isinstance(val, dict):
-            session_candidates.extend([val.get("session_id"), val.get("opencode_session_id")])
-    for candidate in session_candidates:
-        if isinstance(candidate, str) and candidate and candidate == record.opencode_session_id:
-            return True
-    return False
+    session_ids = _session_ids_from_event_or_message(canonical)
+    if record.opencode_session_id not in session_ids:
+        return False
+    tracked = [x for x in [record.opencode_message_id, record.opencode_prompt_id] if x]
+    if not tracked:
+        return True
+    message_ids = _message_ids_from_event_or_message(canonical)
+    if not message_ids:
+        return True
+    return any(mid in tracked for mid in message_ids)
 
 
-def _permission_id_from_event(event: dict[str, Any]) -> str | None:
-    event_type = str(event.get("type") or event.get("event") or "").lower()
+def _permission_event_delta(event: dict[str, Any]) -> tuple[str | None, str | None]:
+    canonical = _canonical_event(event)
+    event_type = _event_type(canonical)
+    properties = canonical.get("properties")
+    if not isinstance(properties, dict):
+        properties = {}
+    if event_type == "permission.updated":
+        pid = properties.get("id")
+        return ("open", pid if isinstance(pid, str) and pid else "permission-request")
+    if event_type == "permission.replied":
+        pid = properties.get("permissionID")
+        return ("resolved", pid if isinstance(pid, str) and pid else None)
     if "permission" not in event_type:
-        return None
-    if any(done in event_type for done in ("granted", "approved", "denied", "resolved", "closed")):
-        return None
-    if not any(req in event_type for req in ("request", "pending", "created", "open")):
-        return None
-    for key in ("permission_id", "permissionID", "id"):
-        val = event.get(key)
-        if isinstance(val, str) and val:
-            return val
-    permission = event.get("permission")
+        return (None, None)
+    if any(x in event_type for x in ("granted", "approved", "denied", "resolved", "closed", "replied")):
+        pid = properties.get("permissionID") or canonical.get("permissionID") or canonical.get("permission_id")
+        return ("resolved", pid if isinstance(pid, str) and pid else None)
+    if any(x in event_type for x in ("request", "pending", "created", "open")):
+        pid = properties.get("id") or canonical.get("permissionID") or canonical.get("permission_id")
+        return ("open", pid if isinstance(pid, str) and pid else "permission-request")
+    permission = canonical.get("permission")
     if isinstance(permission, dict):
-        for key in ("id", "permission_id", "permissionID"):
-            val = permission.get(key)
-            if isinstance(val, str) and val:
-                return val
-    return "permission-request"
+        pid = permission.get("id") or permission.get("permissionID") or permission.get("permission_id")
+        if isinstance(pid, str) and pid:
+            return ("open", pid)
+    return (None, None)
 
 
 def _public_status_and_payload(record: TaskRecord) -> tuple[str, dict[str, Any] | None]:
@@ -243,8 +337,10 @@ async def execute_task_handler(request: web.Request) -> web.Response:
         if metadata.get("system_prompt"):
             prompt_payload["system"] = metadata.get("system_prompt")
 
+        opencode_message_id = f"efp-task-{uuid4().hex}"
+        prompt_payload["messageID"] = opencode_message_id
         prompt_result = await client.prompt_async(record.opencode_session_id, prompt_payload)
-        prompt_id = _extract_response_id(prompt_result)
+        prompt_id = _extract_response_id(prompt_result) or opencode_message_id
         record = task_store.update(task_id, status="running", started_at=utc_now_iso(), opencode_prompt_id=prompt_id, opencode_message_id=prompt_id)
         await _publish_task_event(request.app, record, "task.started", "running")
         schedule_task_collector(request.app, task_id)
@@ -267,7 +363,7 @@ async def _try_read_completion_from_messages(record: TaskRecord, client: Any) ->
     if not isinstance(messages, list):
         return None
     start = record.message_cursor or 0
-    return _assistant_text_from_messages(messages, start)
+    return _assistant_text_from_messages(messages, start, record)
 
 
 async def _try_read_completion_from_events(app: web.Application, record: TaskRecord, max_seconds: float) -> tuple[str | None, list[dict[str, Any]]]:
@@ -275,15 +371,16 @@ async def _try_read_completion_from_events(app: web.Application, record: TaskRec
     observed: list[dict[str, Any]] = []
     if not hasattr(client, "event_stream"):
         return None, observed
-    timeout = max(1, int(max_seconds))
+    timeout = max(0.01, float(max_seconds))
     try:
         async for event in client.event_stream(global_events=True, timeout_seconds=timeout):
             if not isinstance(event, dict):
                 continue
-            if not _event_matches_task(record, event):
+            canonical = _canonical_event(event)
+            if not _event_matches_task(record, canonical):
                 continue
-            observed.append(event)
-            text = _assistant_text_from_event(event)
+            observed.append(canonical)
+            text = _assistant_text_from_event(canonical)
             if text:
                 return text, observed
     except Exception:
@@ -307,9 +404,11 @@ async def collect_task_completion(app: web.Application, task_id: str) -> None:
             event_text, observed = await _try_read_completion_from_events(app, record, remaining)
             pending = list(record.pending_permission_ids or [])
             for evt in observed:
-                pid = _permission_id_from_event(evt)
-                if pid and pid not in pending:
+                action, pid = _permission_event_delta(evt)
+                if action == "open" and pid and pid not in pending:
                     pending.append(pid)
+                elif action == "resolved" and pid:
+                    pending = [x for x in pending if x != pid]
             if pending != (record.pending_permission_ids or []):
                 record = store.update(task_id, pending_permission_ids=pending)
 
