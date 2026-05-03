@@ -105,7 +105,10 @@ async def get_session_handler(request: web.Request) -> web.Response:
     record = store.get(sid)
     if not record or record.deleted:
         raise web.HTTPNotFound(text=json.dumps({"error": "session_not_found"}), content_type="application/json")
-    messages = await client.list_messages(record.opencode_session_id)
+    try:
+        messages = await client.list_messages(record.opencode_session_id)
+    except OpenCodeClientError as exc:
+        raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
     efp_messages = _to_efp_messages(messages)
     return web.json_response(
         {

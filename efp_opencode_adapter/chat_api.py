@@ -48,8 +48,6 @@ def message_parts_to_text(parts: list[dict[str, Any]]) -> str:
     return "\n".join(x for x in out if x)
 
 
-
-
 def _message_role(payload: Any) -> str | None:
     if isinstance(payload, dict):
         if isinstance(payload.get("role"), str):
@@ -61,6 +59,7 @@ def _message_role(payload: Any) -> str | None:
         if isinstance(message, dict):
             return _message_role(message)
     return None
+
 
 def extract_assistant_text(payload: Any) -> str:
     if isinstance(payload, str):
@@ -97,6 +96,27 @@ def extract_assistant_text(payload: Any) -> str:
     return ""
 
 
+async def _publish_failed(
+    bus,
+    *,
+    portal_session_id: str,
+    request_id: str,
+    opencode_session_id: str,
+    error: str,
+) -> None:
+    await bus.publish(
+        {
+            "type": "execution.failed",
+            "engine": "opencode",
+            "session_id": portal_session_id,
+            "request_id": request_id,
+            "opencode_session_id": opencode_session_id,
+            "timestamp": _utc_now_iso(),
+            "error": error,
+        }
+    )
+
+
 async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> dict[str, Any]:
     message = payload.get("message")
     if not isinstance(message, str) or not message.strip():
@@ -115,48 +135,53 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
     client = request.app["opencode_client"]
 
     partial_recovery = False
-    record = store.get(portal_session_id)
-    if record is None:
-        created = await client.create_session(title=title)
-        opencode_session_id = _extract_session_id(created)
-        if not opencode_session_id:
-            raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": "create_session returned no session id"}), content_type="application/json")
-        now = _utc_now_iso()
-        record = SessionRecord(portal_session_id, opencode_session_id, title, agent, model, now, now, "", 0)
-        store.upsert(record)
-    else:
-        try:
-            await client.get_session(record.opencode_session_id)
-        except OpenCodeClientError as exc:
-            if exc.status == 404:
-                created = await client.create_session(title=record.title)
-                opencode_session_id = _extract_session_id(created)
-                if not opencode_session_id:
-                    raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": "create_session returned no session id"}), content_type="application/json")
-                partial_recovery = True
-                record = SessionRecord(
-                    **{
-                        **record.__dict__,
-                        "opencode_session_id": opencode_session_id,
-                        "partial_recovery": True,
-                        "updated_at": _utc_now_iso(),
-                    }
-                )
-                store.upsert(record)
-            else:
-                raise
-
-    started_event = {
-        "type": "execution.started",
-        "engine": "opencode",
-        "session_id": portal_session_id,
-        "request_id": request_id,
-        "opencode_session_id": record.opencode_session_id,
-        "timestamp": _utc_now_iso(),
-    }
-    await bus.publish(started_event)
+    opencode_session_id_for_event = ""
 
     try:
+        record = store.get(portal_session_id)
+        if record is None:
+            created = await client.create_session(title=title)
+            opencode_session_id = _extract_session_id(created)
+            if not opencode_session_id:
+                raise OpenCodeClientError("create_session returned no session id", status=502, payload=created)
+            opencode_session_id_for_event = opencode_session_id
+            now = _utc_now_iso()
+            record = SessionRecord(portal_session_id, opencode_session_id, title, agent, model, now, now, "", 0)
+            store.upsert(record)
+        else:
+            opencode_session_id_for_event = record.opencode_session_id
+            try:
+                await client.get_session(record.opencode_session_id)
+            except OpenCodeClientError as exc:
+                if exc.status == 404:
+                    created = await client.create_session(title=record.title)
+                    opencode_session_id = _extract_session_id(created)
+                    if not opencode_session_id:
+                        raise OpenCodeClientError("create_session returned no session id", status=502, payload=created)
+                    partial_recovery = True
+                    opencode_session_id_for_event = opencode_session_id
+                    record = SessionRecord(
+                        **{
+                            **record.__dict__,
+                            "opencode_session_id": opencode_session_id,
+                            "partial_recovery": True,
+                            "updated_at": _utc_now_iso(),
+                        }
+                    )
+                    store.upsert(record)
+                else:
+                    raise
+
+        started_event = {
+            "type": "execution.started",
+            "engine": "opencode",
+            "session_id": portal_session_id,
+            "request_id": request_id,
+            "opencode_session_id": record.opencode_session_id,
+            "timestamp": _utc_now_iso(),
+        }
+        await bus.publish(started_event)
+
         response_payload = await client.send_message(
             record.opencode_session_id,
             parts=[{"type": "text", "text": message}],
@@ -176,19 +201,19 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             "summary": assistant_text[:120],
         }
         await bus.publish(completed_event)
+
     except OpenCodeClientError as exc:
-        await bus.publish(
-            {
-                "type": "execution.failed",
-                "engine": "opencode",
-                "session_id": portal_session_id,
-                "request_id": request_id,
-                "opencode_session_id": record.opencode_session_id,
-                "timestamp": _utc_now_iso(),
-                "error": str(exc),
-            }
+        await _publish_failed(
+            bus,
+            portal_session_id=portal_session_id,
+            request_id=request_id,
+            opencode_session_id=opencode_session_id_for_event,
+            error=str(exc),
         )
-        raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
+        raise web.HTTPBadGateway(
+            text=json.dumps({"error": "opencode_error", "detail": str(exc)}),
+            content_type="application/json",
+        )
 
     out = {
         "session_id": portal_session_id,
@@ -198,7 +223,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         "runtime_events": [],
         "usage": {},
         "context_state": {},
-        "_llm_debug": {"engine": "opencode", "opencode_session_id": record.opencode_session_id},
+        "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id},
     }
     if partial_recovery or getattr(updated, "partial_recovery", False):
         out["_llm_debug"]["partial_recovery"] = True
@@ -237,6 +262,12 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         await resp.write(b"event: done\ndata: {\"ok\":true}\n\n")
     except web.HTTPException as exc:
         detail = exc.text if exc.text else exc.reason
-        await resp.write(f"event: error\ndata: {json.dumps({'error': 'chat_failed', 'detail': detail}, ensure_ascii=False)}\n\n".encode())
+        await resp.write(
+            f"event: error\ndata: {json.dumps({'error': 'chat_failed', 'detail': detail}, ensure_ascii=False)}\n\n".encode()
+        )
+    except Exception as exc:
+        await resp.write(
+            f"event: error\ndata: {json.dumps({'error': 'chat_failed', 'detail': str(exc)}, ensure_ascii=False)}\n\n".encode()
+        )
     await resp.write_eof()
     return resp
