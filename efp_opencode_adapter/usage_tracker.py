@@ -1,8 +1,21 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+
+def _extract_usage(payload: Any) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    if isinstance(payload.get("usage"), dict):
+        return payload["usage"]
+    for key in ("message", "data"):
+        nested = payload.get(key)
+        if isinstance(nested, dict) and isinstance(nested.get("usage"), dict):
+            return nested["usage"]
+    return {}
 
 
 class UsageTracker:
@@ -10,7 +23,7 @@ class UsageTracker:
         self.usage_file = usage_file
 
     def record_chat(self, *, session_id: str, request_id: str, model: str | None, provider: str | None, response_payload: dict | None, input_text: str, output_text: str) -> dict:
-        usage = (response_payload or {}).get("usage") if isinstance(response_payload, dict) else {}
+        usage = _extract_usage(response_payload or {})
         input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
         output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
         cost = float(usage.get("cost") or usage.get("total_cost") or 0.0)

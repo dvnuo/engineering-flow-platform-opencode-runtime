@@ -32,3 +32,17 @@ async def test_portal_metadata_put(tmp_path, monkeypatch):
     assert isinstance(got['body']['runtime_events_json'], str)
     assert isinstance(got['body']['metadata_json'], str)
     await srv.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_file_redacts_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("PORTAL_AGENT_ID", "agent-1")
+    monkeypatch.setenv("PORTAL_INTERNAL_TOKEN", "super-secret-token")
+    pending = tmp_path / "pending.jsonl"
+    c = PortalMetadataClient(Settings.from_env(), pending_file=pending)
+    await c.publish_session_metadata(session_id="s", latest_event_type="chat.failed", latest_event_state="error", metadata={"api_key": "abc123", "nested": {"password": "pw"}})
+    txt = pending.read_text(encoding="utf-8")
+    assert "super-secret-token" not in txt
+    assert "abc123" not in txt
+    assert "pw" not in txt

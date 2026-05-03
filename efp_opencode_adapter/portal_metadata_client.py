@@ -20,7 +20,8 @@ class PortalMetadataClient:
             return {"success": False, "skipped": True}
         runtime_events = runtime_events or []
         md = dict(metadata or {})
-        payload = {"latest_event_type": latest_event_type, "latest_event_state": latest_event_state, "last_execution_id": request_id, "current_task_id": task_id or None, "runtime_events_json": json.dumps(runtime_events[-50:], ensure_ascii=False), "metadata_json": json.dumps({**md, "latest_summary": summary, "engine": "opencode", "updated_at": utc_now_iso()}, ensure_ascii=False)}
+        safe_metadata = safe_preview({**md, "latest_summary": summary, "engine": "opencode", "updated_at": utc_now_iso()}, 2000)
+        payload = {"latest_event_type": latest_event_type, "latest_event_state": latest_event_state, "last_execution_id": request_id, "current_task_id": task_id or None, "runtime_events_json": json.dumps(runtime_events[-50:], ensure_ascii=False), "metadata_json": json.dumps(safe_metadata, ensure_ascii=False)}
         url = f"{self.settings.portal_internal_base_url.rstrip('/')}/api/internal/agents/{self.settings.portal_agent_id}/sessions/{session_id}/metadata"
         headers = {}
         if self.settings.portal_internal_token:
@@ -43,7 +44,7 @@ class PortalMetadataClient:
         except Exception as exc:
             if self.pending_file:
                 self.pending_file.parent.mkdir(parents=True, exist_ok=True)
-                clean = {"url": url, "payload": payload, "error": safe_preview(str(exc))}
+                clean = {"url": url, "payload": safe_preview(payload, 4000), "error": safe_preview(str(exc), 1000)}
                 with self.pending_file.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(clean, ensure_ascii=False) + "\n")
             return {"success": False, "error": safe_preview(str(exc))}
