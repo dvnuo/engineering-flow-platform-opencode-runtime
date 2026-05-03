@@ -36,6 +36,10 @@ class TaskRecord:
     shared_context_ref: str | None = None
     context_ref: Any = None
     message_cursor: int | None = None
+    opencode_prompt_id: str | None = None
+    opencode_message_id: str | None = None
+    completion_source: str | None = None
+    pending_permission_ids: list[str] | None = None
 
 
 class TaskStore:

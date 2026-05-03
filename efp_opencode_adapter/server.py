@@ -14,7 +14,7 @@ from .opencode_config import build_opencode_config, write_main_agent_prompt, wri
 from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_public_secrets
 from .session_store import SessionStore
 from .task_store import TaskStore
-from .tasks_api import execute_task_handler, get_task_handler
+from .tasks_api import cleanup_task_background_tasks, execute_task_handler, get_task_handler
 from .sessions_api import (
     clear_sessions_handler,
     delete_session_handler,
@@ -120,6 +120,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app["event_bus"] = EventBus()
     app["task_background_tasks"] = set()
     app["opencode_client"] = opencode_client or OpenCodeClient(settings)
+    app.on_cleanup.append(cleanup_task_background_tasks)
     register_file_routes(app)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/actuator/health", health_handler)

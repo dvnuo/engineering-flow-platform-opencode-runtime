@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -9,16 +10,49 @@ from test_t06_helpers import FakeOpenCodeClient
 
 
 class FakeTaskOpenCodeClient(FakeOpenCodeClient):
-    def __init__(self, final_text=None):
+    def __init__(self, final_text=None, real_shape=False, nested_session=False, stream_events=None, no_assistant=False, prompt_result=None):
         super().__init__()
         self.prompt_async_calls = []
         self.final_text = final_text or '{"status":"success","summary":"done","artifacts":[],"blockers":[],"next_recommendation":"","audit_trace":[],"external_actions":[]}'
+        self.real_shape = real_shape
+        self.nested_session = nested_session
+        self.stream_events = stream_events or []
+        self.no_assistant = no_assistant
+        self.prompt_result = prompt_result or {"id": "async-1"}
+
+    async def create_session(self, title=None):
+        self.create_calls += 1
+        sid = f"ses-{self.next_id}"
+        self.next_id += 1
+        self.sessions[sid] = {"id": sid, "title": title or "Chat"}
+        self.messages[sid] = []
+        if self.nested_session:
+            return {"data": {"id": sid}}
+        return {"id": sid, "title": title or "Chat"}
 
     async def prompt_async(self, session_id, payload):
         self.prompt_async_calls.append((session_id, payload))
         self.messages[session_id].append({"id": "u", "role": "user", "parts": [{"type": "text", "text": payload['parts'][0]['text']}]})
-        self.messages[session_id].append({"id": "a", "role": "assistant", "parts": [{"type": "text", "text": self.final_text}]})
-        return {"id": "async-1"}
+        if not self.no_assistant:
+            if self.real_shape:
+                self.messages[session_id].append({"info": {"id": "a1", "role": "assistant"}, "parts": [{"type": "text", "text": self.final_text}]})
+            else:
+                self.messages[session_id].append({"id": "a", "role": "assistant", "parts": [{"type": "text", "text": self.final_text}]})
+        return self.prompt_result
+
+    async def event_stream(self, *, global_events=False, timeout_seconds=None):
+        for event in self.stream_events:
+            yield event
+
+
+async def _wait_terminal(client, task_id, tries=80):
+    payload = None
+    for _ in range(tries):
+        payload = await (await client.get(f'/api/tasks/{task_id}')).json()
+        if payload['status'] in {'success', 'error', 'blocked'}:
+            return payload
+        await asyncio.sleep(0.02)
+    return payload
 
 
 @pytest.mark.asyncio
@@ -38,21 +72,11 @@ async def test_tasks_execute_get_events_and_idempotent(tmp_path, monkeypatch):
     assert (await r.json())['status'] == 'accepted'
     assert (tmp_path / 'state' / 'tasks' / 't1.json').exists()
 
-    final = None
-    for _ in range(50):
-        rg = await client.get('/api/tasks/t1')
-        final = await rg.json()
-        if final['status'] in {'success', 'error', 'blocked'}:
-            break
-        await asyncio.sleep(0.02)
+    final = await _wait_terminal(client, 't1')
     assert final['status'] == 'success'
     assert final['output_payload']['summary'] == 'done'
 
-    types = [
-        (await ws.receive_json())['type'],
-        (await ws.receive_json())['type'],
-        (await ws.receive_json())['type'],
-    ]
+    types = [(await ws.receive_json())['type'], (await ws.receive_json())['type'], (await ws.receive_json())['type']]
     assert types == ['task.accepted', 'task.started', 'task.completed']
 
     r2 = await client.post('/api/tasks/execute', json={'task_id': 't1', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
@@ -63,6 +87,68 @@ async def test_tasks_execute_get_events_and_idempotent(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_real_shape_and_prompt_id_persisted(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient(final_text='{"status":"success","summary":"real shape"}', real_shape=True, prompt_result={'id': 'async-123'})
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'tshape', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    p = await _wait_terminal(c, 'tshape')
+    assert p['status'] == 'success'
+    assert p['output_payload']['summary'] == 'real shape'
+    task_json = json.loads((tmp_path / 'state' / 'tasks' / 'tshape.json').read_text())
+    assert task_json['completion_source'] == 'messages'
+    assert task_json['opencode_prompt_id'] == 'async-123'
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_event_stream_completion_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient(no_assistant=True)
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'tev', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    sid = fake.prompt_async_calls[0][0]
+    fake.stream_events = [{"type": "message.completed", "session_id": sid, "message": {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": '{"status":"success","summary":"from event"}'}]}}]
+    p = await _wait_terminal(c, 'tev')
+    assert p['output_payload']['summary'] == 'from event'
+    task_json = json.loads((tmp_path / 'state' / 'tasks' / 'tev.json').read_text())
+    assert task_json['completion_source'] == 'opencode_event'
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_permission_request_timeout_blocked(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_TIMEOUT_SECONDS', '0.05')
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient(no_assistant=True, stream_events=[{"type": "permission.requested", "session_id": "ses-1", "permission_id": "perm-1"}])
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'tperm', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    p = await _wait_terminal(c, 'tperm', tries=120)
+    assert p['status'] == 'blocked'
+    assert p['output_payload']['error_code'] == 'permission_request_timeout'
+    assert 'perm-1' in p['output_payload']['pending_permission_ids']
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_nested_create_session_response_used(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient(nested_session=True)
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'tnested', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    assert fake.prompt_async_calls[0][0].startswith('ses-')
+    await c.close()
+
+
+@pytest.mark.asyncio
 async def test_tasks_special_cases(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
     monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
@@ -70,33 +156,21 @@ async def test_tasks_special_cases(tmp_path, monkeypatch):
     app = create_app(Settings.from_env(), opencode_client=fake)
     c = TestClient(TestServer(app)); await c.start_server()
     await c.post('/api/tasks/execute', json={'task_id': 't2', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
-    for _ in range(40):
-        p = await (await c.get('/api/tasks/t2')).json()
-        if p['status'] == 'success':
-            break
-        await asyncio.sleep(0.02)
+    p = await _wait_terminal(c, 't2')
     assert p['output_payload']['raw_text']
 
     fake2 = FakeTaskOpenCodeClient(final_text='{"status":"error","error_code":"superseded_by_new_head_sha","summary":"stale"}')
     app2 = create_app(Settings.from_env(), opencode_client=fake2)
     c2 = TestClient(TestServer(app2)); await c2.start_server()
     await c2.post('/api/tasks/execute', json={'task_id': 't3', 'task_type': 'github_review_task', 'input_payload': {}, 'metadata': {}})
-    for _ in range(40):
-        p2 = await (await c2.get('/api/tasks/t3')).json()
-        if p2['status'] in {'success','error','blocked'}:
-            break
-        await asyncio.sleep(0.02)
+    p2 = await _wait_terminal(c2, 't3')
     assert p2['output_payload']['error_code'] == 'superseded_by_new_head_sha'
 
     fake3 = FakeTaskOpenCodeClient(final_text='{"status":"success","summary":"delegated"}')
     app3 = create_app(Settings.from_env(), opencode_client=fake3)
     c3 = TestClient(TestServer(app3)); await c3.start_server()
     await c3.post('/api/tasks/execute', json={'task_id': 't4', 'task_type': 'delegation_task', 'input_payload': {}, 'metadata': {}})
-    for _ in range(40):
-        p3 = await (await c3.get('/api/tasks/t4')).json()
-        if p3['status'] == 'success':
-            break
-        await asyncio.sleep(0.02)
+    p3 = await _wait_terminal(c3, 't4')
     assert isinstance(p3['output_payload']['delegation_result'], dict)
 
     bad = await c3.post('/api/tasks/execute', data='[1]')
