@@ -287,3 +287,53 @@ async def test_chat_stream_request_id_must_be_string_emits_error(tmp_path, monke
     assert "event: error" in body
     assert "request_id_must_be_string" in body
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_with_corrupted_existing_chatlog_recovers_and_succeeds(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    chatlogs_dir = state_dir / "chatlogs"
+    chatlogs_dir.mkdir(parents=True)
+    (chatlogs_dir / "s-corrupt.json").write_text("{ bad json", encoding="utf-8")
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state_dir))
+
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    before = await client.get("/api/sessions/s-corrupt/chatlog")
+    assert before.status == 200
+    before_body = await before.json()
+    assert before_body["success"] is True
+    assert before_body["chatlog"] is None
+    assert before_body["metadata"]["corrupted_chatlog"] is True
+
+    resp = await client.post(
+        "/api/chat",
+        json={"message": "hello", "session_id": "s-corrupt"},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["response"]
+    assert body["usage"]["requests"] == 1
+
+    event_types = [event["type"] for event in body["runtime_events"]]
+    assert "execution.started" in event_types
+    assert "llm_thinking" in event_types
+    assert "complete" in event_types
+    assert "execution.completed" in event_types
+
+    after = await client.get("/api/sessions/s-corrupt/chatlog")
+    assert after.status == 200
+    after_body = await after.json()
+    assert after_body["success"] is True
+    assert after_body["status"] == "success"
+    assert after_body["chatlog"]["entries"][-1]["status"] == "success"
+    assert after_body["chatlog"]["entries"][-1]["response"] == body["response"]
+
+    backups = list(chatlogs_dir.glob("s-corrupt.json.corrupt-*"))
+    assert backups
+    assert backups[0].read_text(encoding="utf-8") == "{ bad json"
+
+    await client.close()

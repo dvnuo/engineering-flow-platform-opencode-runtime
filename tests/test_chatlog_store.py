@@ -57,3 +57,38 @@ def test_chatlog_append_event_persists_existing_entry(tmp_path):
     s.append_event("sid", request_id="r1", event={"type": "llm_thinking"})
     d = s.get("sid")
     assert d["entries"][-1]["runtime_events"][-1]["type"] == "llm_thinking"
+
+
+def test_chatlog_store_quarantines_corrupted_file_before_starting_new_entry(tmp_path):
+    path = tmp_path / "sid.json"
+    path.write_text("{ bad json", encoding="utf-8")
+
+    s = ChatLogStore(tmp_path)
+    s.start_entry(
+        "sid",
+        request_id="r1",
+        message="hello",
+        runtime_events=[{"type": "execution.started"}],
+    )
+    s.finish_entry(
+        "sid",
+        request_id="r1",
+        status="success",
+        response="ok",
+        runtime_events=[
+            {"type": "execution.started"},
+            {"type": "llm_thinking"},
+            {"type": "complete"},
+            {"type": "execution.completed"},
+        ],
+    )
+
+    current = s.get("sid")
+    assert current is not None
+    assert current["session_id"] == "sid"
+    assert current["entries"][-1]["status"] == "success"
+    assert current["entries"][-1]["response"] == "ok"
+
+    backups = list(tmp_path.glob("sid.json.corrupt-*"))
+    assert backups
+    assert backups[0].read_text(encoding="utf-8") == "{ bad json"

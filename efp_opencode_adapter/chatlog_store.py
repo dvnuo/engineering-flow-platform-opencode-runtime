@@ -25,17 +25,46 @@ class ChatLogStore:
         return json.loads(p.read_text(encoding="utf-8"))
 
     def _write(self, session_id: str, payload: dict) -> dict:
+        self.chatlogs_dir.mkdir(parents=True, exist_ok=True)
         path = self._path(session_id)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
         return payload
 
+    def _fresh_payload(self, session_id: str) -> dict:
+        return {
+            "session_id": session_id,
+            "engine": "opencode",
+            "entries": [],
+            "updated_at": utc_now_iso(),
+        }
+
+    def _quarantine_corrupt_file(self, session_id: str) -> Path | None:
+        path = self._path(session_id)
+        if not path.exists():
+            return None
+
+        stamp = utc_now_iso().replace(":", "").replace("+", "_").replace("/", "_")
+        backup = path.with_name(f"{path.name}.corrupt-{stamp}")
+
+        try:
+            path.replace(backup)
+            return backup
+        except Exception:
+            return None
+
     def _ensure(self, session_id: str) -> dict:
-        cur = self.get(session_id)
+        try:
+            cur = self.get(session_id)
+        except Exception:
+            self._quarantine_corrupt_file(session_id)
+            return self._fresh_payload(session_id)
+
         if cur:
             return cur
-        return {"session_id": session_id, "engine": "opencode", "entries": [], "updated_at": utc_now_iso()}
+
+        return self._fresh_payload(session_id)
 
     def _find_entry(self, payload: dict, request_id: str) -> dict | None:
         entries = payload.setdefault("entries", [])
