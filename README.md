@@ -1,6 +1,6 @@
 # engineering-flow-platform-opencode-runtime
 
-This repository contains the **T05 + T08 + T07 scaffold** for an EFP-compatible OpenCode runtime adapter image.
+This repository contains the **T05 + T06 + T07 + T08 + T10 scaffold** for an EFP-compatible OpenCode runtime adapter image.
 
 ## Runtime topology
 
@@ -9,9 +9,9 @@ This repository contains the **T05 + T08 + T07 scaffold** for an EFP-compatible 
 - Portal **must not** call OpenCode native API directly.
 - OpenCode version is pinned to **`1.14.29`**.
 
-## T05 + T08 + T07 scope
+## T05 + T06 + T07 + T08 + T10 scope
 
-Implemented:
+Implemented in T05:
 
 - `GET /health`
 - `GET /actuator/health`
@@ -23,6 +23,19 @@ Implemented:
 - provider/model mapping to `provider/model`
 - capability catalog from builtins/tools/skills/agents/MCP
 
+Implemented in T06:
+
+- `POST /api/chat`
+- `POST /api/chat/stream` (SSE compatibility mode)
+- `GET /api/events` (WebSocket compatibility mode)
+- `GET /api/sessions`
+- `GET /api/sessions/{session_id}`
+- `GET /api/sessions/{session_id}/chatlog`
+- `POST /api/sessions/{session_id}/rename`
+- `DELETE /api/sessions/{session_id}`
+- `POST /api/clear`
+- compatibility stubs for message mutation endpoints (HTTP 501)
+
 Implemented in T08:
 
 - EFP skills converter:
@@ -32,14 +45,19 @@ Implemented in T08:
 - optional generated subagent prompts:
   `/workspace/.opencode/agents/skill-<name>.md`
 
+T10 implemented:
+
+- `/api/server-files` browse/read/content/upload/delete/download
+- legacy `GET /api/files` and `GET /api/files/read` aliases
+- attachment upload/parse/list/preview/download/delete
+- `/api/context/files` and `/api/chunks/search`
+- `build_attachment_context` helper for T06 integration
+
 Not implemented in this task:
 
-- `/api/chat`
-- `/api/chat/stream`
-- `/api/events`
 - `/api/tasks`
-- actual generated TS tools wrappers
-- files / attachments / context integrations
+- tools wrapper
+- complex parsers for PDF/DOCX/XLSX (returns `unsupported_file_type` in MVP)
 
 ## Security defaults
 
