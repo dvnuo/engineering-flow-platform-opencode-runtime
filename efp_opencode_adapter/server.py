@@ -4,6 +4,7 @@ import argparse
 
 from aiohttp import web
 
+from .file_routes import register_file_routes
 from .opencode_client import OpenCodeClient
 from .settings import Settings
 
@@ -33,6 +34,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app = web.Application()
     app["settings"] = settings
     app["opencode_client"] = opencode_client or OpenCodeClient(settings)
+    register_file_routes(app)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/actuator/health", health_handler)
     return app
