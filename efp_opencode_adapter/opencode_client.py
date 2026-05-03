@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 import aiohttp
@@ -9,22 +11,53 @@ import aiohttp
 from .settings import Settings
 
 
+class OpenCodeClientError(Exception):
+    def __init__(self, message: str, *, status: int | None = None, payload: Any = None):
+        super().__init__(message)
+        self.status = status
+        self.payload = payload
+
+
 class OpenCodeClient:
     def __init__(self, settings: Settings, session: aiohttp.ClientSession | None = None):
         self.settings = settings
         self._session = session
 
-    async def health(self) -> dict[str, Any]:
-        auth = None
+    def _auth(self) -> aiohttp.BasicAuth | None:
         if self.settings.opencode_server_password:
-            auth = aiohttp.BasicAuth(self.settings.opencode_server_username, self.settings.opencode_server_password)
-        url = f"{self.settings.opencode_url.rstrip('/')}/global/health"
+            return aiohttp.BasicAuth(self.settings.opencode_server_username, self.settings.opencode_server_password)
+        return None
+
+    def _url(self, path: str) -> str:
+        return f"{self.settings.opencode_url.rstrip('/')}{path}"
+
+    async def _request_json(self, method: str, path: str, *, json: dict | None = None, expected_statuses: tuple[int, ...] = (200,), timeout_seconds: int = 30) -> Any:
+        async def _run(session: aiohttp.ClientSession) -> Any:
+            async with session.request(method, self._url(path), auth=self._auth(), json=json, timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as resp:
+                if resp.status not in expected_statuses:
+                    try:
+                        err_payload = await resp.json()
+                    except Exception:
+                        err_payload = await resp.text()
+                    raise OpenCodeClientError(f"{method} {path} failed with status {resp.status}", status=resp.status, payload=err_payload)
+                if resp.status == 204:
+                    return None
+                try:
+                    return await resp.json()
+                except Exception:
+                    return await resp.text()
 
         if self._session is not None:
-            return await self._do_health(self._session, url, auth)
-
+            return await _run(self._session)
         async with aiohttp.ClientSession() as session:
-            return await self._do_health(session, url, auth)
+            return await _run(session)
+
+    async def health(self) -> dict[str, Any]:
+        url = self._url("/global/health")
+        if self._session is not None:
+            return await self._do_health(self._session, url, self._auth())
+        async with aiohttp.ClientSession() as session:
+            return await self._do_health(session, url, self._auth())
 
     async def _do_health(self, session: aiohttp.ClientSession, url: str, auth: aiohttp.BasicAuth | None) -> dict[str, Any]:
         try:
@@ -36,13 +69,93 @@ class OpenCodeClient:
                     payload = await resp.json()
                 except Exception as exc:
                     return {"healthy": False, "error": f"invalid json: {exc}", "status": status}
-                return {
-                    "healthy": bool(payload.get("healthy", False)),
-                    "version": payload.get("version"),
-                    "raw": payload,
-                }
+                return {"healthy": bool(payload.get("healthy", False)), "version": payload.get("version"), "raw": payload}
         except Exception as exc:
             return {"healthy": False, "error": str(exc)}
+
+    async def create_session(self, title: str | None = None) -> dict:
+        return await self._request_json("POST", "/session", json={"title": title} if title else {}, expected_statuses=(200, 201))
+
+    async def list_sessions(self) -> list[dict]:
+        data = await self._request_json("GET", "/session")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return data.get("sessions") or data.get("data") or []
+        return []
+
+    async def get_session(self, session_id: str) -> dict:
+        return await self._request_json("GET", f"/session/{session_id}")
+
+    async def patch_session(self, session_id: str, title: str) -> dict:
+        data = await self._request_json("PATCH", f"/session/{session_id}", json={"title": title}, expected_statuses=(200, 204))
+        return data if data is not None else {"id": session_id, "title": title}
+
+    async def delete_session(self, session_id: str) -> None:
+        await self._request_json("DELETE", f"/session/{session_id}", expected_statuses=(200, 202, 204))
+
+    async def list_messages(self, session_id: str) -> list[dict]:
+        data = await self._request_json("GET", f"/session/{session_id}/message")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return data.get("messages") or data.get("data") or []
+        return []
+
+    async def send_message(self, session_id: str, *, parts: list[dict], model: str | None, agent: str | None, system: str | None = None) -> dict:
+        payload: dict[str, Any] = {"parts": parts}
+        if model:
+            payload["model"] = model
+        if agent:
+            payload["agent"] = agent
+        if system:
+            payload["system"] = system
+        return await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200, 201))
+
+    async def prompt_async(self, session_id: str, payload: dict[str, Any]) -> dict | None:
+        return await self._request_json("POST", f"/session/{session_id}/prompt_async", json=payload, expected_statuses=(200, 201, 202, 204))
+
+    async def event_stream(self, *, global_events: bool = False, timeout_seconds: int | None = None) -> AsyncIterator[dict[str, Any]]:
+        path = "/global/event" if global_events else "/event"
+        own_session = self._session is None
+        session = self._session or aiohttp.ClientSession()
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds) if timeout_seconds is not None else aiohttp.ClientTimeout(total=None)
+        try:
+            async with session.get(self._url(path), auth=self._auth(), timeout=timeout) as resp:
+                if resp.status != 200:
+                    try:
+                        payload = await resp.json()
+                    except Exception:
+                        payload = await resp.text()
+                    raise OpenCodeClientError(f"GET {path} failed with status {resp.status}", status=resp.status, payload=payload)
+
+                event_type: str | None = None
+                data_lines: list[str] = []
+                async for raw in resp.content:
+                    line = raw.decode("utf-8").rstrip("\r\n")
+                    if line.startswith("event:"):
+                        event_type = line[len("event:"):].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[len("data:"):].strip())
+                    elif line == "":
+                        if event_type or data_lines:
+                            raw_data = "\n".join(data_lines)
+                            try:
+                                event_payload = json.loads(raw_data) if raw_data else {}
+                                if not isinstance(event_payload, dict):
+                                    event_payload = {"data": event_payload}
+                            except Exception:
+                                event_payload = {"data": raw_data}
+                            if event_type:
+                                event_payload.setdefault("type", event_type)
+                            elif "type" not in event_payload:
+                                event_payload["type"] = "message"
+                            yield event_payload
+                        event_type = None
+                        data_lines = []
+        finally:
+            if own_session:
+                await session.close()
 
     async def wait_until_ready(self, timeout_seconds: int = 60) -> None:
         deadline = time.monotonic() + timeout_seconds
@@ -50,9 +163,7 @@ class OpenCodeClient:
             result = await self.health()
             version = result.get("version")
             if version and version != self.settings.opencode_version:
-                raise RuntimeError(
-                    f"opencode version mismatch: expected {self.settings.opencode_version}, got {version}"
-                )
+                raise RuntimeError(f"opencode version mismatch: expected {self.settings.opencode_version}, got {version}")
             if result.get("healthy"):
                 return
             await asyncio.sleep(0.5)

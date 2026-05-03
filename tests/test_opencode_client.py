@@ -87,3 +87,46 @@ async def test_health_uses_basic_auth_when_password_set(monkeypatch):
     assert health["healthy"] is True
     assert health["version"] == "1.14.29"
     await server.close()
+
+
+@pytest.mark.asyncio
+async def test_prompt_async_accepts_204(monkeypatch):
+    app = web.Application()
+
+    async def prompt(_):
+        return web.Response(status=204)
+
+    app.router.add_post("/session/ses-1/prompt_async", prompt)
+    server = TestServer(app)
+    await server.start_server()
+
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+    result = await client.prompt_async("ses-1", {"parts": [{"type": "text", "text": "hi"}]})
+    assert result is None
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_event_stream_parses_sse(monkeypatch):
+    app = web.Application()
+
+    async def events(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(b'event: server.connected\n')
+        await resp.write(b'data: {"hello": true}\n\n')
+        await resp.write_eof()
+        return resp
+
+    app.router.add_get("/event", events)
+    server = TestServer(app)
+    await server.start_server()
+
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+    events_iter = client.event_stream()
+    first = await events_iter.__anext__()
+    assert first["type"] == "server.connected"
+    assert first["hello"] is True
+    await server.close()

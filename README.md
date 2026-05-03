@@ -9,14 +9,27 @@ This repository contains the **T05 scaffold** for an EFP-compatible OpenCode run
 - Portal **must not** call OpenCode native API directly.
 - OpenCode version is pinned to **`1.14.29`**.
 
-## T05 + T08 scope
+## T05 + T06 + T08 scope
 
-Implemented in this task:
+Implemented in T05:
 
 - `GET /health`
 - `GET /actuator/health`
 - asset initialization scaffold (`python -m efp_opencode_adapter.init_assets`)
 - OpenCode readiness check via `/global/health`
+
+Implemented in T06:
+
+- `POST /api/chat`
+- `POST /api/chat/stream` (SSE compatibility mode)
+- `GET /api/events` (WebSocket compatibility mode)
+- `GET /api/sessions`
+- `GET /api/sessions/{session_id}`
+- `GET /api/sessions/{session_id}/chatlog`
+- `POST /api/sessions/{session_id}/rename`
+- `DELETE /api/sessions/{session_id}`
+- `POST /api/clear`
+- compatibility stubs for message mutation endpoints (HTTP 501)
 
 Implemented in T08:
 
@@ -37,9 +50,8 @@ T10 implemented:
 
 Not implemented in this task:
 
-- `/api/chat`
 - `/api/tasks`
-- runtime profile mapping
+- full runtime profile mapping/apply policy
 - tools wrapper
 - complex parsers for PDF/DOCX/XLSX (returns `unsupported_file_type` in MVP)
 
