@@ -12,7 +12,7 @@ from test_t06_helpers import FakeOpenCodeClient
 
 
 class FakeTaskOpenCodeClient(FakeOpenCodeClient):
-    def __init__(self, final_text=None, real_shape=False, nested_session=False, stream_events=None, no_assistant=False, prompt_result=None):
+    def __init__(self, final_text=None, real_shape=False, nested_session=False, stream_events=None, no_assistant=False, prompt_result=None, raise_prompt_async=False):
         super().__init__()
         self.prompt_async_calls = []
         self.final_text = final_text or '{"status":"success","summary":"done","artifacts":[],"blockers":[],"next_recommendation":"","audit_trace":[],"external_actions":[]}'
@@ -21,6 +21,8 @@ class FakeTaskOpenCodeClient(FakeOpenCodeClient):
         self.stream_events = stream_events or []
         self.no_assistant = no_assistant
         self.prompt_result = {"id": "async-1"} if prompt_result is None else prompt_result
+        self.message_details: dict[tuple[str, str], dict] = {}
+        self.raise_prompt_async = raise_prompt_async
 
     async def create_session(self, title=None):
         self.create_calls += 1
@@ -33,6 +35,8 @@ class FakeTaskOpenCodeClient(FakeOpenCodeClient):
         return {"id": sid, "title": title or "Chat"}
 
     async def prompt_async(self, session_id, payload):
+        if self.raise_prompt_async:
+            raise RuntimeError("prompt_async failure")
         self.prompt_async_calls.append((session_id, payload))
         self.messages[session_id].append({"id": "u", "role": "user", "parts": [{"type": "text", "text": payload['parts'][0]['text']}]})
         if not self.no_assistant:
@@ -41,6 +45,9 @@ class FakeTaskOpenCodeClient(FakeOpenCodeClient):
             else:
                 self.messages[session_id].append({"id": "a", "role": "assistant", "parts": [{"type": "text", "text": self.final_text}]})
         return self.prompt_result
+
+    async def get_message(self, session_id, message_id):
+        return self.message_details.get((session_id, message_id), {})
 
     async def event_stream(self, *, global_events=False, timeout_seconds=None):
         for event in self.stream_events:
@@ -132,7 +139,8 @@ async def test_event_stream_completion_fallback(tmp_path, monkeypatch):
     c = TestClient(TestServer(app)); await c.start_server()
     await c.post('/api/tasks/execute', json={'task_id': 'tev', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
     sid = fake.prompt_async_calls[0][0]
-    fake.stream_events = [{"type": "message.completed", "session_id": sid, "message": {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": '{"status":"success","summary":"from event"}'}]}}]
+    msg_id = fake.prompt_async_calls[0][1]["messageID"]
+    fake.stream_events = [{"type": "message.completed", "session_id": sid, "message": {"info": {"role": "assistant", "parentID": msg_id}, "parts": [{"type": "text", "text": '{"status":"success","summary":"from event"}'}]}}]
     p = await _wait_terminal(c, 'tev')
     assert p['output_payload']['summary'] == 'from event'
     task_json = json.loads((tmp_path / 'state' / 'tasks' / 'tev.json').read_text())
@@ -189,6 +197,25 @@ async def test_permission_replied_removes_pending(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_official_permission_asked_timeout_blocked(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_TIMEOUT_SECONDS', '0.05')
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient(no_assistant=True)
+    fake.prompt_result = None
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'taskedperm', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    sid = fake.prompt_async_calls[0][0]
+    fake.stream_events = [{"directory": "/workspace", "payload": {"type": "permission.asked", "properties": {"requestID": "perm-asked-1", "sessionID": sid}}}]
+    p = await _wait_terminal(c, 'taskedperm', tries=120)
+    assert p['status'] == 'blocked'
+    assert p['output_payload']['error_code'] == 'permission_request_timeout'
+    assert 'perm-asked-1' in p['output_payload']['pending_permission_ids']
+    await c.close()
+
+
+@pytest.mark.asyncio
 async def test_nested_create_session_response_used(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
     monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
@@ -221,6 +248,50 @@ async def test_official_assistant_parent_id_matches(tmp_path, monkeypatch):
     await c.close()
 
 
+@pytest.mark.asyncio
+async def test_official_message_part_updated_fetches_full_message(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient(no_assistant=True)
+    fake.prompt_result = None
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'tpart', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    sid = fake.prompt_async_calls[0][0]
+    user_msg_id = fake.prompt_async_calls[0][1]['messageID']
+    fake.message_details[(sid, 'assistant-1')] = {
+        "info": {"id": "assistant-1", "sessionID": sid, "role": "assistant", "parentID": user_msg_id},
+        "parts": [{"type": "text", "text": '{"status":"success","summary":"from official part"}'}],
+    }
+    fake.stream_events = [{"directory": "/workspace", "payload": {"type": "message.part.updated", "properties": {"part": {"sessionID": sid, "messageID": "assistant-1", "type": "text", "text": '{"status":"success","summary":"partial"}'}}}}]
+    p = await _wait_terminal(c, 'tpart')
+    assert p['status'] == 'success'
+    assert p['output_payload']['summary'] == 'from official part'
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_message_part_wrong_parent_does_not_complete_task(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_TIMEOUT_SECONDS', '0.05')
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient(no_assistant=True)
+    fake.prompt_result = None
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'twrongparent', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    sid = fake.prompt_async_calls[0][0]
+    fake.message_details[(sid, 'assistant-other')] = {
+        "info": {"id": "assistant-other", "sessionID": sid, "role": "assistant", "parentID": "some-other-user-message"},
+        "parts": [{"type": "text", "text": '{"status":"success","summary":"wrong task"}'}],
+    }
+    fake.stream_events = [{"directory": "/workspace", "payload": {"type": "message.part.updated", "properties": {"part": {"sessionID": sid, "messageID": "assistant-other", "type": "text", "text": '{"status":"success","summary":"partial"}'}}}}]
+    p = await _wait_terminal(c, 'twrongparent', tries=120)
+    assert p['status'] == 'blocked'
+    assert p['output_payload']['error_code'] == 'task_completion_timeout'
+    await c.close()
+
+
 def test_same_session_wrong_parent_does_not_cross_match():
     rec_a = TaskRecord(task_id="a", task_type="generic_agent_task", request_id="ra", status="running", portal_session_id="pa", opencode_session_id="ses-1", input_payload={}, metadata={}, output_payload={}, artifacts={}, runtime_events=[], error=None, created_at=utc_now_iso(), opencode_message_id="msg-a", opencode_prompt_id="msg-a")
     rec_b = TaskRecord(task_id="b", task_type="generic_agent_task", request_id="rb", status="running", portal_session_id="pb", opencode_session_id="ses-1", input_payload={}, metadata={}, output_payload={}, artifacts={}, runtime_events=[], error=None, created_at=utc_now_iso(), opencode_message_id="msg-b", opencode_prompt_id="msg-b")
@@ -230,6 +301,23 @@ def test_same_session_wrong_parent_does_not_cross_match():
     }]
     assert _assistant_text_from_messages(messages, 0, rec_a) is None
     assert _assistant_text_from_messages(messages, 0, rec_b) is not None
+
+
+@pytest.mark.asyncio
+async def test_prompt_async_generic_exception_marks_error_and_preserves_events(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    fake = FakeTaskOpenCodeClient(raise_prompt_async=True)
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    r = await c.post('/api/tasks/execute', json={'task_id': 'tfaildispatch', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    assert r.status == 502
+    p = await (await c.get('/api/tasks/tfaildispatch')).json()
+    assert p['status'] == 'error'
+    assert p['output_payload']['error_code'] == 'opencode_error'
+    event_types = [e['type'] for e in p['runtime_events']]
+    assert 'task.accepted' in event_types
+    assert 'task.completed' in event_types
+    await c.close()
 
 
 @pytest.mark.asyncio

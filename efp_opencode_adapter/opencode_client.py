@@ -156,6 +156,10 @@ class OpenCodeClient:
             return data.get("messages") or data.get("data") or []
         return []
 
+    async def get_message(self, session_id: str, message_id: str) -> dict:
+        data = await self._request_json("GET", f"/session/{session_id}/message/{message_id}")
+        return data if isinstance(data, dict) else {}
+
     async def send_message(self, session_id: str, *, parts: list[dict], model: str | None, agent: str | None, system: str | None = None) -> dict:
         payload: dict[str, Any] = {"parts": parts}
         if model:

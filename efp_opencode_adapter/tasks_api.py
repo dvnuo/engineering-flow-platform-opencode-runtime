@@ -120,6 +120,32 @@ def _message_ids_from_event_or_message(value: Any) -> list[str]:
     return out
 
 
+def _message_detail_id_from_event(event: dict[str, Any]) -> str | None:
+    canonical = _canonical_event(event)
+    props = canonical.get("properties") if isinstance(canonical.get("properties"), dict) else {}
+    info = props.get("info") if isinstance(props.get("info"), dict) else None
+    if info:
+        val = info.get("id") or info.get("messageID") or info.get("messageId") or info.get("message_id")
+        if isinstance(val, str) and val:
+            return val
+    for container in (props.get("message"), canonical.get("message"), canonical.get("data")):
+        if isinstance(container, dict):
+            nested_info = container.get("info") if isinstance(container.get("info"), dict) else None
+            if nested_info:
+                val = nested_info.get("id") or nested_info.get("messageID") or nested_info.get("messageId") or nested_info.get("message_id")
+                if isinstance(val, str) and val:
+                    return val
+            val = container.get("id") or container.get("messageID") or container.get("messageId") or container.get("message_id")
+            if isinstance(val, str) and val:
+                return val
+    part = props.get("part") if isinstance(props.get("part"), dict) else None
+    if part:
+        val = part.get("messageID") or part.get("messageId") or part.get("message_id")
+        if isinstance(val, str) and val:
+            return val
+    return None
+
+
 def _message_role(payload: Any) -> str | None:
     if isinstance(payload, dict):
         if isinstance(payload.get("role"), str):
@@ -166,6 +192,10 @@ def _assistant_text_from_event(event: dict[str, Any]) -> str | None:
             nested_message = val.get("message")
             if isinstance(nested_message, dict) and _message_role(nested_message) == "assistant":
                 candidates.append(nested_message)
+    props = canonical.get("properties") if isinstance(canonical.get("properties"), dict) else {}
+    part = props.get("part") if isinstance(props.get("part"), dict) else None
+    if part and part.get("type") == "text" and isinstance(part.get("text"), str):
+        return part["text"]
     return extract_assistant_text(candidates) or None
 
 
@@ -181,7 +211,7 @@ def _event_matches_task(record: TaskRecord, event: dict[str, Any]) -> bool:
         return True
     message_ids = _message_ids_from_event_or_message(canonical)
     if not message_ids:
-        return True
+        return _event_type(canonical).startswith("permission.")
     return any(mid in tracked for mid in message_ids)
 
 
@@ -191,6 +221,20 @@ def _permission_event_delta(event: dict[str, Any]) -> tuple[str | None, str | No
     properties = canonical.get("properties")
     if not isinstance(properties, dict):
         properties = {}
+    def _pid() -> str | None:
+        pid = properties.get("requestID") or properties.get("permissionID") or properties.get("id")
+        if not pid:
+            pid = canonical.get("requestID") or canonical.get("permissionID") or canonical.get("permission_id")
+        permission = canonical.get("permission")
+        if not pid and isinstance(permission, dict):
+            pid = permission.get("id")
+        return pid if isinstance(pid, str) and pid else None
+
+    if event_type in {"permission.asked", "permission.updated", "permission.created", "permission.requested", "permission.pending"}:
+        pid = _pid()
+        return ("open", pid or "permission-request")
+    if event_type in {"permission.replied", "permission.resolved", "permission.denied", "permission.approved", "permission.rejected", "permission.closed"}:
+        return ("resolved", _pid())
     if event_type == "permission.updated":
         pid = properties.get("id")
         return ("open", pid if isinstance(pid, str) and pid else "permission-request")
@@ -346,10 +390,31 @@ async def execute_task_handler(request: web.Request) -> web.Response:
         schedule_task_collector(request.app, task_id)
         return web.json_response({"ok": True, "status": "accepted", "task_id": task_id, "request_id": request_id}, status=202)
     except OpenCodeClientError as exc:
-        record = TaskRecord(task_id=task_id, task_type=task_type, request_id=request_id, status="error", portal_session_id=portal_session_id, opencode_session_id="", input_payload=input_payload, metadata=metadata, output_payload={"summary": "OpenCode request failed", "error_code": "opencode_error"}, artifacts={}, runtime_events=[], error={"message": str(exc)}, created_at=utc_now_iso(), finished_at=utc_now_iso(), source=source, shared_context_ref=shared_context_ref, context_ref=context_ref)
-        task_store.save(record)
+        record = await _mark_dispatch_error(request.app, task_id, task_type=task_type, request_id=request_id, portal_session_id=portal_session_id, input_payload=input_payload, metadata=metadata, source=source, shared_context_ref=shared_context_ref, context_ref=context_ref, exc=exc)
         await _publish_task_event(request.app, record, "task.completed", "error")
         return web.json_response({"error": "opencode_error"}, status=502)
+    except Exception as exc:
+        record = await _mark_dispatch_error(request.app, task_id, task_type=task_type, request_id=request_id, portal_session_id=portal_session_id, input_payload=input_payload, metadata=metadata, source=source, shared_context_ref=shared_context_ref, context_ref=context_ref, exc=exc)
+        await _publish_task_event(request.app, record, "task.completed", "error")
+        return web.json_response({"error": "opencode_error"}, status=502)
+
+
+async def _mark_dispatch_error(app: web.Application, task_id: str, *, task_type: str, request_id: str, portal_session_id: str, input_payload: dict[str, Any], metadata: dict[str, Any], source: str | None, shared_context_ref: str | None, context_ref: Any, exc: Exception) -> TaskRecord:
+    store: TaskStore = app["task_store"]
+    existing = store.get(task_id)
+    out = {
+        "summary": "OpenCode request failed",
+        "error_code": "opencode_error",
+        "artifacts": [],
+        "blockers": [],
+        "next_recommendation": "Check OpenCode server availability and retry the task.",
+        "audit_trace": [],
+        "external_actions": [],
+    }
+    if existing:
+        return store.update(task_id, status="error", output_payload=out, error={"message": str(exc)}, finished_at=utc_now_iso())
+    record = TaskRecord(task_id=task_id, task_type=task_type, request_id=request_id, status="error", portal_session_id=portal_session_id, opencode_session_id="", input_payload=input_payload, metadata=metadata, output_payload=out, artifacts={}, runtime_events=[], error={"message": str(exc)}, created_at=utc_now_iso(), finished_at=utc_now_iso(), source=source, shared_context_ref=shared_context_ref, context_ref=context_ref)
+    return store.save(record)
 
 
 def schedule_task_collector(app: web.Application, task_id: str) -> None:
@@ -377,12 +442,28 @@ async def _try_read_completion_from_events(app: web.Application, record: TaskRec
             if not isinstance(event, dict):
                 continue
             canonical = _canonical_event(event)
-            if not _event_matches_task(record, canonical):
+            if record.opencode_session_id not in _session_ids_from_event_or_message(canonical):
                 continue
-            observed.append(canonical)
-            text = _assistant_text_from_event(canonical)
-            if text:
-                return text, observed
+            event_type = _event_type(canonical)
+            matches = _event_matches_task(record, canonical)
+            if matches or event_type.startswith("permission."):
+                observed.append(canonical)
+            if matches:
+                text = _assistant_text_from_event(canonical)
+                if text:
+                    return text, observed
+            message_id = _message_detail_id_from_event(canonical)
+            if message_id and hasattr(client, "get_message"):
+                try:
+                    full_message = await client.get_message(record.opencode_session_id, message_id)
+                except Exception:
+                    full_message = None
+                if isinstance(full_message, dict) and _message_matches_task(record, full_message):
+                    text = extract_assistant_text(full_message)
+                    if text:
+                        if canonical not in observed:
+                            observed.append(canonical)
+                        return text, observed
     except Exception:
         return None, observed
     return None, observed
