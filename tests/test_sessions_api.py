@@ -29,6 +29,13 @@ async def test_sessions_endpoints(tmp_path, monkeypatch):
     assert "user" in roles and "assistant" in roles
     assert dp["metadata"]["engine"] == "opencode"
 
+    ch = await client.get(f"/api/sessions/{sid}/chatlog")
+    body = await ch.json()
+    assert body["success"] is True
+    assert "chatlog" in body
+    assert "runtime_events" in body
+    assert "events" in body
+
     rn = await client.post(f"/api/sessions/{sid}/rename", json={"name": "renamed"})
     assert (await rn.json())["success"] is True
     ls2 = await client.get("/api/sessions")

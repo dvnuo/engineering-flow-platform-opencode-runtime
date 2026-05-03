@@ -17,6 +17,10 @@ class Settings:
     opencode_server_username: str
     opencode_server_password: str | None
     ready_timeout_seconds: int
+    portal_internal_base_url: str | None = None
+    portal_agent_id: str | None = None
+    portal_internal_token: str | None = None
+    portal_metadata_timeout_seconds: int = 5
 
     @classmethod
     def from_env(cls, opencode_url: str | None = None) -> "Settings":
@@ -31,4 +35,8 @@ class Settings:
             opencode_server_username=os.getenv("OPENCODE_SERVER_USERNAME", "opencode"),
             opencode_server_password=os.getenv("OPENCODE_SERVER_PASSWORD"),
             ready_timeout_seconds=int(os.getenv("EFP_OPENCODE_READY_TIMEOUT_SECONDS", "60")),
+            portal_internal_base_url=os.getenv("PORTAL_INTERNAL_BASE_URL") or None,
+            portal_agent_id=os.getenv("PORTAL_AGENT_ID") or None,
+            portal_internal_token=os.getenv("PORTAL_INTERNAL_TOKEN") or None,
+            portal_metadata_timeout_seconds=int(os.getenv("PORTAL_METADATA_TIMEOUT_SECONDS", "5")),
         )

@@ -7,9 +7,15 @@ from aiohttp import web
 
 from .capabilities import build_capability_catalog
 from .chat_api import chat_handler, chat_stream_handler
+from .chatlog_store import ChatLogStore
 from .event_bus import EventBus, events_ws_handler
 from .file_routes import register_file_routes
 from .opencode_client import OpenCodeClient
+from .permissions_api import permission_respond_handler
+from .portal_metadata_client import PortalMetadataClient
+from .recovery import RecoveryManager
+from .usage_api import usage_handler
+from .usage_tracker import UsageTracker
 from .opencode_config import build_opencode_config, write_main_agent_prompt, write_opencode_config
 from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_public_secrets
 from .session_store import SessionStore
@@ -114,8 +120,12 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     state_paths = ensure_state_dirs(settings)
     app["state_paths"] = state_paths
     app["session_store"] = SessionStore(state_paths.sessions_dir)
+    app["chatlog_store"] = ChatLogStore(state_paths.chatlogs_dir)
+    app["usage_tracker"] = UsageTracker(state_paths.usage_file)
     app["event_bus"] = EventBus()
     app["opencode_client"] = opencode_client or OpenCodeClient(settings)
+    app["portal_metadata_client"] = PortalMetadataClient(settings, pending_file=state_paths.portal_metadata_pending_file)
+    app["recovery_manager"] = RecoveryManager(settings=settings, state_paths=state_paths, session_store=app["session_store"], chatlog_store=app["chatlog_store"], opencode_client=app["opencode_client"])
     register_file_routes(app)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/actuator/health", health_handler)
@@ -124,6 +134,8 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_post("/api/chat", chat_handler)
     app.router.add_post("/api/chat/stream", chat_stream_handler)
     app.router.add_get("/api/events", events_ws_handler)
+    app.router.add_get("/api/usage", usage_handler)
+    app.router.add_post("/api/permissions/{permission_id}/respond", permission_respond_handler)
     app.router.add_get("/api/sessions", list_sessions_handler)
     app.router.add_post("/api/clear", clear_sessions_handler)
     app.router.add_get("/api/sessions/{session_id}/chatlog", session_chatlog_handler)
@@ -134,6 +146,15 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     )
     app.router.add_get("/api/sessions/{session_id}", get_session_handler)
     app.router.add_delete("/api/sessions/{session_id}", delete_session_handler)
+
+    async def _run_recovery(app):
+        try:
+            summary = await app["recovery_manager"].recover()
+            print(f"recovery summary: {summary}")
+        except Exception as exc:
+            print(f"recovery failed: {exc}")
+
+    app.on_startup.append(_run_recovery)
     return app
 
 

@@ -169,6 +169,14 @@ class OpenCodeClient:
     async def prompt_async(self, session_id: str, payload: dict[str, Any]) -> dict | None:
         return await self._request_json("POST", f"/session/{session_id}/prompt_async", json=payload, expected_statuses=(200, 201, 202, 204))
 
+    async def respond_permission(self, session_id: str, permission_id: str, payload: dict[str, Any]) -> dict:
+        return await self._request_json(
+            "POST",
+            f"/session/{session_id}/permissions/{permission_id}",
+            json=payload,
+            expected_statuses=(200, 201, 202, 204),
+        ) or {"success": True}
+
     async def event_stream(self, *, global_events: bool = False, timeout_seconds: int | None = None) -> AsyncIterator[dict[str, Any]]:
         path = "/global/event" if global_events else "/event"
         own_session = self._session is None
