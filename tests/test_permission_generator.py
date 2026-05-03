@@ -84,3 +84,22 @@ def test_runtime_compat_and_opencode_name_priority():
     p = build_permission({"allowed_capability_types": ["adapter_action"], "allowed_capability_ids": ["tool.github.get_pr", "tool.native"]}, None, tools)
     assert p["efp_github_get_pr"] == "allow"
     assert "github_get_pr" not in p and "efp_native_read" not in p
+
+
+def test_denied_builtin_skill_action_overrides_allowed_skill():
+    p = build_permission({"allowed_capability_ids": ["opencode.skill.alpha"], "denied_actions": ["opencode.builtin.skill"]}, {"skills": [{"opencode_name": "alpha"}]}, None)
+    assert p["skill"]["alpha"] == "deny"
+    assert p["skill"]["*"] == "deny"
+
+
+def test_denied_skill_action_overrides_allowed_skill():
+    p = build_permission({"allowed_capability_ids": ["opencode.skill.alpha"], "denied_actions": ["skill"]}, {"skills": [{"opencode_name": "alpha"}]}, None)
+    assert p["skill"]["alpha"] == "deny"
+    assert p["skill"]["*"] == "deny"
+
+
+def test_generated_tool_cannot_override_todowrite_or_question_builtins():
+    tools = {"tools": [{"capability_id": "tool.todo", "name": "todowrite", "policy_tags": ["read_only"]}, {"capability_id": "tool.question", "name": "question", "policy_tags": ["read_only"]}]}
+    p = build_permission({"allowed_capability_ids": ["tool.todo", "tool.question"]}, None, tools)
+    assert p["todowrite"] == "ask"
+    assert p["question"] == "ask"

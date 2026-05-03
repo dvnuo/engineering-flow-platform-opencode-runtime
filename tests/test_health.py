@@ -74,3 +74,32 @@ async def test_health_degraded_sanitizes_secret_error(monkeypatch):
     assert "SECRET-KEY-SHOULD-NOT-LEAK" not in encoded
     assert "token" not in encoded.lower()
     await client.close()
+
+
+class RaisingHealthClient:
+    async def health(self):
+        raise RuntimeError("health boom api_key SECRET-KEY-SHOULD-NOT-LEAK token")
+
+
+@pytest.mark.asyncio
+async def test_health_client_exception_is_degraded_and_does_not_leak_secret(monkeypatch, capsys):
+    monkeypatch.setenv("OPENCODE_VERSION", "1.14.29")
+    app = create_app(Settings.from_env(), opencode_client=RaisingHealthClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    resp = await client.get("/health")
+    text = await resp.text()
+
+    assert resp.status == 503
+    assert "api_key" not in text.lower()
+    assert "SECRET-KEY-SHOULD-NOT-LEAK" not in text
+    assert "token" not in text.lower()
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "SECRET-KEY-SHOULD-NOT-LEAK" not in combined
+    assert "api_key" not in combined.lower()
+    assert "token" not in combined.lower()
+
+    await client.close()

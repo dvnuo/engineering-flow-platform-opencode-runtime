@@ -15,7 +15,10 @@ from .settings import Settings
 async def health_handler(request: web.Request) -> web.Response:
     settings: Settings = request.app["settings"]
     client: OpenCodeClient = request.app["opencode_client"]
-    info = await client.health()
+    try:
+        info = await client.health()
+    except Exception:
+        info = {"healthy": False, "error": "unavailable"}
     healthy = bool(info.get("healthy"))
     payload = {
         "status": "ok" if healthy else "degraded",

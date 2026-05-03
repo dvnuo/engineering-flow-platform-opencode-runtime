@@ -6,7 +6,7 @@ from typing import Any
 MUTATION_TAGS = {"write", "mutation", "update", "delete", "comment", "transition", "assign", "external_writeback"}
 READ_TAGS = {"read_only", "read"}
 UNSAFE_TAGS = {"unsafe", "dangerous", "destructive", "credential_exfiltration"}
-RESERVED_PERMISSION_KEYS = {"*", "read", "glob", "grep", "edit", "write", "bash", "external_directory", "webfetch", "websearch", "skill"}
+RESERVED_PERMISSION_KEYS = {"*", "read", "glob", "grep", "edit", "write", "bash", "external_directory", "webfetch", "websearch", "skill", "todowrite", "question"}
 KNOWN_EXTERNAL_SYSTEMS = {"github", "jira", "confluence", "gitlab", "bitbucket", "slack", "linear"}
 BUILTIN_PERMISSION_ALIASES = {
     "read": {"read", "opencode.builtin.read"},
@@ -19,6 +19,7 @@ BUILTIN_PERMISSION_ALIASES = {
     "webfetch": {"webfetch", "opencode.builtin.webfetch"},
     "websearch": {"websearch", "opencode.builtin.websearch"},
     "question": {"question", "opencode.builtin.question"},
+    "skill": {"skill", "opencode.builtin.skill"},
 }
 
 
@@ -34,6 +35,8 @@ def default_permission_baseline() -> dict[str, Any]:
         "external_directory": "deny",
         "webfetch": "ask",
         "websearch": "ask",
+        "todowrite": "ask",
+        "question": "ask",
         "skill": {"*": "deny"},
     }
 
@@ -82,6 +85,8 @@ def _apply_builtin_denies(permission: dict[str, Any], denied_actions: set[str], 
             permission["bash"]["sudo *"] = "deny"
             permission["bash"]["git push *"] = "deny"
             permission["bash"]["curl *|*bash*"] = "deny"
+        elif key == "skill":
+            permission["skill"]["*"] = "deny"
         else:
             permission[key] = "deny"
 
@@ -134,7 +139,7 @@ def build_permission(config: dict, skills_index: dict | None = None, tools_index
 
     skills = (skills_index or {}).get("skills", []) if isinstance(skills_index, dict) else []
     known_skills = {str(i.get("opencode_name")) for i in skills if isinstance(i, dict) and i.get("opencode_name")}
-    deny_all_skills = "skill" in denied_types
+    deny_all_skills = "skill" in denied_types or "skill" in denied_actions or "opencode.builtin.skill" in denied_actions
     for name in known_skills:
         aliases = {name, f"skill:{name}", f"opencode.skill.{name}"}
         if deny_all_skills or aliases & denied_actions:
