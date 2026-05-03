@@ -6,6 +6,7 @@ from aiohttp import web
 
 from .chat_api import chat_handler, chat_stream_handler
 from .event_bus import EventBus, events_ws_handler
+from .file_routes import register_file_routes
 from .opencode_client import OpenCodeClient
 from .session_store import SessionStore
 from .sessions_api import (
@@ -50,6 +51,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app["session_store"] = SessionStore(state_paths.sessions_dir)
     app["event_bus"] = EventBus()
     app["opencode_client"] = opencode_client or OpenCodeClient(settings)
+    register_file_routes(app)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/actuator/health", health_handler)
     app.router.add_post("/api/chat", chat_handler)

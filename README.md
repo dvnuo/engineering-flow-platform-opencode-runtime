@@ -40,12 +40,20 @@ Implemented in T08:
 - optional generated subagent prompts:
   `/workspace/.opencode/agents/skill-<name>.md`
 
+T10 implemented:
+
+- `/api/server-files` browse/read/content/upload/delete/download
+- legacy `GET /api/files` and `GET /api/files/read` aliases
+- attachment upload/parse/list/preview/download/delete
+- `/api/context/files` and `/api/chunks/search`
+- `build_attachment_context` helper for T06 integration
+
 Not implemented in this task:
 
 - `/api/tasks`
 - full runtime profile mapping/apply policy
 - tools wrapper
-- files / attachments / context integrations
+- complex parsers for PDF/DOCX/XLSX (returns `unsupported_file_type` in MVP)
 
 ## Security defaults
 
