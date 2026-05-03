@@ -51,15 +51,41 @@ def _extract_text_field(payload: Any, key: str) -> str | None:
     return None
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class UsageTracker:
     def __init__(self, usage_file: Path):
         self.usage_file = usage_file
 
     def record_chat(self, *, session_id: str, request_id: str, model: str | None, provider: str | None, response_payload: Any, input_text: str, output_text: str) -> dict:
         usage = _extract_usage(response_payload or {})
-        input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
-        cost = float(usage.get("cost") or usage.get("total_cost") or 0.0)
+        input_tokens = _safe_int(usage.get("input_tokens") or usage.get("prompt_tokens"))
+        output_tokens = _safe_int(usage.get("output_tokens") or usage.get("completion_tokens"))
+        cost = _safe_float(usage.get("cost") or usage.get("total_cost"))
 
         rec = {
             "timestamp": datetime.now(UTC).isoformat(),

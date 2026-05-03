@@ -248,13 +248,15 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             await bus.publish(event)
 
         updated = store.update_after_chat(portal_session_id, message, assistant_text, model, agent)
-        provider = _optional_str(runtime_profile.get("provider")) or _optional_str(metadata.get("provider")) or (response_payload.get("provider") if isinstance(response_payload, dict) else None) or "unknown"
+        provider = _optional_str(runtime_profile.get("provider")) or _optional_str(metadata.get("provider"))
         usage_record = usage_tracker.record_chat(session_id=portal_session_id, request_id=request_id, model=model, provider=provider, response_payload=response_payload, input_text=message, output_text=assistant_text)
         final_context = {**context_state, "summary": assistant_text[:500], "current_state": "completed", "next_step": ""}
 
         chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="success", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(response_payload, 2000)})
 
-        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state="success", request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "model": model, "provider": provider, "context_state": final_context, "usage": usage_record})
+        metadata_model = usage_record.get("model") or model or "unknown"
+        metadata_provider = usage_record.get("provider") or provider or "unknown"
+        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state="success", request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "model": metadata_model, "provider": metadata_provider, "context_state": final_context, "usage": usage_record})
 
     except OpenCodeClientError as exc:
         failed = chat_failed_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=opencode_session_id, error=str(exc))
