@@ -5,6 +5,7 @@ from pathlib import Path
 from .opencode_config import build_opencode_config, write_main_agent_prompt, write_opencode_config
 from .settings import Settings
 from .skill_sync import sync_skills
+from .tool_sync import sync_tools
 
 
 
@@ -27,6 +28,12 @@ def init_assets(settings: Settings) -> None:
     sync_skills(
         settings.skills_dir,
         settings.workspace_dir / ".opencode" / "skills",
+        settings.adapter_state_dir,
+    )
+
+    sync_tools(
+        settings.tools_dir,
+        settings.workspace_dir / ".opencode" / "tools",
         settings.adapter_state_dir,
     )
 

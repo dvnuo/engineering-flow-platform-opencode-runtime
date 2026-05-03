@@ -4,6 +4,7 @@ ARG OPENCODE_VERSION=1.14.29
 ENV OPENCODE_VERSION=${OPENCODE_VERSION}
 ENV PYTHONUNBUFFERED=1
 ENV PATH="/opt/venv/bin:${PATH}"
+ENV NODE_PATH=/usr/local/lib/node_modules
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -11,7 +12,7 @@ RUN apt-get update \
     git curl ca-certificates jq ripgrep fd-find bash openssh-client tini \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g opencode-ai@${OPENCODE_VERSION} \
+RUN npm install -g opencode-ai@${OPENCODE_VERSION} @opencode-ai/plugin@${OPENCODE_VERSION} \
   && opencode --version
 
 RUN groupadd --gid 10001 opencode \

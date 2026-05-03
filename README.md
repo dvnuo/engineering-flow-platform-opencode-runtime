@@ -1,6 +1,6 @@
 # engineering-flow-platform-opencode-runtime
 
-This repository contains the **T05 + T06 + T07 + T08 + T10 scaffold** for an EFP-compatible OpenCode runtime adapter image.
+This repository contains the **T05 + T06 + T07 + T08 + T09 + T10 scaffold** for an EFP-compatible OpenCode runtime adapter image.
 
 ## Runtime topology
 
@@ -9,7 +9,7 @@ This repository contains the **T05 + T06 + T07 + T08 + T10 scaffold** for an EFP
 - Portal **must not** call OpenCode native API directly.
 - OpenCode version is pinned to **`1.14.29`**.
 
-## T05 + T06 + T07 + T08 + T10 scope
+## T05 + T06 + T07 + T08 + T09 + T10 scope
 
 Implemented in T05:
 
@@ -44,6 +44,14 @@ Implemented in T08:
   `$EFP_ADAPTER_STATE_DIR/skills-index.json`
 - optional generated subagent prompts:
   `/workspace/.opencode/agents/skill-<name>.md`
+
+
+Implemented in T09:
+
+- /app/tools ToolDescriptor -> /workspace/.opencode/tools/efp_*.ts
+- Python runner bridge through python -m efp_tools.runner
+- tools-index.json at $EFP_ADAPTER_STATE_DIR/tools-index.json
+- entrypoint PYTHONPATH integration for /app/tools/python
 
 T10 implemented:
 
@@ -80,6 +88,12 @@ python -m efp_opencode_adapter.init_assets
 python -m efp_opencode_adapter.skill_sync \
   --skills-dir /app/skills \
   --opencode-skills-dir /workspace/.opencode/skills \
+  --state-dir /home/opencode/.local/share/efp-compat
+
+# T09 tool sync smoke
+python -m efp_opencode_adapter.tool_sync \
+  --tools-dir /app/tools \
+  --opencode-tools-dir /workspace/.opencode/tools \
   --state-dir /home/opencode/.local/share/efp-compat
 
 ```
