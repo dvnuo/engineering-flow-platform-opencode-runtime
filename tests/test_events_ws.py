@@ -19,10 +19,14 @@ async def test_events_ws(tmp_path, monkeypatch):
     assert first == {"type": "connected", "engine": "opencode"}
 
     await client.post("/api/chat", json={"message": "hello", "session_id": "portal-1"})
-    ev1 = await ws.receive_json(timeout=2)
-    ev2 = await ws.receive_json(timeout=2)
-    types = {ev1["type"], ev2["type"]}
+    events = []
+    for _ in range(6):
+        events.append(await ws.receive_json(timeout=2))
+        if events[-1].get("type") == "execution.completed":
+            break
+    types = {e["type"] for e in events}
     assert "execution.started" in types
+    assert "llm_thinking" in types
     assert "execution.completed" in types
 
     ws2 = await client.ws_connect("/api/events?session_id=portal-filter")

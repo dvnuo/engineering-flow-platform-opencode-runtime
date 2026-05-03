@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from efp_opencode_adapter.session_store import SessionRecord, SessionStore
@@ -35,3 +36,48 @@ def test_rename_delete_clear_update(tmp_path: Path):
     assert up.message_count >= 2
     assert up.last_message == "echo"
     assert up.updated_at != before
+
+
+
+def test_session_store_quarantines_corrupted_index_and_starts_empty(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    index = sessions_dir / "index.json"
+    index.write_text("{ bad json", encoding="utf-8")
+
+    store = SessionStore(sessions_dir)
+
+    assert store.list_active() == []
+    assert not index.exists()
+
+    backups = list(sessions_dir.glob("index.json.corrupt-*"))
+    assert backups
+    assert backups[0].read_text(encoding="utf-8") == "{ bad json"
+
+
+def test_session_store_bad_message_count_defaults_to_zero(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    (sessions_dir / "index.json").write_text(
+        json.dumps(
+            {
+                "sessions": {
+                    "s1": {
+                        "portal_session_id": "s1",
+                        "opencode_session_id": "o1",
+                        "title": "Chat",
+                        "message_count": "bad",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    store = SessionStore(sessions_dir)
+    rec = store.get("s1")
+
+    assert rec is not None
+    assert rec.message_count == 0
+    assert rec.opencode_session_id == "o1"

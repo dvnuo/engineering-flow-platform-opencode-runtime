@@ -53,4 +53,9 @@ class FakeOpenCodeClient:
             "parts": [{"type": "text", "text": f"echo: {user_text}"}],
         }
         self.messages[session_id].extend([user, assistant])
-        return {"message": assistant}
+        return {"message": assistant, "usage": {"input_tokens": 10, "output_tokens": 5, "cost": 0.001}, "model": model or "test-model", "provider": "test-provider"}
+
+    async def respond_permission(self, session_id, permission_id, payload):
+        if session_id not in self.sessions:
+            raise OpenCodeClientError("not found", status=404)
+        return {"success": True}
