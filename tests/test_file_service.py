@@ -100,6 +100,19 @@ def test_directory_download_refuses_symlink_escape(tmp_path):
     svc = WorkspaceFileService(settings)
     with pytest.raises(PermissionError):
         svc.prepare_download("leak")
+
+
+def test_list_files_skips_symlinks(tmp_path):
+    settings = make_settings(tmp_path)
+    settings.workspace_dir.mkdir(parents=True)
+    (settings.workspace_dir / "real.txt").write_text("ok")
+    (settings.workspace_dir / "link.txt").symlink_to(settings.workspace_dir / "real.txt")
+
+    svc = WorkspaceFileService(settings)
+    names = {item["name"] for item in svc.list_files(".")["items"]}
+    assert "real.txt" in names
+    assert "link.txt" not in names
+
 @pytest.mark.asyncio
 async def test_legacy_alias_routes(tmp_path):
     settings = make_settings(tmp_path)
@@ -135,5 +148,23 @@ async def test_legacy_alias_routes(tmp_path):
     r4 = await client.get("/api/server-files/content", params={"path": "README.md"})
     assert r4.status == 200
     assert await r4.read() == b"hello"
+
+    r5 = await client.post("/api/server-files/delete", json={"path": "."})
+    assert r5.status == 403
+    d5 = await r5.json()
+    assert d5["success"] is False
+    assert "workspace root" in d5["error"] or "outside workspace" in d5["error"]
+
+    r6 = await client.post("/api/server-files/delete", json={"path": "../secret"})
+    assert r6.status == 403
+
+    badzip = FormData()
+    badzip.add_field("file", b"abc", filename="hello.txt", content_type="text/plain")
+    r7 = await client.post("/api/server-files/upload?unzip=true&directory=badzip", data=badzip)
+    assert r7.status == 400
+    d7 = await r7.json()
+    assert d7["success"] is False
+    assert d7["error"] == "invalid_zip_file"
+    assert not (settings.workspace_dir / "badzip" / "hello.txt").exists()
 
     await client.close()

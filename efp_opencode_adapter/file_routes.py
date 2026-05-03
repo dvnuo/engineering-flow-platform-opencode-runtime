@@ -110,6 +110,8 @@ def register_file_routes(app: web.Application) -> None:
                 raise ValueError("path is required")
             recursive = _truthy(str(payload.get("recursive") or request.query.get("recursive") or "false"))
             return web.json_response(file_service.delete_path(path, recursive=recursive))
+        except PermissionError as exc:
+            return _error(exc)
         except OSError as exc:
             return _error(ValueError(str(exc)))
         except Exception as exc:

@@ -52,10 +52,7 @@ class WorkspaceFileService:
         items = []
         for entry in target.iterdir():
             if entry.is_symlink():
-                try:
-                    self._ensure_under_workspace(entry)
-                except PermissionError:
-                    continue
+                continue
             stat = entry.stat()
             items.append(
                 {
@@ -118,7 +115,12 @@ class WorkspaceFileService:
         _sanitize_filename(filename)
         target_dir = self.resolve_workspace_path(directory)
         target_dir.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile as exc:
+            raise ValueError("invalid_zip_file") from exc
+
+        with zf:
             members = zf.infolist()
             extracted_items: list[str] = []
             for info in members:
