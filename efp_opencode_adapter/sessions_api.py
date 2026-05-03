@@ -9,6 +9,20 @@ from aiohttp import web
 from .opencode_client import OpenCodeClientError
 
 
+def _json_bad_request(error: str) -> web.HTTPBadRequest:
+    return web.HTTPBadRequest(text=json.dumps({"error": error}), content_type="application/json")
+
+
+async def _read_json_object(request: web.Request, *, error_prefix: str = "payload") -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception:
+        raise _json_bad_request("invalid_json")
+    if not isinstance(body, dict):
+        raise _json_bad_request(f"{error_prefix}_must_be_object")
+    return body
+
+
 def _message_info(message: Any) -> dict[str, Any]:
     if isinstance(message, dict) and isinstance(message.get("info"), dict):
         return message["info"]
@@ -139,10 +153,13 @@ async def rename_session_handler(request: web.Request) -> web.Response:
     record = store.get(sid)
     if not record or record.deleted:
         raise web.HTTPNotFound(text=json.dumps({"error": "session_not_found"}), content_type="application/json")
-    body = await request.json()
-    title = (body.get("name") or body.get("title") or "").strip()
+    body = await _read_json_object(request, error_prefix="rename_payload")
+    raw_title = body.get("name") if body.get("name") is not None else body.get("title")
+    if not isinstance(raw_title, str):
+        raise _json_bad_request("title_required")
+    title = raw_title.strip()
     if not title:
-        raise web.HTTPBadRequest(text=json.dumps({"error": "title_required"}), content_type="application/json")
+        raise _json_bad_request("title_required")
     updated = store.rename(sid, title)
     try:
         await client.patch_session(updated.opencode_session_id, title)

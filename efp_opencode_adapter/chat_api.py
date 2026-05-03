@@ -31,8 +31,34 @@ def _extract_session_id(payload: dict[str, Any]) -> str:
     return ""
 
 
-def _normalize_title(raw: str) -> str:
-    text = re.sub(r"\s+", " ", (raw or "")).strip()
+def _bad_request(error: str) -> web.HTTPBadRequest:
+    return web.HTTPBadRequest(text=json.dumps({"error": error}), content_type="application/json")
+
+
+def _metadata_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if "metadata" not in payload or payload.get("metadata") is None:
+        return {}
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        raise _bad_request("metadata_must_be_object")
+    return metadata
+
+
+def _runtime_profile_from_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    if "runtime_profile" not in metadata or metadata.get("runtime_profile") is None:
+        return {}
+    runtime_profile = metadata.get("runtime_profile")
+    if not isinstance(runtime_profile, dict):
+        raise _bad_request("runtime_profile_must_be_object")
+    return runtime_profile
+
+
+def _optional_str(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _normalize_title(raw: Any) -> str:
+    text = re.sub(r"\s+", " ", raw if isinstance(raw, str) else "").strip()
     return text or "Chat"
 
 
@@ -122,16 +148,16 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
     if not isinstance(message, str) or not message.strip():
         raise web.HTTPBadRequest(text=json.dumps({"error": "message_required"}), content_type="application/json")
 
-    metadata_raw = payload.get("metadata") or {}
-    if not isinstance(metadata_raw, dict):
-        raise web.HTTPBadRequest(text=json.dumps({"error": "metadata_must_be_object"}), content_type="application/json")
-    metadata = metadata_raw
+    metadata = _metadata_from_payload(payload)
+    runtime_profile = _runtime_profile_from_metadata(metadata)
+
     portal_session_id = payload.get("session_id") or str(uuid4())
     request_id = payload.get("request_id") or f"chat-{uuid4()}"
-    title = _normalize_title(metadata.get("title") or metadata.get("name") or message[:60])
-    model = metadata.get("model") or (metadata.get("runtime_profile") or {}).get("model")
-    agent = metadata.get("agent") or (metadata.get("runtime_profile") or {}).get("agent")
-    system = metadata.get("system") or metadata.get("system_prompt")
+    title_source = _optional_str(metadata.get("title")) or _optional_str(metadata.get("name")) or message[:60]
+    title = _normalize_title(title_source)
+    model = _optional_str(metadata.get("model")) or _optional_str(runtime_profile.get("model"))
+    agent = _optional_str(metadata.get("agent")) or _optional_str(runtime_profile.get("agent"))
+    system = _optional_str(metadata.get("system")) or _optional_str(metadata.get("system_prompt"))
 
     store = request.app["session_store"]
     bus = request.app["event_bus"]

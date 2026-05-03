@@ -49,3 +49,51 @@ async def test_sessions_endpoints(tmp_path, monkeypatch):
     assert (await cl.json())["success"] is True
     assert (await (await client.get("/api/sessions")).json())["sessions"] == []
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_rename_invalid_json_returns_400_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await client.post("/api/chat", json={"message": "hello", "session_id": "s1"})
+    res = await client.post("/api/sessions/s1/rename", data='{"name":', headers={"Content-Type": "application/json"})
+    payload = await res.json()
+
+    assert res.status == 400
+    assert payload["error"] == "invalid_json"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_rename_payload_must_be_object(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await client.post("/api/chat", json={"message": "hello", "session_id": "s1"})
+    res = await client.post("/api/sessions/s1/rename", json=["bad"])
+    payload = await res.json()
+
+    assert res.status == 400
+    assert payload["error"] == "rename_payload_must_be_object"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_rename_title_must_be_string(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await client.post("/api/chat", json={"message": "hello", "session_id": "s1"})
+    res = await client.post("/api/sessions/s1/rename", json={"name": ["bad"]})
+    payload = await res.json()
+
+    assert res.status == 400
+    assert payload["error"] == "title_required"
+    await client.close()

@@ -111,3 +111,71 @@ async def test_chat_stream_invalid_json_emits_sse_error(tmp_path, monkeypatch):
     assert "event: error" in body
     assert "invalid_json" in body
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_metadata_list_returns_400(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    res = await client.post("/api/chat", json={"message": "hello", "metadata": []})
+    payload = await res.json()
+
+    assert res.status == 400
+    assert payload["error"] == "metadata_must_be_object"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_runtime_profile_must_be_object(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    res = await client.post("/api/chat", json={"message": "hello", "metadata": {"runtime_profile": "bad"}})
+    payload = await res.json()
+
+    assert res.status == 400
+    assert payload["error"] == "runtime_profile_must_be_object"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_non_string_title_name_falls_back_without_500(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    res = await client.post(
+        "/api/chat",
+        json={"message": "hello title fallback", "metadata": {"title": ["bad"], "name": {"bad": "x"}}},
+    )
+    payload = await res.json()
+
+    assert res.status == 200
+    assert payload["response"]
+    sessions = await (await client.get("/api/sessions")).json()
+    assert sessions["sessions"][0]["name"].startswith("hello title fallback")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_runtime_profile_must_be_object_emits_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    res = await client.post("/api/chat/stream", json={"message": "hello", "metadata": {"runtime_profile": "bad"}})
+    body = await res.text()
+
+    assert res.status == 200
+    assert "text/event-stream" in res.headers.get("Content-Type", "")
+    assert "event: runtime_event" in body
+    assert "event: error" in body
+    assert "runtime_profile_must_be_object" in body
+    await client.close()
