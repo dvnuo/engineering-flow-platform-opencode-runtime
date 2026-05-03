@@ -141,7 +141,10 @@ async def get_session_handler(request: web.Request) -> web.Response:
 async def session_chatlog_handler(request: web.Request) -> web.Response:
     sid = request.match_info["session_id"]
     chatlog_store = request.app["chatlog_store"]
-    chatlog = chatlog_store.get(sid)
+    try:
+        chatlog = chatlog_store.get(sid)
+    except Exception:
+        return web.json_response({"success": True, "session_id": sid, "chatlog": None, "events": [], "runtime_events": [], "context_state": {}, "llm_debug": {}, "metadata": {"engine": "opencode", "corrupted_chatlog": True}, "status": "unknown", "request_id": ""})
     if not chatlog:
         return web.json_response({"success": True, "session_id": sid, "chatlog": None, "events": [], "runtime_events": [], "context_state": {}, "llm_debug": {}, "metadata": {"engine": "opencode"}, "status": "unknown", "request_id": ""})
     latest = chatlog_store.latest_entry(sid) or {}

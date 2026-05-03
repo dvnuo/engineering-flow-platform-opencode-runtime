@@ -20,8 +20,9 @@ class PortalMetadataClient:
             return {"success": False, "skipped": True}
         runtime_events = runtime_events or []
         md = dict(metadata or {})
+        safe_runtime_events = safe_preview(runtime_events[-50:], 4000)
         safe_metadata = safe_preview({**md, "latest_summary": summary, "engine": "opencode", "updated_at": utc_now_iso()}, 2000)
-        payload = {"latest_event_type": latest_event_type, "latest_event_state": latest_event_state, "last_execution_id": request_id, "current_task_id": task_id or None, "runtime_events_json": json.dumps(runtime_events[-50:], ensure_ascii=False), "metadata_json": json.dumps(safe_metadata, ensure_ascii=False)}
+        payload = {"latest_event_type": latest_event_type, "latest_event_state": latest_event_state, "last_execution_id": request_id, "current_task_id": task_id or None, "runtime_events_json": json.dumps(safe_runtime_events, ensure_ascii=False), "metadata_json": json.dumps(safe_metadata, ensure_ascii=False)}
         url = f"{self.settings.portal_internal_base_url.rstrip('/')}/api/internal/agents/{self.settings.portal_agent_id}/sessions/{session_id}/metadata"
         headers = {}
         if self.settings.portal_internal_token:

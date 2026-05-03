@@ -37,20 +37,60 @@ class ChatLogStore:
             return cur
         return {"session_id": session_id, "engine": "opencode", "entries": [], "updated_at": utc_now_iso()}
 
+    def _find_entry(self, payload: dict, request_id: str) -> dict | None:
+        entries = payload.setdefault("entries", [])
+        for entry in reversed(entries):
+            if entry.get("request_id") == request_id:
+                return entry
+        return None
+
+    def _new_entry(self, request_id: str) -> dict:
+        return {
+            "request_id": request_id,
+            "status": "running",
+            "message": "",
+            "response": "",
+            "events": [],
+            "runtime_events": [],
+            "context_state": {},
+            "llm_debug": {},
+            "created_at": utc_now_iso(),
+            "finished_at": "",
+        }
+
     def start_entry(self, session_id: str, *, request_id: str, message: str, runtime_events: list[dict] | None = None, context_state: dict | None = None, llm_debug: dict | None = None) -> dict:
         d = self._ensure(session_id)
-        d["entries"].append({"request_id": request_id, "status": "running", "message": safe_preview(message, 2000), "response": "", "events": [], "runtime_events": runtime_events or [], "context_state": context_state or {}, "llm_debug": llm_debug or {}, "created_at": utc_now_iso(), "finished_at": ""})
+        d.setdefault("entries", []).append({
+            "request_id": request_id,
+            "status": "running",
+            "message": safe_preview(message, 2000),
+            "response": "",
+            "events": [],
+            "runtime_events": safe_preview(runtime_events or [], 4000),
+            "context_state": safe_preview(context_state or {}, 4000),
+            "llm_debug": safe_preview(llm_debug or {}, 4000),
+            "created_at": utc_now_iso(),
+            "finished_at": "",
+        })
         d["updated_at"] = utc_now_iso()
         return self._write(session_id, d)
 
     def finish_entry(self, session_id: str, *, request_id: str, status: str, response: str, runtime_events: list[dict] | None = None, events: list[dict] | None = None, context_state: dict | None = None, llm_debug: dict | None = None) -> dict:
         d = self._ensure(session_id)
-        e = self.latest_entry(session_id)
-        if not e or e.get("request_id") != request_id:
-            self.start_entry(session_id, request_id=request_id, message="", runtime_events=[])
-            d = self._ensure(session_id)
-            e = d["entries"][-1]
-        e.update({"status": status, "response": safe_preview(response, 2000), "runtime_events": runtime_events or e.get("runtime_events", []), "events": events or e.get("events", []), "context_state": context_state or e.get("context_state", {}), "llm_debug": llm_debug or e.get("llm_debug", {}), "finished_at": utc_now_iso()})
+        e = self._find_entry(d, request_id)
+        if e is None:
+            e = self._new_entry(request_id)
+            d.setdefault("entries", []).append(e)
+
+        e.update({
+            "status": status,
+            "response": safe_preview(response, 2000),
+            "runtime_events": safe_preview(runtime_events if runtime_events is not None else e.get("runtime_events", []), 4000),
+            "events": safe_preview(events if events is not None else e.get("events", []), 4000),
+            "context_state": safe_preview(context_state if context_state is not None else e.get("context_state", {}), 4000),
+            "llm_debug": safe_preview(llm_debug if llm_debug is not None else e.get("llm_debug", {}), 4000),
+            "finished_at": utc_now_iso(),
+        })
         d["updated_at"] = utc_now_iso()
         return self._write(session_id, d)
 
@@ -59,13 +99,12 @@ class ChatLogStore:
 
     def append_event(self, session_id: str, *, request_id: str, event: dict, runtime: bool = True) -> dict:
         d = self._ensure(session_id)
-        e = self.latest_entry(session_id)
-        if not e or e.get("request_id") != request_id:
-            self.start_entry(session_id, request_id=request_id, message="")
-            d = self._ensure(session_id)
-            e = d["entries"][-1]
+        e = self._find_entry(d, request_id)
+        if e is None:
+            e = self._new_entry(request_id)
+            d.setdefault("entries", []).append(e)
         key = "runtime_events" if runtime else "events"
-        e.setdefault(key, []).append(event)
+        e.setdefault(key, []).append(safe_preview(event, 1000))
         d["updated_at"] = utc_now_iso()
         return self._write(session_id, d)
 

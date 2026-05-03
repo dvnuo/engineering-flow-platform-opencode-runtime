@@ -33,4 +33,25 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
     event = build_thinking_event("permission_resolved", session_id=str(sid or ""), request_id="", opencode_session_id=str(opencode_session_id), state="success", summary=f"Permission {decision}", data={"permission_id": permission_id, **payload})
     await request.app["event_bus"].publish(event)
+
+    portal_metadata_client = request.app.get("portal_metadata_client")
+    if portal_metadata_client is not None:
+        try:
+            await portal_metadata_client.publish_session_metadata(
+                session_id=str(sid or ""),
+                latest_event_type="permission.resolved",
+                latest_event_state="success",
+                request_id="",
+                summary=f"Permission {decision}",
+                runtime_events=[event],
+                metadata={
+                    "engine": "opencode",
+                    "opencode_session_id": str(opencode_session_id),
+                    "permission_id": permission_id,
+                    "decision": decision,
+                },
+            )
+        except Exception:
+            pass
+
     return web.json_response({"success": True})

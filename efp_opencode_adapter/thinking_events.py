@@ -51,7 +51,11 @@ def safe_preview(value: Any, max_chars: int = 500) -> Any:
         return [safe_preview(v, max_chars) for v in value]
     if isinstance(value, str):
         cleaned = _redact_env_lines(value)
-        cleaned = re.sub(r"(?i)(authorization\s*:\s*)([^\s]+)", r"\1***REDACTED***", cleaned)
+        cleaned = re.sub(
+            r"(?im)^(\s*authorization\s*:\s*).*$",
+            r"\1***REDACTED***",
+            cleaned,
+        )
         return _truncate(cleaned, max_chars)
     return value
 

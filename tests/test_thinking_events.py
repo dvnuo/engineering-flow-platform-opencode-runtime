@@ -19,3 +19,9 @@ def test_permission_event():
     e = permission_request_event(session_id='s', request_id='r', permission_id='p1', tool='bash', input_preview='rm -rf', risk_level='medium')
     assert e['type'] == 'permission_request'
     assert e['permission_id'] == 'p1'
+
+
+def test_safe_preview_redacts_authorization_header_line():
+    v = safe_preview("Authorization: Bearer abc123")
+    assert "abc123" not in v
+    assert "***REDACTED***" in v
