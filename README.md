@@ -1,6 +1,6 @@
 # engineering-flow-platform-opencode-runtime
 
-This repository contains the **T05 + T06 + T07 + T08 + T09 + T10 scaffold** for an EFP-compatible OpenCode runtime adapter image.
+This repository contains the **T05 + T06 + T07 + T08 + T09 + T10 + T11 scaffold** for an EFP-compatible OpenCode runtime adapter image.
 
 ## Runtime topology
 
@@ -9,7 +9,7 @@ This repository contains the **T05 + T06 + T07 + T08 + T09 + T10 scaffold** for 
 - Portal **must not** call OpenCode native API directly.
 - OpenCode version is pinned to **`1.14.29`**.
 
-## T05 + T06 + T07 + T08 + T09 + T10 scope
+## T05 + T06 + T07 + T08 + T09 + T10 + T11 scope
 
 Implemented in T05:
 
@@ -61,9 +61,15 @@ T10 implemented:
 - `/api/context/files` and `/api/chunks/search`
 - `build_attachment_context` helper for T06 integration
 
-Not implemented in this task:
+T11 implemented:
 
-- `/api/tasks`
+- POST /api/tasks/execute
+- GET /api/tasks/{task_id}
+- persisted task state at $EFP_ADAPTER_STATE_DIR/tasks/{task_id}.json
+- task prompt templates for GitHub PR review, Jira workflow review, delegation, bundle, generic
+- task lifecycle events on /api/events
+
+Not implemented in this task:
 - complex parsers for PDF/DOCX/XLSX (returns `unsupported_file_type` in MVP)
 
 ## Security defaults
