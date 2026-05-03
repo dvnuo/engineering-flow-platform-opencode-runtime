@@ -1,6 +1,6 @@
 # engineering-flow-platform-opencode-runtime
 
-This repository contains the **T05 scaffold** for an EFP-compatible OpenCode runtime adapter image.
+This repository contains the **T05 + T08 + T07 scaffold** for an EFP-compatible OpenCode runtime adapter image.
 
 ## Runtime topology
 
@@ -9,14 +9,19 @@ This repository contains the **T05 scaffold** for an EFP-compatible OpenCode run
 - Portal **must not** call OpenCode native API directly.
 - OpenCode version is pinned to **`1.14.29`**.
 
-## T05 + T08 scope
+## T05 + T08 + T07 scope
 
-Implemented in this task:
+Implemented:
 
 - `GET /health`
 - `GET /actuator/health`
+- `POST /api/internal/runtime-profile/apply`
+- `GET /api/capabilities`
 - asset initialization scaffold (`python -m efp_opencode_adapter.init_assets`)
 - OpenCode readiness check via `/global/health`
+- opencode.json generation with strict permission baseline
+- provider/model mapping to `provider/model`
+- capability catalog from builtins/tools/skills/agents/MCP
 
 Implemented in T08:
 
@@ -30,9 +35,10 @@ Implemented in T08:
 Not implemented in this task:
 
 - `/api/chat`
+- `/api/chat/stream`
+- `/api/events`
 - `/api/tasks`
-- runtime profile mapping
-- tools wrapper
+- actual generated TS tools wrappers
 - files / attachments / context integrations
 
 ## Security defaults

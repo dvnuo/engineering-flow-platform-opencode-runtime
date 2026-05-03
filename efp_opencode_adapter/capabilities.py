@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
-from .opencode_config import read_json_file
+from .index_loader import load_skills_index, load_tools_index, read_json_file
 from .profile_store import redact_secrets
 from .settings import Settings
 
@@ -23,8 +24,13 @@ BUILTIN_CAPABILITIES = [
     {"capability_id": "opencode.builtin.question", "type": "tool", "name": "question", "description": "Request user interaction", "enabled": True, "policy_tags": ["user_interaction"], "source_ref": "opencode"},
 ]
 
+
+def _drop_none(payload: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in payload.items() if v is not None}
+
+
 def load_skills_capabilities(settings: Settings) -> list[dict[str, Any]]:
-    data = read_json_file(settings.adapter_state_dir / "skills-index.json") or {}
+    data = load_skills_index(settings)
     out = []
     for item in data.get("skills", []):
         if not isinstance(item, dict) or not item.get("opencode_name"):
@@ -35,36 +41,60 @@ def load_skills_capabilities(settings: Settings) -> list[dict[str, Any]]:
         out.append({"capability_id": f"opencode.skill.{item['opencode_name']}", "type": "skill", "name": item["opencode_name"], "description": item.get("description", ""), "enabled": True, "policy_tags": tags, "source_ref": "skills_repo", "metadata": {"efp_name": item.get("efp_name"), "tools": item.get("tools", []), "task_tools": item.get("task_tools", [])}})
     return out
 
+
 def load_tools_capabilities(settings: Settings) -> list[dict[str, Any]]:
-    paths = [
-        settings.adapter_state_dir / "tools-index.json",
-        settings.workspace_dir / ".opencode" / "tools-index.json",
-        settings.tools_dir / "tools-index.json",
-        settings.tools_dir / "manifest.json",
-    ]
-    data = None
-    for p in paths:
-        data = read_json_file(p)
-        if data:
-            break
-    if not data:
-        return []
-    items = data.get("tools") if isinstance(data.get("tools"), list) else data.get("capabilities") if isinstance(data.get("capabilities"), list) else []
     out = []
-    for t in items:
+    for t in load_tools_index(settings).get("tools", []):
         if not isinstance(t, dict):
             continue
-        cap_id = t.get("capability_id") or t.get("tool_id") or t.get("action_id")
-        name = t.get("opencode_name") or t.get("name")
-        if not cap_id or not name:
-            continue
-        out.append({"capability_id": cap_id, "type": t.get("type", "adapter_action"), "name": name, "description": t.get("description", ""), "policy_tags": t.get("policy_tags", []), "source_ref": t.get("source_ref", "tools_repo"), "enabled": t.get("enabled", True), "input_schema": t.get("input_schema"), "output_schema": t.get("output_schema"), "requires_identity_binding": t.get("requires_identity_binding")})
+        out.append(
+            _drop_none(
+                {
+                    "capability_id": t.get("capability_id"),
+                    "type": t.get("type", "adapter_action"),
+                    "name": t.get("name"),
+                    "description": t.get("description", ""),
+                    "policy_tags": t.get("policy_tags", []),
+                    "source_ref": t.get("source_ref", "tools_repo"),
+                    "enabled": t.get("enabled", True),
+                    "input_schema": t.get("input_schema"),
+                    "output_schema": t.get("output_schema"),
+                    "requires_identity_binding": t.get("requires_identity_binding"),
+                }
+            )
+        )
     return out
+
 
 def load_agent_capabilities(settings: Settings) -> list[dict[str, Any]]:
     cfg = read_json_file(settings.opencode_config_path) or {}
     agents = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
     return [{"capability_id": f"opencode.agent.{name}", "type": "agent", "name": name, "description": (meta.get("description") if isinstance(meta, dict) and meta.get("description") else f"OpenCode agent {name}"), "enabled": True, "policy_tags": ["agent"], "source_ref": "opencode_config"} for name, meta in agents.items()]
+
+
+def normalize_mcp_capability(item: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    name = item.get("name")
+    cap_id = item.get("capability_id")
+    if not cap_id and not name:
+        return None
+    if not cap_id and name:
+        safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(name)).strip("_").lower() or "tool"
+        cap_id = f"opencode.mcp.{safe}"
+    tags = ["mcp"] + [str(x) for x in (item.get("policy_tags") or [])]
+    cap = {
+        "capability_id": str(cap_id),
+        "type": item.get("type", "mcp_tool"),
+        "name": str(name or cap_id),
+        "description": item.get("description", ""),
+        "enabled": bool(item.get("enabled", True)),
+        "policy_tags": tags,
+        "source_ref": item.get("source_ref", "opencode_mcp"),
+        "input_schema": item.get("input_schema") or item.get("inputSchema"),
+        "output_schema": item.get("output_schema") or item.get("outputSchema"),
+    }
+    return _drop_none(cap)
 
 
 async def build_capability_catalog(settings: Settings, opencode_client=None) -> dict:
@@ -74,8 +104,9 @@ async def build_capability_catalog(settings: Settings, opencode_client=None) -> 
             mcp_data = await opencode_client.mcp()
             if isinstance(mcp_data, dict) and isinstance(mcp_data.get("tools"), list):
                 for item in mcp_data["tools"]:
-                    if isinstance(item, dict):
-                        capabilities.append(redact_secrets(item))
+                    cap = normalize_mcp_capability(item) if isinstance(item, dict) else None
+                    if cap:
+                        capabilities.append(cap)
         except Exception:
             pass
     capabilities = [redact_secrets(item) for item in capabilities]

@@ -3,20 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
 
+from .index_loader import load_skills_index, load_tools_index
 from .permission_generator import build_permission
 from .settings import Settings
-
-
-def read_json_file(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 def model_from_runtime_profile(config: dict) -> str | None:
@@ -50,7 +40,9 @@ def write_main_agent_prompt(settings: Settings) -> Path:
 
 def build_opencode_config(settings: Settings, runtime_config: dict | None = None) -> tuple[dict, str, list[str]]:
     runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
-    permission = build_permission(runtime_config)
+    skills_index = load_skills_index(settings)
+    tools_index = load_tools_index(settings)
+    permission = build_permission(runtime_config, skills_index=skills_index, tools_index=tools_index)
     generated = {
         "$schema": "https://opencode.ai/config.json",
         "autoupdate": False,

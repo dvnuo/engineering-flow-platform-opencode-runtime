@@ -52,7 +52,13 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     llm = runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
     provider, api_key = llm.get("provider"), llm.get("api_key")
     if provider and api_key and hasattr(client, "put_auth"):
-        await client.put_auth(provider, api_key)
+        auth_result = await client.put_auth(provider, api_key)
+        if auth_result.get("success"):
+            pass
+        elif auth_result.get("skipped"):
+            warnings.append("opencode auth update skipped")
+        else:
+            warnings.append("opencode auth update failed; manual auth or restart may be required")
     elif provider and api_key:
         warnings.append("opencode auth update skipped")
     pending_restart = True
