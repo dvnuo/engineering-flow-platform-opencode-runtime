@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from efp_opencode_adapter.init_assets import init_assets
 from efp_opencode_adapter.settings import Settings
 
@@ -7,7 +9,7 @@ from efp_opencode_adapter.settings import Settings
 def test_init_assets_creates_dirs_and_config(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     skills = tmp_path / "skills"
-    tools = tmp_path / "tools"
+    tools = tmp_path / "missing-tools"
     state = tmp_path / "state"
     config = workspace / ".opencode" / "opencode.json"
 
@@ -21,7 +23,8 @@ def test_init_assets_creates_dirs_and_config(tmp_path, monkeypatch):
     (skills / "sample-skill" / "skill.md").write_text("---\nname: sample-skill\ndescription: Sample\n---\n\nBody\n", encoding="utf-8")
 
     settings = Settings.from_env()
-    init_assets(settings)
+    with pytest.warns(UserWarning, match="tools directory does not exist"):
+        init_assets(settings)
 
     assert (workspace / ".opencode").exists()
     assert (workspace / ".opencode" / "skills").exists()
@@ -31,6 +34,9 @@ def test_init_assets_creates_dirs_and_config(tmp_path, monkeypatch):
     assert config.exists()
     assert (workspace / ".opencode" / "skills" / "sample-skill" / "SKILL.md").exists()
     assert (state / "skills-index.json").exists()
+    assert (state / "tools-index.json").exists()
+    tools_index = json.loads((state / "tools-index.json").read_text(encoding="utf-8"))
+    assert tools_index["tools"] == []
 
     payload = json.loads(config.read_text())
     assert payload["autoupdate"] is False
@@ -49,6 +55,7 @@ def test_init_assets_does_not_overwrite_existing_config(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     skills = tmp_path / "skills"
     tools = tmp_path / "tools"
+    tools.mkdir(parents=True, exist_ok=True)
     state = tmp_path / "state"
     config = workspace / ".opencode" / "opencode.json"
 
@@ -73,3 +80,48 @@ def test_init_assets_does_not_overwrite_existing_config(tmp_path, monkeypatch):
     assert (workspace / ".opencode" / "skills").exists()
     assert (workspace / ".opencode" / "tools").exists()
     assert (workspace / ".opencode" / "agents").exists()
+
+
+def test_init_assets_syncs_tools_with_generator(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    skills = tmp_path / "skills"
+    tools = tmp_path / "tools"
+    state = tmp_path / "state"
+    config = workspace / ".opencode" / "opencode.json"
+
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
+    monkeypatch.setenv("EFP_TOOLS_DIR", str(tools))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(config))
+
+    (skills / "sample-skill").mkdir(parents=True, exist_ok=True)
+    (skills / "sample-skill" / "skill.md").write_text("---\nname: sample-skill\ndescription: Sample\n---\n\nBody\n", encoding="utf-8")
+
+    tools.mkdir(parents=True, exist_ok=True)
+    (tools / "manifest.yaml").write_text("tools: []\n", encoding="utf-8")
+    generator = tools / "adapters" / "opencode" / "generate_tools.py"
+    generator.parent.mkdir(parents=True, exist_ok=True)
+    generator.write_text(
+        """
+import argparse, json
+from pathlib import Path
+
+p=argparse.ArgumentParser()
+p.add_argument('--tools-dir', required=True)
+p.add_argument('--opencode-tools-dir', required=True)
+p.add_argument('--state-dir', required=True)
+a=p.parse_args()
+Path(a.opencode_tools_dir).mkdir(parents=True, exist_ok=True)
+(Path(a.opencode_tools_dir)/'efp_context_echo.ts').write_text('//wrapper', encoding='utf-8')
+Path(a.state_dir).mkdir(parents=True, exist_ok=True)
+(Path(a.state_dir)/'tools-index.json').write_text(json.dumps({'generated_at':'now','tools':[{'opencode_name':'efp_context_echo'}]}), encoding='utf-8')
+""",
+        encoding="utf-8",
+    )
+
+    init_assets(Settings.from_env())
+
+    assert (workspace / ".opencode" / "tools" / "efp_context_echo.ts").exists()
+    tools_index = json.loads((state / "tools-index.json").read_text(encoding="utf-8"))
+    assert tools_index["tools"][0]["opencode_name"] == "efp_context_echo"
