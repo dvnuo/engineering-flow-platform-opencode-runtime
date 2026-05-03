@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from efp_opencode_adapter.init_assets import init_assets
 from efp_opencode_adapter.settings import Settings
 
@@ -21,7 +23,8 @@ def test_init_assets_creates_dirs_and_config(tmp_path, monkeypatch):
     (skills / "sample-skill" / "skill.md").write_text("---\nname: sample-skill\ndescription: Sample\n---\n\nBody\n", encoding="utf-8")
 
     settings = Settings.from_env()
-    init_assets(settings)
+    with pytest.warns(UserWarning, match="tools directory does not exist"):
+        init_assets(settings)
 
     assert (workspace / ".opencode").exists()
     assert (workspace / ".opencode" / "skills").exists()

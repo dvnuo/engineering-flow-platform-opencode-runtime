@@ -64,7 +64,6 @@ T10 implemented:
 Not implemented in this task:
 
 - `/api/tasks`
-- tools wrapper
 - complex parsers for PDF/DOCX/XLSX (returns `unsupported_file_type` in MVP)
 
 ## Security defaults
