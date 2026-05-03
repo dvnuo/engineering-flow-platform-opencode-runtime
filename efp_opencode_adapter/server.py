@@ -4,8 +4,21 @@ import argparse
 
 from aiohttp import web
 
+from .chat_api import chat_handler, chat_stream_handler
+from .event_bus import EventBus, events_ws_handler
 from .opencode_client import OpenCodeClient
+from .session_store import SessionStore
+from .sessions_api import (
+    clear_sessions_handler,
+    delete_session_handler,
+    get_session_handler,
+    list_sessions_handler,
+    rename_session_handler,
+    session_chatlog_handler,
+    unsupported_message_mutation_handler,
+)
 from .settings import Settings
+from .state import ensure_state_dirs
 
 
 async def health_handler(request: web.Request) -> web.Response:
@@ -32,9 +45,26 @@ async def health_handler(request: web.Request) -> web.Response:
 def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None) -> web.Application:
     app = web.Application()
     app["settings"] = settings
+    state_paths = ensure_state_dirs(settings)
+    app["state_paths"] = state_paths
+    app["session_store"] = SessionStore(state_paths.sessions_dir)
+    app["event_bus"] = EventBus()
     app["opencode_client"] = opencode_client or OpenCodeClient(settings)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/actuator/health", health_handler)
+    app.router.add_post("/api/chat", chat_handler)
+    app.router.add_post("/api/chat/stream", chat_stream_handler)
+    app.router.add_get("/api/events", events_ws_handler)
+    app.router.add_get("/api/sessions", list_sessions_handler)
+    app.router.add_post("/api/clear", clear_sessions_handler)
+    app.router.add_get("/api/sessions/{session_id}/chatlog", session_chatlog_handler)
+    app.router.add_post("/api/sessions/{session_id}/rename", rename_session_handler)
+    app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/edit", unsupported_message_mutation_handler)
+    app.router.add_post(
+        "/api/sessions/{session_id}/messages/{message_id}/delete-from-here", unsupported_message_mutation_handler
+    )
+    app.router.add_get("/api/sessions/{session_id}", get_session_handler)
+    app.router.add_delete("/api/sessions/{session_id}", delete_session_handler)
     return app
 
 
