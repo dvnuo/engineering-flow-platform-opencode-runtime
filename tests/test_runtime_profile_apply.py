@@ -109,3 +109,56 @@ async def test_apply_client_exceptions_are_best_effort_and_sanitized(tmp_path, m
     assert (workspace / ".opencode/opencode.json").exists()
     assert secret not in (workspace / ".opencode/opencode.json").read_text()
     await client.close()
+
+
+class FakeAuthOnlyClient:
+    def __init__(self):
+        self.auth_calls = []
+
+    async def health(self):
+        return {"healthy": True, "version": "1.14.29"}
+
+    async def put_auth(self, provider, api_key):
+        self.auth_calls.append((provider, api_key))
+        return {"success": True, "status": 200}
+
+    async def patch_config(self, config):
+        return {"success": True, "status": 200}
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_only_llm_marks_llm_updated(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+
+    fake = FakeAuthOnlyClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    secret = "SECRET-KEY-SHOULD-NOT-LEAK"
+    resp = await client.post(
+        "/api/internal/runtime-profile/apply",
+        headers={"X-Portal-Author-Source": "portal"},
+        json={
+            "runtime_profile_id": "rp-auth",
+            "revision": 2,
+            "config": {"llm": {"provider": "anthropic", "api_key": secret}},
+        },
+    )
+    body = await resp.json()
+
+    assert resp.status == 200
+    assert body["success"] is True
+    assert "llm" in body["updated_sections"]
+    assert "permission" in body["updated_sections"]
+    assert "agent" in body["updated_sections"]
+    assert secret not in json.dumps(body)
+
+    cfg_text = (workspace / ".opencode/opencode.json").read_text()
+    assert secret not in cfg_text
+    assert fake.auth_calls == [("anthropic", secret)]
+
+    await client.close()

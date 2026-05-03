@@ -20,6 +20,9 @@ def test_denied_actions_can_deny_builtin_bash_without_losing_dangerous_rules():
     p = build_permission({"denied_actions": ["bash"]}, None, None)
     assert isinstance(p["bash"], dict)
     assert p["bash"]["*"] == "deny"
+    assert p["bash"]["git status*"] == "deny"
+    assert p["bash"]["git diff*"] == "deny"
+    assert p["bash"]["git log*"] == "deny"
     assert p["bash"]["rm *"] == "deny"
     assert p["bash"]["sudo *"] == "deny"
     assert p["bash"]["git push *"] == "deny"
@@ -103,3 +106,37 @@ def test_generated_tool_cannot_override_todowrite_or_question_builtins():
     p = build_permission({"allowed_capability_ids": ["tool.todo", "tool.question"]}, None, tools)
     assert p["todowrite"] == "ask"
     assert p["question"] == "ask"
+
+
+def test_denied_capability_type_shell_denies_all_bash_patterns():
+    p = build_permission({"denied_capability_types": ["shell"]}, None, None)
+    assert p["bash"]["*"] == "deny"
+    assert p["bash"]["git status*"] == "deny"
+    assert p["bash"]["git diff*"] == "deny"
+    assert p["bash"]["git log*"] == "deny"
+    assert p["bash"]["rm *"] == "deny"
+    assert p["bash"]["sudo *"] == "deny"
+    assert p["bash"]["git push *"] == "deny"
+    assert p["bash"]["curl *|*bash*"] == "deny"
+
+
+def test_denied_capability_type_tool_denies_all_bash_patterns():
+    p = build_permission({"denied_capability_types": ["tool"]}, None, None)
+    assert p["bash"]["*"] == "deny"
+    assert p["bash"]["git status*"] == "deny"
+    assert p["bash"]["git diff*"] == "deny"
+    assert p["bash"]["git log*"] == "deny"
+
+
+def test_denied_capability_type_tool_overrides_allowed_skill():
+    p = build_permission({"allowed_capability_ids": ["opencode.skill.alpha"], "denied_capability_types": ["tool"]}, {"skills": [{"opencode_name": "alpha"}]}, None)
+    assert p["skill"]["alpha"] == "deny"
+    assert p["skill"]["*"] == "deny"
+
+
+def test_denied_actions_opencode_builtin_bash_denies_all_bash_patterns():
+    p = build_permission({"denied_actions": ["opencode.builtin.bash"]}, None, None)
+    assert p["bash"]["*"] == "deny"
+    assert p["bash"]["git status*"] == "deny"
+    assert p["bash"]["git diff*"] == "deny"
+    assert p["bash"]["git log*"] == "deny"

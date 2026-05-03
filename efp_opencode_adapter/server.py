@@ -54,6 +54,8 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     write_opencode_config(settings, generated_config)
     warnings: list[str] = []
     llm = runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
+    if llm and any(key in llm for key in ("provider", "model", "api_key", "temperature", "max_tokens")) and "llm" not in updated_sections:
+        updated_sections.append("llm")
     provider, api_key = llm.get("provider"), llm.get("api_key")
     if provider and api_key:
         if hasattr(client, "put_auth"):

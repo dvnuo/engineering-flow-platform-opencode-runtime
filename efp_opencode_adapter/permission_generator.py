@@ -80,11 +80,20 @@ def _apply_builtin_denies(permission: dict[str, Any], denied_actions: set[str], 
         if not (deny_all_tools or aliases & denied_actions or (key == "bash" and deny_shell)):
             continue
         if key == "bash":
-            permission["bash"]["*"] = "deny"
-            permission["bash"]["rm *"] = "deny"
-            permission["bash"]["sudo *"] = "deny"
-            permission["bash"]["git push *"] = "deny"
-            permission["bash"]["curl *|*bash*"] = "deny"
+            bash_permission = permission.setdefault("bash", {})
+            if not isinstance(bash_permission, dict):
+                bash_permission = {}
+                permission["bash"] = bash_permission
+            for pattern in list(bash_permission.keys()):
+                bash_permission[pattern] = "deny"
+            bash_permission["*"] = "deny"
+            bash_permission["git status*"] = "deny"
+            bash_permission["git diff*"] = "deny"
+            bash_permission["git log*"] = "deny"
+            bash_permission["rm *"] = "deny"
+            bash_permission["sudo *"] = "deny"
+            bash_permission["git push *"] = "deny"
+            bash_permission["curl *|*bash*"] = "deny"
         elif key == "skill":
             permission["skill"]["*"] = "deny"
         else:
@@ -139,7 +148,7 @@ def build_permission(config: dict, skills_index: dict | None = None, tools_index
 
     skills = (skills_index or {}).get("skills", []) if isinstance(skills_index, dict) else []
     known_skills = {str(i.get("opencode_name")) for i in skills if isinstance(i, dict) and i.get("opencode_name")}
-    deny_all_skills = "skill" in denied_types or "skill" in denied_actions or "opencode.builtin.skill" in denied_actions
+    deny_all_skills = "tool" in denied_types or "skill" in denied_types or "skill" in denied_actions or "opencode.builtin.skill" in denied_actions
     for name in known_skills:
         aliases = {name, f"skill:{name}", f"opencode.skill.{name}"}
         if deny_all_skills or aliases & denied_actions:
