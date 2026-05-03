@@ -179,7 +179,7 @@ def _assistant_text_from_messages(messages: list[dict[str, Any]], start: int, re
 def _assistant_text_from_event(event: dict[str, Any]) -> str | None:
     canonical = _canonical_event(event)
     event_type = _event_type(canonical)
-    if event_type == "message.part.updated" and isinstance(canonical.get("properties"), dict) and "delta" in canonical.get("properties", {}):
+    if event_type == "message.part.updated":
         return None
     candidates: list[dict[str, Any]] = []
     if _message_role(canonical) == "assistant":
@@ -192,10 +192,6 @@ def _assistant_text_from_event(event: dict[str, Any]) -> str | None:
             nested_message = val.get("message")
             if isinstance(nested_message, dict) and _message_role(nested_message) == "assistant":
                 candidates.append(nested_message)
-    props = canonical.get("properties") if isinstance(canonical.get("properties"), dict) else {}
-    part = props.get("part") if isinstance(props.get("part"), dict) else None
-    if part and part.get("type") == "text" and isinstance(part.get("text"), str):
-        return part["text"]
     return extract_assistant_text(candidates) or None
 
 
@@ -383,11 +379,13 @@ async def execute_task_handler(request: web.Request) -> web.Response:
 
         opencode_message_id = f"efp-task-{uuid4().hex}"
         prompt_payload["messageID"] = opencode_message_id
-        prompt_result = await client.prompt_async(record.opencode_session_id, prompt_payload)
-        prompt_id = _extract_response_id(prompt_result) or opencode_message_id
-        record = task_store.update(task_id, status="running", started_at=utc_now_iso(), opencode_prompt_id=prompt_id, opencode_message_id=prompt_id)
+        record = task_store.update(task_id, status="running", started_at=utc_now_iso(), opencode_prompt_id=opencode_message_id, opencode_message_id=opencode_message_id)
         await _publish_task_event(request.app, record, "task.started", "running")
         schedule_task_collector(request.app, task_id)
+        prompt_result = await client.prompt_async(record.opencode_session_id, prompt_payload)
+        prompt_id = _extract_response_id(prompt_result) or opencode_message_id
+        if prompt_id != opencode_message_id:
+            record = task_store.update(task_id, opencode_prompt_id=prompt_id)
         return web.json_response({"ok": True, "status": "accepted", "task_id": task_id, "request_id": request_id}, status=202)
     except OpenCodeClientError as exc:
         record = await _mark_dispatch_error(request.app, task_id, task_type=task_type, request_id=request_id, portal_session_id=portal_session_id, input_payload=input_payload, metadata=metadata, source=source, shared_context_ref=shared_context_ref, context_ref=context_ref, exc=exc)

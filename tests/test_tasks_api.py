@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from efp_opencode_adapter.task_store import TaskRecord, utc_now_iso
-from efp_opencode_adapter.tasks_api import _assistant_text_from_messages
+from efp_opencode_adapter.tasks_api import _assistant_text_from_event, _assistant_text_from_messages
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -50,8 +50,17 @@ class FakeTaskOpenCodeClient(FakeOpenCodeClient):
         return self.message_details.get((session_id, message_id), {})
 
     async def event_stream(self, *, global_events=False, timeout_seconds=None):
-        for event in self.stream_events:
-            yield event
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + float(timeout_seconds or 0)
+        emitted = 0
+        while True:
+            while emitted < len(self.stream_events):
+                event = self.stream_events[emitted]
+                emitted += 1
+                yield event
+            if timeout_seconds is None or loop.time() >= deadline:
+                break
+            await asyncio.sleep(0.005)
 
 
 async def _wait_terminal(client, task_id, tries=80):
@@ -249,6 +258,29 @@ async def test_official_assistant_parent_id_matches(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_prompt_result_id_does_not_replace_generated_message_id_parent_correlation(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient(no_assistant=True, prompt_result={"id": "async-123"})
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'tcorrelate', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    sid = fake.prompt_async_calls[0][0]
+    generated = fake.prompt_async_calls[0][1]["messageID"]
+    fake.messages[sid].append({
+        "info": {"id": "assistant-1", "sessionID": sid, "role": "assistant", "parentID": generated},
+        "parts": [{"type": "text", "text": '{"status":"success","summary":"parent generated"}'}],
+    })
+    p = await _wait_terminal(c, 'tcorrelate')
+    assert p["status"] == "success"
+    assert p["output_payload"]["summary"] == "parent generated"
+    task_json = json.loads((tmp_path / 'state' / 'tasks' / 'tcorrelate.json').read_text())
+    assert task_json["opencode_prompt_id"] == "async-123"
+    assert task_json["opencode_message_id"] == generated
+    await c.close()
+
+
+@pytest.mark.asyncio
 async def test_official_message_part_updated_fetches_full_message(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
     monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
@@ -268,6 +300,21 @@ async def test_official_message_part_updated_fetches_full_message(tmp_path, monk
     assert p['status'] == 'success'
     assert p['output_payload']['summary'] == 'from official part'
     await c.close()
+
+
+def test_message_part_updated_text_is_not_final_completion():
+    evt = {
+        "type": "message.part.updated",
+        "properties": {
+            "part": {
+                "sessionID": "ses-1",
+                "messageID": "assistant-1",
+                "type": "text",
+                "text": '{"status":"success","summary":"partial"}',
+            }
+        },
+    }
+    assert _assistant_text_from_event(evt) is None
 
 
 @pytest.mark.asyncio
