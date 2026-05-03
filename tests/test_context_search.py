@@ -37,10 +37,19 @@ async def test_context_and_search_routes(tmp_path):
     form.add_field("file", b"revenue and margin", filename="note.txt", content_type="text/plain")
     up = await client.post("/api/files/upload?session_id=s1", data=form)
     assert up.status == 200
-    fid = (await up.json())["file_id"]
+    up_json = await up.json()
+    assert up_json["size"] == len(b"revenue and margin")
+    fid = up_json["file_id"]
+    original = settings.adapter_state_dir / "attachments" / "s1" / fid / "original"
+    assert original.read_bytes() == b"revenue and margin"
 
     parsed = await client.post("/api/files/parse", json={"session_id": "s1", "file_id": fid})
     assert parsed.status == 200
+    parsed_json = await parsed.json()
+    assert parsed_json["success"] is True
+    assert parsed_json["text"] == "revenue and margin"
+    assert parsed_json["chunks"]
+    assert parsed_json["chunks"][0]["content"] == "revenue and margin"
 
     ctx = await client.get("/api/context/files", params={"session_id": "s1"})
     assert ctx.status == 200

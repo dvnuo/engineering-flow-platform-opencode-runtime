@@ -70,6 +70,36 @@ def test_workspace_service_core(tmp_path):
     assert svc.delete_path("src", recursive=True)["deleted"] is True
 
 
+
+
+def test_upload_refuses_existing_symlink_escape(tmp_path):
+    settings = make_settings(tmp_path)
+    settings.workspace_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret")
+    uploads = settings.workspace_dir / "uploads"
+    uploads.mkdir()
+    (uploads / "hello.txt").symlink_to(outside)
+
+    svc = WorkspaceFileService(settings)
+    with pytest.raises(PermissionError):
+        svc.upload_file("uploads", "hello.txt", b"abc")
+
+    assert outside.read_text() == "secret"
+
+
+def test_directory_download_refuses_symlink_escape(tmp_path):
+    settings = make_settings(tmp_path)
+    settings.workspace_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret")
+    leak = settings.workspace_dir / "leak"
+    leak.mkdir()
+    (leak / "secret.txt").symlink_to(outside)
+
+    svc = WorkspaceFileService(settings)
+    with pytest.raises(PermissionError):
+        svc.prepare_download("leak")
 @pytest.mark.asyncio
 async def test_legacy_alias_routes(tmp_path):
     settings = make_settings(tmp_path)
@@ -97,5 +127,13 @@ async def test_legacy_alias_routes(tmp_path):
     form.add_field("directory", "uploads")
     r3 = await client.post("/api/server-files/upload", data=form)
     assert r3.status == 200
+    r3_json = await r3.json()
+    assert r3_json["success"] is True
+    assert r3_json["size"] == 3
+    assert (settings.workspace_dir / "uploads" / "hello.txt").read_bytes() == b"abc"
+
+    r4 = await client.get("/api/server-files/content", params={"path": "README.md"})
+    assert r4.status == 200
+    assert await r4.read() == b"hello"
 
     await client.close()

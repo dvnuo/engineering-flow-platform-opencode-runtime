@@ -44,7 +44,8 @@ def test_attachment_lifecycle(tmp_path):
     p, _ = svc.download_path(fid, "s1")
     assert p.name == "original"
 
-    ctx = build_attachment_context("s1", [{"file_id": fid}], settings=settings, max_chars=100)
+    ctx = build_attachment_context("s1", [{"file_id": fid}], settings=settings, max_chars=120)
+    assert len(ctx) <= 120
     assert ctx.startswith("Attached files:")
     assert "## note.txt" in ctx
     assert "Attachment context truncated" in ctx

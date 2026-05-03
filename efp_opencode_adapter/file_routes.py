@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from aiohttp import web
 
 from .attachment_service import AttachmentService
 from .file_service import WorkspaceFileService
+
+
+@dataclass(frozen=True)
+class UploadedPart:
+    field_name: str
+    filename: str
+    content_type: str | None
+    data: bytes
 
 
 def _error(exc: Exception) -> web.Response:
@@ -22,20 +32,32 @@ def _truthy(v: str | None) -> bool:
     return (v or "").lower() in {"1", "true", "yes", "on"}
 
 
-async def _multipart(request: web.Request):
+async def _multipart_upload(request: web.Request) -> tuple[UploadedPart | None, dict[str, str]]:
     reader = await request.multipart()
-    fields = {}
-    file_part = None
+    fields: dict[str, str] = {}
+    upload: UploadedPart | None = None
+
     while True:
         part = await reader.next()
         if part is None:
             break
-        if part.filename and file_part is None:
-            if part.name == "file" or file_part is None:
-                file_part = part
-        elif part.name:
+
+        if part.filename:
+            data = await part.read(decode=False)
+            candidate = UploadedPart(
+                field_name=part.name or "",
+                filename=part.filename or "upload.bin",
+                content_type=part.headers.get("Content-Type"),
+                data=data,
+            )
+            if upload is None or candidate.field_name == "file":
+                upload = candidate
+            continue
+
+        if part.name:
             fields[part.name] = await part.text()
-    return file_part, fields
+
+    return upload, fields
 
 
 def register_file_routes(app: web.Application) -> None:
@@ -65,15 +87,14 @@ def register_file_routes(app: web.Application) -> None:
 
     async def server_files_upload(request):
         try:
-            part, fields = await _multipart(request)
-            if part is None:
+            upload, fields = await _multipart_upload(request)
+            if upload is None:
                 raise ValueError("file is required")
-            data = await part.read(decode=False)
             directory = request.query.get("directory") or request.query.get("path") or fields.get("directory") or fields.get("path") or "."
             unzip = _truthy(request.query.get("unzip") or fields.get("unzip"))
             if unzip:
-                return web.json_response(file_service.extract_zip_safely(directory, part.filename or "upload.zip", data))
-            return web.json_response(file_service.upload_file(directory, part.filename or "upload.bin", data))
+                return web.json_response(file_service.extract_zip_safely(directory, upload.filename, upload.data))
+            return web.json_response(file_service.upload_file(directory, upload.filename, upload.data))
         except Exception as exc:
             return _error(exc)
 
@@ -107,12 +128,13 @@ def register_file_routes(app: web.Application) -> None:
 
     async def attachments_upload(request):
         try:
-            part, fields = await _multipart(request)
-            if part is None:
+            upload, fields = await _multipart_upload(request)
+            if upload is None:
                 raise ValueError("file is required")
             session_id = request.query.get("session_id") or fields.get("session_id")
-            data = await part.read(decode=False)
-            return web.json_response(attachment_service.upload(session_id, part.filename, data, part.headers.get("Content-Type")))
+            return web.json_response(
+                attachment_service.upload(session_id, upload.filename, upload.data, upload.content_type)
+            )
         except Exception as exc:
             return _error(exc)
 

@@ -177,6 +177,25 @@ def _is_supported_text(name: str, content_type: str | None, raw: bytes) -> bool:
     return False
 
 
+
+
+def _append_truncated(parts: list[str], block: str, used: int, max_chars: int) -> tuple[int, bool]:
+    marker = "\n\n[Attachment context truncated]\n"
+    if used + len(block) <= max_chars:
+        parts.append(block)
+        return used + len(block), False
+
+    remaining = max_chars - used
+    if remaining <= 0:
+        return used, True
+
+    if remaining <= len(marker):
+        parts.append(marker[:remaining])
+        return max_chars, True
+
+    parts.append(block[: remaining - len(marker)])
+    parts.append(marker)
+    return max_chars, True
 def build_attachment_context(session_id: str, attachments: list[dict], *, settings: Settings | None = None, max_chars: int = 30000) -> str:
     if settings is None:
         settings = Settings.from_env()
@@ -198,12 +217,7 @@ def build_attachment_context(session_id: str, attachments: list[dict], *, settin
             continue
         title = service.sanitize_filename(meta.get("name"))
         block = f"\n## {title}\n{text}\n"
-        if used + len(block) > max_chars:
-            remain = max_chars - used
-            if remain > 0:
-                parts.append(block[:remain])
-            parts.append("\n\n[Attachment context truncated]\n")
+        used, truncated = _append_truncated(parts, block, used, max_chars)
+        if truncated:
             break
-        parts.append(block)
-        used += len(block)
     return "".join(parts) if len(parts) > 1 else ""

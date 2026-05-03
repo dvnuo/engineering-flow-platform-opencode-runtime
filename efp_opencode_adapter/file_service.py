@@ -31,8 +31,16 @@ class WorkspaceFileService:
             raise PermissionError("path outside workspace") from exc
         return resolved
 
+    def _ensure_under_workspace(self, path: Path, *, message: str = "path outside workspace") -> Path:
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(self.root)
+        except ValueError as exc:
+            raise PermissionError(message) from exc
+        return resolved
+
     def workspace_relative_path(self, path: Path) -> str:
-        rel = path.resolve().relative_to(self.root)
+        rel = self._ensure_under_workspace(path).relative_to(self.root)
         return "." if str(rel) == "." else rel.as_posix()
 
     def list_files(self, user_path: str | None) -> dict:
@@ -43,6 +51,11 @@ class WorkspaceFileService:
             raise ValueError("path must be a directory")
         items = []
         for entry in target.iterdir():
+            if entry.is_symlink():
+                try:
+                    self._ensure_under_workspace(entry)
+                except PermissionError:
+                    continue
             stat = entry.stat()
             items.append(
                 {
@@ -78,11 +91,20 @@ class WorkspaceFileService:
             raise FileNotFoundError
         return target
 
-    def upload_file(self, directory: str | None, filename: str, data: bytes) -> dict:
+    def _resolve_write_target(self, directory: str | None, filename: str) -> tuple[Path, str]:
         name = _sanitize_filename(filename)
         target_dir = self.resolve_workspace_path(directory)
         target_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_under_workspace(target_dir)
         target = target_dir / name
+        if target.is_symlink():
+            raise PermissionError("path outside workspace")
+        if target.exists():
+            self._ensure_under_workspace(target)
+        return target, name
+
+    def upload_file(self, directory: str | None, filename: str, data: bytes) -> dict:
+        target, name = self._resolve_write_target(directory, filename)
         target.write_bytes(data)
         return {
             "success": True,
@@ -156,8 +178,12 @@ class WorkspaceFileService:
             tmp.close()
             with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for p in target.rglob("*"):
-                    if p.is_file():
-                        zf.write(p, arcname=(Path(rel) / p.relative_to(target)).as_posix() if rel != "." else p.relative_to(target).as_posix())
+                    if p.is_symlink():
+                        raise PermissionError("path outside workspace")
+                    if not p.is_file():
+                        continue
+                    resolved = self._ensure_under_workspace(p)
+                    zf.write(resolved, arcname=(Path(rel) / p.relative_to(target)).as_posix() if rel != "." else p.relative_to(target).as_posix())
             return tmp_path, archive_name, "application/zip"
         raise ValueError("unsupported path")
 
