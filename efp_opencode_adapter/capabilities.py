@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .index_loader import load_skills_index, load_tools_index, read_json_file
-from .profile_store import redact_secrets, strip_secret_fields
+from .profile_store import sanitize_public_secrets
 from .settings import Settings
 
 BUILTIN_CAPABILITIES = [
@@ -109,6 +109,14 @@ async def build_capability_catalog(settings: Settings, opencode_client=None) -> 
                         capabilities.append(cap)
         except Exception:
             pass
-    capabilities = [strip_secret_fields(redact_secrets(item)) for item in capabilities]
+    sanitized = []
+    for item in capabilities:
+        clean = sanitize_public_secrets(item)
+        if not isinstance(clean, dict):
+            continue
+        if clean.get("capability_id") == "[redacted]" or clean.get("name") == "[redacted]":
+            continue
+        sanitized.append(clean)
+    capabilities = sanitized
     digest = hashlib.sha256(json.dumps(capabilities, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return {"capabilities": capabilities, "count": len(capabilities), "catalog_version": digest, "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "supports_snapshot_contract": True, "runtime_contract_version": "efp-opencode-compat-v1"}

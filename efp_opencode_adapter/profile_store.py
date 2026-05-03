@@ -11,6 +11,37 @@ REDACTED = "***REDACTED***"
 SECRET_KEYS = ("api_key", "token", "secret", "password", "authorization", "credential")
 
 
+PUBLIC_REDACTED = "[redacted]"
+
+
+def contains_secret_marker(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in SECRET_KEYS)
+
+
+def sanitize_public_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if contains_secret_marker(key):
+                continue
+            if key == "required" and isinstance(item, list):
+                out[key] = [x for x in item if not (isinstance(x, str) and contains_secret_marker(x))]
+            else:
+                out[key] = sanitize_public_secrets(item)
+        return out
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            if isinstance(item, str) and contains_secret_marker(item):
+                continue
+            result.append(sanitize_public_secrets(item))
+        return result
+    if isinstance(value, str):
+        return PUBLIC_REDACTED if contains_secret_marker(value) else value
+    return value
+
+
 @dataclass(frozen=True)
 class ProfileOverlay:
     runtime_profile_id: str | None
@@ -36,24 +67,7 @@ def redact_secrets(value: Any) -> Any:
 
 
 def strip_secret_fields(value: Any) -> Any:
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for key, item in value.items():
-            if any(marker in key.lower() for marker in SECRET_KEYS):
-                continue
-            if key == "required" and isinstance(item, list):
-                out[key] = [x for x in item if not (isinstance(x, str) and any(marker in x.lower() for marker in SECRET_KEYS))]
-            else:
-                out[key] = strip_secret_fields(item)
-        return out
-    if isinstance(value, list):
-        result = []
-        for item in value:
-            if isinstance(item, str) and any(marker in item.lower() for marker in SECRET_KEYS):
-                continue
-            result.append(strip_secret_fields(item))
-        return result
-    return value
+    return sanitize_public_secrets(value)
 
 
 class ProfileOverlayStore:

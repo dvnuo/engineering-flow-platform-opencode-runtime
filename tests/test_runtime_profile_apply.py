@@ -75,3 +75,37 @@ async def test_apply_auth_failure_warning(tmp_path, monkeypatch):
     assert any("auth update failed" in w for w in body["warnings"])
     assert secret not in json.dumps(body)
     await client.close()
+
+
+class RaisingOpenCodeClient:
+    async def health(self):
+        return {"healthy": True, "version": "1.14.29"}
+
+    async def put_auth(self, provider, api_key):
+        raise RuntimeError("boom SECRET-KEY-SHOULD-NOT-LEAK")
+
+    async def patch_config(self, config):
+        raise RuntimeError("patch boom SECRET-KEY-SHOULD-NOT-LEAK")
+
+
+@pytest.mark.asyncio
+async def test_apply_client_exceptions_are_best_effort_and_sanitized(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    app = create_app(Settings.from_env(), opencode_client=RaisingOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    secret = "SECRET-KEY-SHOULD-NOT-LEAK"
+    resp = await client.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={"runtime_profile_id": "rp1", "revision": 1, "config": {"llm": {"provider": "anthropic", "model": "claude", "api_key": secret}}})
+    body = await resp.json()
+    assert resp.status == 200
+    assert body["success"] is True
+    assert any("auth update failed" in w for w in body["warnings"])
+    assert body["pending_restart"] is True
+    encoded = json.dumps(body)
+    assert secret not in encoded
+    assert (workspace / ".opencode/opencode.json").exists()
+    assert secret not in (workspace / ".opencode/opencode.json").read_text()
+    await client.close()

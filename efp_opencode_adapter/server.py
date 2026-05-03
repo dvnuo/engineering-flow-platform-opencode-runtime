@@ -8,7 +8,7 @@ from aiohttp import web
 from .capabilities import build_capability_catalog
 from .opencode_client import OpenCodeClient
 from .opencode_config import build_opencode_config, write_main_agent_prompt, write_opencode_config
-from .profile_store import ProfileOverlay, ProfileOverlayStore
+from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_public_secrets
 from .settings import Settings
 
 
@@ -27,7 +27,8 @@ async def health_handler(request: web.Request) -> web.Response:
     if healthy:
         payload["opencode"]["version"] = info.get("version")
     else:
-        payload["opencode"]["error"] = info.get("error", "unavailable")
+        error = sanitize_public_secrets(str(info.get("error", "unavailable")))
+        payload["opencode"]["error"] = error if isinstance(error, str) else "unavailable"
     return web.json_response(payload, status=200 if healthy else 503)
 
 
@@ -51,19 +52,26 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     warnings: list[str] = []
     llm = runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
     provider, api_key = llm.get("provider"), llm.get("api_key")
-    if provider and api_key and hasattr(client, "put_auth"):
-        auth_result = await client.put_auth(provider, api_key)
-        if auth_result.get("success"):
-            pass
-        elif auth_result.get("skipped"):
-            warnings.append("opencode auth update skipped")
+    if provider and api_key:
+        if hasattr(client, "put_auth"):
+            try:
+                auth_result = await client.put_auth(provider, api_key)
+            except Exception:
+                auth_result = {"success": False, "error": "auth update failed"}
+            if auth_result.get("success"):
+                pass
+            elif auth_result.get("skipped"):
+                warnings.append("opencode auth update skipped")
+            else:
+                warnings.append("opencode auth update failed; manual auth or restart may be required")
         else:
-            warnings.append("opencode auth update failed; manual auth or restart may be required")
-    elif provider and api_key:
-        warnings.append("opencode auth update skipped")
+            warnings.append("opencode auth update skipped")
     pending_restart = True
     if hasattr(client, "patch_config"):
-        result = await client.patch_config(generated_config)
+        try:
+            result = await client.patch_config(generated_config)
+        except Exception:
+            result = {"success": False, "pending_restart": True}
         pending_restart = bool(result.get("pending_restart", not result.get("success", False)))
     if pending_restart:
         warnings.append("opencode config patch unsupported; restart may be required")

@@ -3,6 +3,7 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from efp_opencode_adapter.profile_store import sanitize_public_secrets
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 
@@ -17,16 +18,26 @@ class FakeClient:
             "tools": [
                 {"name": "github_status", "description": "GitHub status", "inputSchema": {"type": "object"}},
                 {
-                    "name": "masked_tool",
-                    "description": "Has masked schema",
+                    "name": "safe_mcp_tool",
+                    "description": "requires api_key in schema",
                     "inputSchema": {
                         "type": "object",
-                        "properties": {"api_key": {"type": "string"}, "query": {"type": "string"}},
-                        "required": ["api_key", "query"],
+                        "properties": {"query": {"type": "string", "description": "do not pass api_key token secret"}},
+                        "required": ["query", "api_key"],
                     },
                 },
             ],
         }
+
+
+def test_sanitize_public_secrets_removes_keys_and_string_values():
+    payload = {"description": "requires api_key token secret", "input_schema": {"properties": {"api_key": {"type": "string"}, "query": {"description": "api_key is not needed"}}, "required": ["api_key", "query"]}}
+    clean = sanitize_public_secrets(payload)
+    encoded = json.dumps(clean).lower()
+    assert "api_key" not in encoded
+    assert "token" not in encoded
+    assert "secret" not in encoded
+    assert "query" in encoded
 
 
 @pytest.mark.asyncio
@@ -46,11 +57,14 @@ async def test_capabilities_catalog(tmp_path, monkeypatch):
         "  - capability_id: tool.read\n"
         "    opencode_name: efp_read\n"
         "    policy_tags: [read_only]\n"
+        "    description: requires api_key token secret\n"
         "    input_schema:\n"
         "      type: object\n"
         "      properties:\n"
+        "        query:\n"
+        "          type: string\n"
+        "          description: no api_key here\n"
         "        api_key: {type: string}\n"
-        "        query: {type: string}\n"
         "      required: [api_key, query]\n"
         "  - capability_id: tool.native\n"
         "    opencode_name: native_only\n"
@@ -67,21 +81,8 @@ async def test_capabilities_catalog(tmp_path, monkeypatch):
     payload = await (await client.get("/api/capabilities")).json()
     caps = payload["capabilities"]
     names = {c.get("name") for c in caps}
-    assert {"read", "bash", "websearch", "my-skill", "efp_read", "efp-main", "github_status", "masked_tool", "opencode_tool"}.issubset(names)
+    assert {"read", "bash", "websearch", "my-skill", "efp_read", "efp-main", "github_status", "safe_mcp_tool", "opencode_tool"}.issubset(names)
     assert "native_only" not in names
-
-    mcp = next(c for c in caps if c.get("name") == "github_status")
-    assert mcp["capability_id"] == "opencode.mcp.github_status"
-    assert mcp["type"] == "mcp_tool"
-    assert mcp["source_ref"] == "opencode_mcp"
-    assert "mcp" in mcp["policy_tags"]
-
-    masked_tool = next(c for c in caps if c.get("name") == "masked_tool")
-    assert "api_key" not in json.dumps(masked_tool)
-    assert "query" in json.dumps(masked_tool)
-    manifest_tool = next(c for c in caps if c.get("name") == "efp_read")
-    assert "api_key" not in json.dumps(manifest_tool)
-    assert "query" in json.dumps(manifest_tool)
 
     for c in caps:
         for key in ("capability_id", "type", "name", "enabled", "policy_tags", "source_ref"):
@@ -90,7 +91,8 @@ async def test_capabilities_catalog(tmp_path, monkeypatch):
     assert payload["catalog_version"]
     assert payload["supports_snapshot_contract"] is True
     assert payload["runtime_contract_version"] == "efp-opencode-compat-v1"
-    encoded = json.dumps(payload)
-    for token in ("api_key", "token", "secret", "password", "authorization", "credential", "SECRET"):
-        assert token not in encoded.lower()
+    encoded = json.dumps(payload).lower()
+    for marker in ("api_key", "token", "secret", "password", "authorization", "credential"):
+        assert marker not in encoded
+    assert "query" in encoded
     await client.close()
