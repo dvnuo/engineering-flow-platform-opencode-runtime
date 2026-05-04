@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import web
 
@@ -49,9 +50,30 @@ def _load_prompt_config(settings) -> dict[str, dict[str, bool]]:
 def _clean_repo_url(url: str | None) -> str | None:
     if not url:
         return url
-    url = re.sub(r"^https?://[^@]+@", "https://", url)
-    url = re.sub(r"(https?://[^/:]+):\\d+", r"\\1", url)
-    return url
+    raw = str(url).strip()
+    if not raw:
+        return raw
+
+    # Handle scp-like git remotes such as:
+    #   git@github.com:org/repo.git
+    # This is not a URL with a scheme, but it still contains a username.
+    if "://" not in raw:
+        return re.sub(r"^[^/@:]+@([^:]+):", r"\1:", raw)
+
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return re.sub(r"^(https?://)[^/@]+@", r"\1", raw)
+
+    if parts.scheme.lower() in {"http", "https", "ssh"}:
+        # Drop username/password, port, query and fragment.
+        # Keep only scheme + hostname + path.
+        host = parts.hostname or ""
+        if not host:
+            return raw
+        return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+    return raw
 
 
 def _git_info_for_dir(path: Path) -> dict[str, str | None]:

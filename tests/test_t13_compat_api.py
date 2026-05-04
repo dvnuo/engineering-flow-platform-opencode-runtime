@@ -3,10 +3,11 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from efp_opencode_adapter.compat_api import _clean_repo_url
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from efp_opencode_adapter.task_store import TaskRecord
-from tests.test_t06_helpers import FakeOpenCodeClient
+from test_t06_helpers import FakeOpenCodeClient
 
 
 @pytest.mark.asyncio
@@ -70,3 +71,24 @@ async def test_t13_system_prompt_and_capabilities(tmp_path, monkeypatch):
     assert (await client.put('/api/agent/system-prompt/tools', json={'enabled': 'yes'})).status == 400
     cap = await (await client.get('/api/capabilities')).json(); assert cap['engine'] == 'opencode'
     await client.close()
+
+
+def test_t13_git_repo_url_sanitization_strips_credentials_ports_and_query():
+    cases = {
+        "https://oauth2:SECRET@github.com:443/org/repo.git?token=abc": "https://github.com/org/repo.git",
+        "https://token@github.com/org/repo.git": "https://github.com/org/repo.git",
+        "http://user:pass@example.com:8080/x.git": "http://example.com/x.git",
+        "ssh://git@github.com:2222/org/repo.git": "ssh://github.com/org/repo.git",
+        "git@github.com:org/repo.git": "github.com:org/repo.git",
+        "https://github.com/org/repo.git": "https://github.com/org/repo.git",
+    }
+    for raw, expected in cases.items():
+        assert _clean_repo_url(raw) == expected
+
+    encoded = " ".join(_clean_repo_url(x) or "" for x in cases)
+    assert "SECRET" not in encoded
+    assert "token=abc" not in encoded
+    assert "user:pass" not in encoded
+    assert ":443/" not in encoded
+    assert ":8080/" not in encoded
+    assert ":2222/" not in encoded
