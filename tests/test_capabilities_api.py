@@ -87,6 +87,7 @@ async def test_capabilities_catalog(tmp_path, monkeypatch):
     for c in caps:
         for key in ("capability_id", "type", "name", "enabled", "policy_tags", "source_ref"):
             assert key in c
+    assert payload["engine"] == "opencode"
     assert payload["count"] == len(caps)
     assert payload["catalog_version"]
     assert payload["supports_snapshot_contract"] is True

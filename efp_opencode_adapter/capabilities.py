@@ -119,4 +119,4 @@ async def build_capability_catalog(settings: Settings, opencode_client=None) -> 
         sanitized.append(clean)
     capabilities = sanitized
     digest = hashlib.sha256(json.dumps(capabilities, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-    return {"capabilities": capabilities, "count": len(capabilities), "catalog_version": digest, "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "supports_snapshot_contract": True, "runtime_contract_version": "efp-opencode-compat-v1"}
+    return {"engine": "opencode", "capabilities": capabilities, "count": len(capabilities), "catalog_version": digest, "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "supports_snapshot_contract": True, "runtime_contract_version": "efp-opencode-compat-v1"}

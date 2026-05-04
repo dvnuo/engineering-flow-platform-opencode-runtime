@@ -8,6 +8,16 @@ from aiohttp import web
 from .capabilities import build_capability_catalog
 from .chat_api import chat_handler, chat_stream_handler
 from .chatlog_store import ChatLogStore
+from .compat_api import (
+    git_info_handler,
+    queue_status_handler,
+    skill_git_info_handler,
+    skills_handler,
+    system_prompt_config_get_handler,
+    system_prompt_config_put_handler,
+    system_prompt_get_handler,
+    system_prompt_put_handler,
+)
 from .event_bus import EventBus, events_ws_handler
 from .file_routes import register_file_routes
 from .opencode_client import OpenCodeClient
@@ -136,6 +146,14 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/actuator/health", health_handler)
     app.router.add_post("/api/internal/runtime-profile/apply", runtime_profile_apply_handler)
     app.router.add_get("/api/capabilities", capabilities_handler)
+    app.router.add_get("/api/queue/status", queue_status_handler)
+    app.router.add_get("/api/skills", skills_handler)
+    app.router.add_get("/api/git-info", git_info_handler)
+    app.router.add_get("/api/skill-git-info", skill_git_info_handler)
+    app.router.add_get("/api/agent/system-prompt/config", system_prompt_config_get_handler)
+    app.router.add_put("/api/agent/system-prompt/config", system_prompt_config_put_handler)
+    app.router.add_get("/api/agent/system-prompt/{name}", system_prompt_get_handler)
+    app.router.add_put("/api/agent/system-prompt/{name}", system_prompt_put_handler)
     app.router.add_post("/api/chat", chat_handler)
     app.router.add_post("/api/chat/stream", chat_stream_handler)
     app.router.add_post("/api/tasks/execute", execute_task_handler)

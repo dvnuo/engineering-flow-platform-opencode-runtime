@@ -23,7 +23,7 @@ def test_init_assets_creates_dirs_and_config(tmp_path, monkeypatch):
     (skills / "sample-skill" / "skill.md").write_text("---\nname: sample-skill\ndescription: Sample\n---\n\nBody\n", encoding="utf-8")
 
     settings = Settings.from_env()
-    with pytest.warns(UserWarning, match="tools directory does not exist"):
+    with pytest.warns(UserWarning, match="tools manifest not found"):
         init_assets(settings)
 
     assert (workspace / ".opencode").exists()
@@ -125,3 +125,19 @@ Path(a.state_dir).mkdir(parents=True, exist_ok=True)
     assert (workspace / ".opencode" / "tools" / "efp_context_echo.ts").exists()
     tools_index = json.loads((state / "tools-index.json").read_text(encoding="utf-8"))
     assert tools_index["tools"][0]["opencode_name"] == "efp_context_echo"
+
+
+def test_init_assets_creates_tools_dir_from_env_override(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    skills = tmp_path / "skills"
+    tools = tmp_path / "custom-tools"
+    state = tmp_path / "state"
+    config = workspace / ".opencode" / "opencode.json"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
+    monkeypatch.setenv("EFP_TOOLS_DIR", str(tools))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(config))
+    with pytest.warns(UserWarning):
+        init_assets(Settings.from_env())
+    assert tools.exists()

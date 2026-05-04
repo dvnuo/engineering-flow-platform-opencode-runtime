@@ -56,6 +56,7 @@ class SkillsIndex:
         return {
             "generated_at": self.generated_at,
             "skills": [asdict(x) for x in self.skills],
+            "warnings": list(self.warnings),
         }
 
 

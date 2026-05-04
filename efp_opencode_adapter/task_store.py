@@ -88,3 +88,13 @@ class TaskStore:
         events = list(record.runtime_events)
         events.append(event)
         return self.update(task_id, runtime_events=events)
+
+    def list_all(self) -> list[TaskRecord]:
+        records = []
+        for path in sorted(self.tasks_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                records.append(TaskRecord(**payload))
+            except Exception:
+                continue
+        return records
