@@ -47,4 +47,18 @@ docker exec "${NAME}" jq -e '.permission["*"] == "ask"' /workspace/.opencode/ope
 docker exec "${NAME}" jq -e '.permission.external_directory == "deny"' /workspace/.opencode/opencode.json >/dev/null
 docker exec "${NAME}" bash -lc 'opencode --version | grep -F "1.14.29"'
 
+
+
+curl -fsS http://localhost:8000/api/capabilities | jq -e '.engine == "opencode"' >/dev/null
+curl -fsS http://localhost:8000/api/capabilities | jq -e '.capabilities | type == "array"' >/dev/null
+curl -fsS http://localhost:8000/api/capabilities | jq -e '.count >= 1' >/dev/null
+curl -fsS http://localhost:8000/api/sessions | jq -e '.sessions | type == "array"' >/dev/null
+curl -fsS http://localhost:8000/api/skills | jq -e '.engine == "opencode"' >/dev/null
+curl -fsS http://localhost:8000/api/skills | jq -e '.skills | type == "array"' >/dev/null
+curl -fsS http://localhost:8000/api/queue/status | jq -e '.status == "ok"' >/dev/null
+curl -fsS http://localhost:8000/api/queue/status | jq -e '.engine == "opencode"' >/dev/null
+curl -fsS http://localhost:8000/api/git-info | jq -e '.engine == "opencode"' >/dev/null
+curl -fsS http://localhost:8000/api/skill-git-info | jq -e '.engine == "opencode"' >/dev/null
+RUNTIME_BASE_URL=http://localhost:8000 python3 -m pytest -q runtime_contract_tests
+
 echo "smoke passed"
