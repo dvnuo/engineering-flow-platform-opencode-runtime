@@ -40,11 +40,18 @@ class RecoveryManager:
                 continue
             if data.get("status") in {"accepted", "running"}:
                 data["status"] = "blocked"
-                data["error_code"] = "adapter_restarted_task_recovery_required"
+                output_payload = data.get("output_payload")
+                if not isinstance(output_payload, dict):
+                    output_payload = {}
+                output_payload["summary"] = "Adapter restarted before task completion"
+                output_payload["error_code"] = "adapter_restarted_task_recovery_required"
+                output_payload["blockers"] = ["Adapter restarted before task completion"]
+                output_payload["next_recommendation"] = "Re-dispatch task if it is still required."
+                data["output_payload"] = output_payload
                 data["error"] = {"code": "adapter_restarted_task_recovery_required", "message": "Adapter restarted before task completion; manual recovery required"}
                 data["finished_at"] = utc_now_iso()
                 ev = data.get("runtime_events") if isinstance(data.get("runtime_events"), list) else []
-                ev.append(task_lifecycle_event("task.blocked", session_id=str(data.get("session_id", "")), request_id=str(data.get("request_id", "")), state="blocked", summary="Adapter restarted before task completion"))
+                ev.append(task_lifecycle_event("task.blocked", session_id=str(data.get("portal_session_id", "")), request_id=str(data.get("request_id", "")), state="blocked", summary="Adapter restarted before task completion"))
                 data["runtime_events"] = ev
                 p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
                 summary["tasks_marked_blocked"] += 1

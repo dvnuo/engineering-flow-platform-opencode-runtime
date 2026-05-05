@@ -28,10 +28,10 @@ from .recovery import RecoveryManager
 from .usage_api import usage_handler
 from .usage_tracker import UsageTracker
 from .opencode_config import build_opencode_config, write_main_agent_prompt, write_opencode_config
-from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_public_secrets
+from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_status_payload, sanitize_profile_config_for_storage, sanitize_public_secrets
 from .session_store import SessionStore
 from .task_store import TaskStore
-from .tasks_api import cleanup_task_background_tasks, execute_task_handler, get_task_handler
+from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_handler
 from .sessions_api import (
     clear_sessions_handler,
     delete_session_handler,
@@ -67,6 +67,7 @@ async def health_handler(request: web.Request) -> web.Response:
         "opencode": {"healthy": opencode_healthy},
         "state": state_health,
         "event_bridge": event_bridge_status,
+        "profile": {k: v for k, v in build_profile_status_payload(settings).items() if k in {"status", "pending_restart", "runtime_profile_id", "revision"}},
     }
     if opencode_healthy:
         payload["opencode"]["version"] = info.get("version")
@@ -92,12 +93,24 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     revision = payload.get("revision")
     write_main_agent_prompt(settings)
     generated_config, config_hash, updated_sections = build_opencode_config(settings, runtime_config)
-    write_opencode_config(settings, generated_config)
     warnings: list[str] = []
+    status = "failed"
+    applied = False
+    pending_restart = False
+    config_written = False
+    last_error = None
+    try:
+        write_opencode_config(settings, generated_config)
+        config_written = True
+    except Exception:
+        last_error = "config_write_failed"
+        ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status="failed", pending_restart=False, warnings=warnings, updated_sections=updated_sections, last_apply_error=last_error, applied=False))
+        return web.json_response({"success": False, "engine": "opencode", "status": "failed", "applied": False, "pending_restart": False, "config_written": False, "error": "config_write_failed", "warnings": warnings, "status_endpoint": "/api/internal/runtime-profile/status"}, status=500)
     llm = runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
     if llm and any(key in llm for key in ("provider", "model", "api_key", "temperature", "max_tokens")) and "llm" not in updated_sections:
         updated_sections.append("llm")
     provider, api_key = llm.get("provider"), llm.get("api_key")
+    auth_update_status = "skipped"
     if provider and api_key:
         if hasattr(client, "put_auth"):
             try:
@@ -105,26 +118,36 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
             except Exception:
                 auth_result = {"success": False, "error": "auth update failed"}
             if auth_result.get("success"):
-                pass
+                auth_update_status = "updated"
             elif auth_result.get("skipped"):
                 warnings.append("opencode auth update skipped")
+                auth_update_status = "skipped"
             else:
                 warnings.append("opencode auth update failed; manual auth or restart may be required")
+                auth_update_status = "failed"
         else:
             warnings.append("opencode auth update skipped")
-    pending_restart = True
+    patch_result: dict = {"success": False, "pending_restart": True}
     if hasattr(client, "patch_config"):
         try:
-            result = await client.patch_config(generated_config)
+            patch_result = await client.patch_config(generated_config)
         except Exception:
-            result = {"success": False, "pending_restart": True}
-        pending_restart = bool(result.get("pending_restart", not result.get("success", False)))
+            patch_result = {"success": False, "pending_restart": True}
+        pending_restart = bool(patch_result.get("pending_restart", not patch_result.get("success", False)))
     if pending_restart:
         warnings.append("opencode config patch unsupported; restart may be required")
-    ProfileOverlayStore(settings).save(
-        ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=runtime_config, applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash)
-    )
-    return web.json_response({"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "updated_sections": updated_sections, "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings})
+    if pending_restart:
+        status, applied = "pending_restart", False
+    elif auth_update_status == "failed":
+        status, applied = "partially_applied", False
+    else:
+        status, applied = "applied", True
+    ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status=status, pending_restart=pending_restart, warnings=warnings, updated_sections=updated_sections, last_apply_error=last_error, applied=applied))
+    return web.json_response({"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "updated_sections": updated_sections, "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "patch_config_result": sanitize_public_secrets({"success": patch_result.get("success"), "pending_restart": patch_result.get("pending_restart"), "status": patch_result.get("status")}), "auth_update_status": auth_update_status, "status_endpoint": "/api/internal/runtime-profile/status"})
+
+
+async def runtime_profile_status_handler(request: web.Request) -> web.Response:
+    return web.json_response(build_profile_status_payload(request.app["settings"]))
 
 
 async def capabilities_handler(request: web.Request) -> web.Response:
@@ -159,6 +182,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/health", health_handler)
     app.router.add_get("/actuator/health", health_handler)
     app.router.add_post("/api/internal/runtime-profile/apply", runtime_profile_apply_handler)
+    app.router.add_get("/api/internal/runtime-profile/status", runtime_profile_status_handler)
     app.router.add_get("/api/capabilities", capabilities_handler)
     app.router.add_get("/api/queue/status", queue_status_handler)
     app.router.add_get("/api/skills", skills_handler)
@@ -172,6 +196,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_post("/api/chat/stream", chat_stream_handler)
     app.router.add_post("/api/tasks/execute", execute_task_handler)
     app.router.add_get("/api/tasks/{task_id}", get_task_handler)
+    app.router.add_post("/api/tasks/{task_id}/cancel", cancel_task_handler)
     app.router.add_get("/api/events", events_ws_handler)
     app.router.add_get("/api/usage", usage_handler)
     app.router.add_post("/api/permissions/{permission_id}/respond", permission_respond_handler)

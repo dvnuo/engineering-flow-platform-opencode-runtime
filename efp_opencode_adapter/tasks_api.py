@@ -273,14 +273,14 @@ def _public_status_and_payload(record: TaskRecord) -> tuple[str, dict[str, Any] 
     if record.status == "cancelled":
         out = dict(record.output_payload or {})
         out["error_code"] = out.get("error_code") or "cancelled"
-        return "error", out
+        return "cancelled", out
     return record.status, record.output_payload
 
 
 def _to_public(record: TaskRecord) -> dict[str, Any]:
     status, output_payload = _public_status_and_payload(record)
     return {
-        "ok": status not in {"error", "blocked"},
+        "ok": status not in {"error", "blocked", "cancelled"},
         "task_id": record.task_id,
         "execution_type": "task",
         "request_id": record.request_id,
@@ -568,3 +568,28 @@ async def get_task_handler(request: web.Request) -> web.Response:
     if record is None:
         return web.json_response({"error": "task_not_found"}, status=404)
     return web.json_response(_to_public(record))
+
+
+async def cancel_task_handler(request: web.Request) -> web.Response:
+    task_id = request.match_info["task_id"]
+    if not is_valid_task_id(task_id):
+        return web.json_response({"error": "invalid_task_id"}, status=400)
+    store: TaskStore = request.app["task_store"]
+    record = store.get(task_id)
+    if record is None:
+        return web.json_response({"error": "task_not_found"}, status=404)
+    if record.status in TERMINAL:
+        return web.json_response(_to_public(record), status=200)
+    client = request.app["opencode_client"]
+    message_id = record.opencode_message_id or record.opencode_prompt_id
+    remote_cancel = {"success": False, "supported": False, "reason": "cancel_not_attempted"}
+    if hasattr(client, "cancel_message"):
+        try:
+            remote_cancel = await client.cancel_message(record.opencode_session_id, message_id)
+        except Exception:
+            remote_cancel = {"success": False, "supported": False, "reason": "cancel_error"}
+    out = {"summary": "Task cancelled", "error_code": "cancelled", "remote_cancel": remote_cancel, "artifacts": [], "blockers": [], "next_recommendation": "", "audit_trace": [], "external_actions": []}
+    record = store.update(task_id, status="cancelled", output_payload=out, error={"code": "cancelled", "message": "Task cancelled by Portal/requester"}, finished_at=utc_now_iso())
+    await _publish_task_event(request.app, record, "task.cancelled", "cancelled")
+    await _publish_task_event(request.app, record, "task.completed", "cancelled")
+    return web.json_response(_to_public(record), status=200)

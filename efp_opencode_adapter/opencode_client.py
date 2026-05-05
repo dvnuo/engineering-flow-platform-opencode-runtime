@@ -181,6 +181,30 @@ class OpenCodeClient:
             expected_statuses=(200, 201, 202, 204),
         ) or {"success": True}
 
+    async def cancel_message(self, session_id: str, message_id: str | None = None) -> dict[str, Any]:
+        if not message_id:
+            return {"success": False, "supported": False, "reason": "message_id_missing"}
+        attempts = [
+            ("POST", f"/session/{session_id}/message/{message_id}/cancel", None),
+            ("POST", f"/session/{session_id}/message/{message_id}/abort", None),
+            ("POST", f"/session/{session_id}/cancel", {"messageID": message_id}),
+        ]
+        for method, path, payload in attempts:
+            try:
+                resp = await self._request(method, self._url(path), json=payload, timeout=aiohttp.ClientTimeout(total=10))
+                try:
+                    if resp.status in {200, 202, 204}:
+                        return {"success": True, "supported": True, "status": resp.status}
+                    if resp.status in {404, 405}:
+                        continue
+                    return {"success": False, "supported": True, "status": resp.status}
+                finally:
+                    if hasattr(resp, "_efp_session"):
+                        await resp._efp_session.close()
+            except Exception:
+                continue
+        return {"success": False, "supported": False, "reason": "cancel_endpoint_unsupported"}
+
     async def event_stream(self, *, global_events: bool = False, timeout_seconds: int | None = None) -> AsyncIterator[dict[str, Any]]:
         path = "/global/event" if global_events else "/event"
         own_session = self._session is None
