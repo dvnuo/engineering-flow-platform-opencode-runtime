@@ -27,6 +27,6 @@ This repository contains the **T05-T13 OpenCode runtime adapter** for an EFP-com
 python -m pytest -q
 bash scripts/ci_unit.sh
 bash scripts/smoke.sh
-RUN_RUNTIME_CONTRACT_TESTS=1 bash scripts/smoke.sh
+RUN_RUNTIME_CONTRACT_TESTS=1 bash scripts/smoke.sh  # acceptance smoke (runs runtime_contract_tests)
 RUNTIME_BASE_URL=http://localhost:8000 python -m pytest -q runtime_contract_tests
 ```

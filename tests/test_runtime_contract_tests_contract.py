@@ -34,3 +34,20 @@ def test_runtime_contract_base_url_required_but_no_portal_required():
     assert 'RUNTIME_BASE_URL' in text
     assert 'pytest.skip' in text
     assert 'Portal' not in text
+
+
+def test_runtime_optional_task_contract_uses_current_execute_payload_fields():
+    text = (RCT / 'test_optional_chat_task_contract.py').read_text(encoding='utf-8')
+    assert 'task_id' in text
+    assert 'input_payload' in text
+    assert 'session_id' in text
+    assert 'task_input' not in text
+    assert 'portal_session_id' not in text
+
+
+def test_runtime_smoke_asset_mapping_contract_is_env_gated():
+    text = (RCT / 'test_optional_smoke_asset_mapping_contract.py').read_text(encoding='utf-8')
+    assert 'RUNTIME_CONTRACT_EXPECT_SKILL' in text
+    assert 'RUNTIME_CONTRACT_EXPECT_TOOL' in text
+    assert 'RUNTIME_CONTRACT_EXPECT_EFP_TOOL' in text
+    assert 'pytest.skip' in text
