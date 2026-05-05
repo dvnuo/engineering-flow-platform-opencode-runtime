@@ -105,6 +105,9 @@ async def skills_handler(request: web.Request) -> web.Response:
         if not isinstance(item, dict) or not item.get("opencode_name"):
             continue
         state = skill_permission_state(permission, item["opencode_name"])
+        supported = bool(item.get("opencode_supported", True))
+        callable_flag = state in {"allowed", "ask"} and supported
+        blocked_reason = "skill is not supported for OpenCode runtime" if not supported else ("skill denied by current OpenCode permission profile" if state == "denied" else None)
         skills.append(
             {
                 "name": item["opencode_name"],
@@ -118,8 +121,16 @@ async def skills_handler(request: web.Request) -> web.Response:
                 "runtime_type": "opencode",
                 "engine": "opencode",
                 "permission_state": state,
-                "callable": state in {"allowed", "ask"},
-                "blocked_reason": "skill denied by current OpenCode permission profile" if state == "denied" else None,
+                "callable": callable_flag,
+                "blocked_reason": blocked_reason,
+                "opencode_compatibility": item.get("opencode_compatibility", "prompt_only"),
+                "runtime_equivalence": bool(item.get("runtime_equivalence", True)),
+                "programmatic": bool(item.get("programmatic", False)),
+                "opencode_supported": supported,
+                "compatibility_warnings": item.get("compatibility_warnings", []),
+                "tool_mappings": item.get("tool_mappings", []),
+                "opencode_tools": item.get("opencode_tools", []),
+                "missing_tools": item.get("missing_tools", []),
             }
         )
     return web.json_response({"skills": skills, "engine": "opencode", "count": len(skills), "warnings": data.get("warnings", []) if isinstance(data, dict) else []})

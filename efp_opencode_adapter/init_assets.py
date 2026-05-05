@@ -25,16 +25,16 @@ def init_assets(settings: Settings) -> None:
     for d in required_dirs:
         d.mkdir(parents=True, exist_ok=True)
 
+    tools_index = sync_tools(
+        settings.tools_dir,
+        settings.workspace_dir / ".opencode" / "tools",
+        settings.adapter_state_dir,
+    )
     sync_skills(
         settings.skills_dir,
         settings.workspace_dir / ".opencode" / "skills",
         settings.adapter_state_dir,
-    )
-
-    sync_tools(
-        settings.tools_dir,
-        settings.workspace_dir / ".opencode" / "tools",
-        settings.adapter_state_dir,
+        tools_index=tools_index.to_json_dict() if hasattr(tools_index, "to_json_dict") else tools_index,
     )
 
     write_main_agent_prompt(settings)

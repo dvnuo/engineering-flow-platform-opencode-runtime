@@ -59,8 +59,12 @@ def normalize_tool_descriptor(raw: dict) -> dict[str, Any] | None:
         "enabled": bool(raw.get("enabled", True)),
         "policy_tags": [str(x) for x in (raw.get("policy_tags") or []) if isinstance(x, (str, int, float))],
         "source_ref": str(raw.get("source_ref") or "tools_repo"),
+        "opencode_name": str(raw.get("opencode_name") or raw.get("name")),
+        "legacy_name": raw.get("legacy_name") or raw.get("native_name") or raw.get("efp_name"),
+        "native_name": raw.get("native_name"),
+        "tool_id": raw.get("tool_id"),
     }
-    for key in ("input_schema", "output_schema", "requires_identity_binding", "domain", "runtime_compat", "external_system", "system_type"):
+    for key in ("input_schema", "output_schema", "requires_identity_binding", "domain", "runtime_compat", "external_system", "system_type", "mutation", "risk_level"):
         if key in raw:
             descriptor[key] = raw[key]
     return descriptor

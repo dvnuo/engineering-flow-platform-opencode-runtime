@@ -7,6 +7,7 @@ import re
 import shutil
 import warnings
 from dataclasses import asdict, dataclass, field
+from typing import Any
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,7 @@ KNOWN_FIELDS = {
     "when_to_use",
     "model",
     "hooks",
+    "kind", "runtime", "execution", "runtime_compat", "opencode_supported", "opencode", "tool_mapping", "opencode_tools", "opencode_runtime_equivalence",
 }
 
 SUBAGENT_ALLOWLIST = {"review-pull-request", "create-pull-request"}
@@ -44,6 +46,14 @@ class SkillIndexEntry:
     risk_level: str | None
     source_path: str
     target_path: str
+    opencode_compatibility: str = "prompt_only"
+    runtime_equivalence: bool = True
+    programmatic: bool = False
+    opencode_supported: bool = True
+    compatibility_warnings: list[str] = field(default_factory=list)
+    tool_mappings: list[dict[str, Any]] = field(default_factory=list)
+    opencode_tools: list[str] = field(default_factory=list)
+    missing_tools: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -119,6 +129,51 @@ def _discover_skill_files(skills_dir: Path) -> list[Path]:
     return sorted(discovered, key=lambda p: str(p))
 
 
+
+
+def _is_programmatic_skill(source_path: Path, frontmatter: dict[str, Any]) -> bool:
+    op = frontmatter.get("opencode") if isinstance(frontmatter.get("opencode"), dict) else {}
+    return any([
+        (source_path.parent / "skill.py").exists(),
+        source_path.with_suffix(".py").exists(),
+        str(frontmatter.get("kind", "")).lower() in {"programmatic", "hybrid"},
+        str(frontmatter.get("execution", "")).lower() == "python",
+        str(frontmatter.get("runtime", "")).lower() == "python",
+        str(op.get("execution", "")).lower() == "python",
+    ])
+
+
+def _opencode_supported(frontmatter: dict[str, Any]) -> bool:
+    if frontmatter.get("opencode_supported") is False:
+        return False
+    rc = frontmatter.get("runtime_compat")
+    if isinstance(rc, list) and "opencode" not in [str(x).lower() for x in rc]:
+        return False
+    if isinstance(rc, str) and rc.lower() not in {"opencode", "all"}:
+        return False
+    op = frontmatter.get("opencode") if isinstance(frontmatter.get("opencode"), dict) else {}
+    if op.get("compatible") is False or op.get("supported") is False:
+        return False
+    return True
+
+
+def _has_explicit_opencode_wrapper(frontmatter: dict[str, Any]) -> bool:
+    op = frontmatter.get("opencode") if isinstance(frontmatter.get("opencode"), dict) else {}
+    return bool(frontmatter.get("opencode_tools") or frontmatter.get("tool_mapping") or op.get("execution_tool") or op.get("wrapper"))
+
+
+def build_tool_name_map(tools_index: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    out = {}
+    tools = (tools_index or {}).get("tools", []) if isinstance(tools_index, dict) else []
+    for t in tools:
+        if not isinstance(t, dict):
+            continue
+        base = {k: t.get(k) for k in ("legacy_name", "opencode_name", "capability_id", "policy_tags", "enabled", "source_ref", "risk_level", "requires_identity_binding")}
+        for k in [t.get("legacy_name"), t.get("native_name"), t.get("efp_name"), t.get("name"), t.get("opencode_name"), t.get("capability_id"), t.get("tool_id")]:
+            if isinstance(k, str) and k:
+                out[k] = base
+    return out
+
 def _render_skill_markdown(opencode_name: str, entry: SkillIndexEntry, frontmatter: dict, body: str) -> str:
     efp_extra = {k: v for k, v in frontmatter.items() if k not in KNOWN_FIELDS}
     metadata: dict = {
@@ -152,9 +207,19 @@ def _render_skill_markdown(opencode_name: str, entry: SkillIndexEntry, frontmatt
         f"{GENERATED_MARKER}\n"
         f"Original EFP skill name: `{entry.efp_name}`\n"
         f"Original source path: `{entry.source_path}`\n\n"
-        f"{body.rstrip()}\n\n"
+        "## OpenCode Compatibility\n"
+        f"- Compatibility: {entry.opencode_compatibility}\n"
+        f"- Runtime equivalence: {'full' if entry.runtime_equivalence else ('unsupported' if not entry.opencode_supported else 'partial')}\n"
+        f"- Programmatic skill.py detected: {'yes' if entry.programmatic else 'no'}\n"
+        f"- OpenCode supported: {'yes' if entry.opencode_supported else 'no'}\n"
+        "Important: the OpenCode adapter does not execute EFP skill.py directly. Generated skills are prompt assets unless an explicit OpenCode wrapper/tool is declared.\n\n"
+        + ("This skill is not supported for OpenCode runtime. Do not execute it as if it were native EFP.\n\n" if not entry.opencode_supported else "")
+        + ("Runtime equivalence is partial. Explain this limitation to the user when it affects execution.\n\n" if not entry.runtime_equivalence else "")
+        + ("## Available OpenCode Tools\n" + ("\n".join([f"- {m['efp_name']} -> {m['opencode_name']}" for m in entry.tool_mappings if m.get("available")]) or "No mapped OpenCode tools were found.") + "\n\n")
+        + ("## Missing Required Tools\n" + "\n".join([f"- {m['efp_name']}: {m.get('missing_reason')}" for m in entry.tool_mappings if not m.get("available")]) + "\n\n" if any(not m.get("available") for m in entry.tool_mappings) else "")
+        + f"{body.rstrip()}\n\n"
         "## OpenCode Runtime Notes\n"
-        "- Use efp_* tools when available.\n"
+        "- Use only the mapped OpenCode tool names listed above.\n"
         "- Do not call external writeback tools unless Portal policy allows it.\n"
         "- If required tools are unavailable, explain the blocker instead of using raw curl.\n"
     )
@@ -181,19 +246,27 @@ Skill:
 
 Instructions:
 - Follow the generated skill at .opencode/skills/{entry.opencode_name}/SKILL.md.
-- Use efp_* tools when available.
+- Use only the mapped OpenCode tool names listed above.
 - Do not call external writeback tools unless Portal policy allows it.
 - If required tools are unavailable, report the blocker instead of using raw curl or ad hoc credentials.
 """
     prompt_path.write_text(content, encoding="utf-8")
 
 
-def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path) -> SkillsIndex:
+def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path, tools_index: dict[str, Any] | None = None) -> SkillsIndex:
     opencode_skills_dir.mkdir(parents=True, exist_ok=True)
     state_dir.mkdir(parents=True, exist_ok=True)
 
     warnings_list: list[str] = []
     skills: list[SkillIndexEntry] = []
+    if tools_index is None:
+        tip = state_dir / "tools-index.json"
+        if tip.exists():
+            try:
+                tools_index = json.loads(tip.read_text(encoding="utf-8"))
+            except Exception:
+                tools_index = {"tools": []}
+    tool_map = build_tool_name_map(tools_index or {"tools": []})
 
     if not skills_dir.exists():
         msg = f"skills directory does not exist: {skills_dir}"
@@ -262,6 +335,30 @@ def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path) ->
         target_path = opencode_skills_dir / opencode_name / "SKILL.md"
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
+        programmatic = _is_programmatic_skill(source_path, frontmatter)
+        supported = _opencode_supported(frontmatter)
+        has_wrapper = _has_explicit_opencode_wrapper(frontmatter)
+        compat_warnings = []
+        if not supported:
+            op_compat = "unsupported"; runtime_eq = False; compat_warnings.append("skill is marked unsupported for OpenCode runtime")
+        elif programmatic and not has_wrapper:
+            op_compat = "programmatic_prompt_only"; runtime_eq = False; compat_warnings.append("EFP skill.py is not executed by the OpenCode adapter; generated skill is prompt-only")
+        elif programmatic and has_wrapper:
+            op_compat = "programmatic_wrapper"; runtime_eq = bool((frontmatter.get("opencode") or {}).get("runtime_equivalence") == "full")
+            if not runtime_eq: compat_warnings.append("programmatic OpenCode wrapper declared but runtime equivalence is not marked full")
+        else:
+            op_compat = "prompt_only"; runtime_eq = True
+        tool_mappings=[]; op_tools=[]; miss=[]
+        for efp_tool in list(tools)+list(task_tools):
+            meta=tool_map.get(efp_tool)
+            if meta and meta.get("opencode_name"):
+                m={"efp_name":efp_tool,"opencode_name":meta.get("opencode_name"),"available":True,"capability_id":meta.get("capability_id"),"policy_tags":meta.get("policy_tags",[])}
+                tool_mappings.append(m)
+                if meta.get("opencode_name") not in op_tools: op_tools.append(meta.get("opencode_name"))
+            else:
+                tool_mappings.append({"efp_name":efp_tool,"opencode_name":None,"available":False,"missing_reason":"no matching OpenCode wrapper in tools-index"})
+                if efp_tool not in miss: miss.append(efp_tool)
+
         entry = SkillIndexEntry(
             efp_name=raw_efp_name,
             opencode_name=opencode_name,
@@ -271,6 +368,7 @@ def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path) ->
             risk_level=risk_level,
             source_path=str(source_path.resolve()),
             target_path=str(target_path.resolve()),
+            opencode_compatibility=op_compat, runtime_equivalence=runtime_eq, programmatic=programmatic, opencode_supported=supported, compatibility_warnings=compat_warnings, tool_mappings=tool_mappings, opencode_tools=op_tools, missing_tools=miss,
         )
         target_path.write_text(_render_skill_markdown(opencode_name, entry, frontmatter, body), encoding="utf-8")
         skills.append(entry)
@@ -301,9 +399,13 @@ def main() -> None:
         default=settings.workspace_dir / ".opencode" / "skills",
     )
     parser.add_argument("--state-dir", type=Path, default=settings.adapter_state_dir)
+    parser.add_argument("--tools-index", type=Path, default=None)
     args = parser.parse_args()
 
-    index = sync_skills(args.skills_dir, args.opencode_skills_dir, args.state_dir)
+    tools_index=None
+    if args.tools_index and args.tools_index.exists():
+        tools_index=json.loads(args.tools_index.read_text(encoding="utf-8"))
+    index = sync_skills(args.skills_dir, args.opencode_skills_dir, args.state_dir, tools_index=tools_index)
     print(f"synced {len(index.skills)} skills")
     print(f"wrote {args.state_dir / 'skills-index.json'}")
     for warning_text in index.warnings:
