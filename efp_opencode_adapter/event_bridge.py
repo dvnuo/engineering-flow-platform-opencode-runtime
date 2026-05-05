@@ -4,6 +4,7 @@ import asyncio
 import time
 from typing import Any
 
+from .index_loader import load_tools_index
 from .profile_store import sanitize_public_secrets
 from .thinking_events import safe_preview, utc_now_iso
 
@@ -112,7 +113,46 @@ def _map_task_id(task_store, opencode_session_id: str, message_ids: set[str]) ->
     return None
 
 
-def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_store, settings) -> dict[str, Any] | None:
+def _build_tool_metadata(settings) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for tool in load_tools_index(settings).get("tools", []):
+        if not isinstance(tool, dict):
+            continue
+        for key in ("name", "opencode_name", "legacy_name", "native_name", "capability_id", "tool_id"):
+            value = tool.get(key)
+            if isinstance(value, str) and value:
+                if value not in out:
+                    out[value] = tool
+                elif not bool(out[value].get("enabled", True)) and bool(tool.get("enabled", True)):
+                    out[value] = tool
+    return out
+
+
+
+
+def _safe_policy_tags(meta: dict[str, Any]) -> list[str]:
+    raw = meta.get("policy_tags") or []
+    if isinstance(raw, list):
+        candidates = raw
+    elif isinstance(raw, (str, int, float, bool)):
+        candidates = [raw]
+    else:
+        candidates = []
+    out: list[str] = []
+    for item in candidates:
+        if isinstance(item, (str, int, float, bool)):
+            value = safe_preview(str(item), 100)
+            if isinstance(value, str) and value:
+                out.append(value)
+    return out
+
+def _is_mutation_tool(meta: dict[str, Any]) -> bool:
+    tags = {str(x).lower() for x in _safe_policy_tags(meta)}
+    risk = str(meta.get("risk_level") or "").lower()
+    return bool(meta.get("mutation") is True or {"mutation", "write", "writeback", "external_write", "destructive"} & tags or risk in {"high", "critical"})
+
+
+def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_store, settings, tool_metadata: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
     if not isinstance(raw_event, dict):
         return None
     max_chars = settings.event_bridge_event_preview_chars
@@ -216,6 +256,27 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
             evt["input_preview"] = s_input
         if output_preview:
             evt["output_preview"] = s_output
+        meta = (tool_metadata or {}).get(str(tool)) or (tool_metadata or {}).get(str(s_tool))
+        if isinstance(meta, dict):
+            mutation = _is_mutation_tool(meta)
+            risk_level = str(meta.get("risk_level") or s_risk or "medium")
+            requires_identity = bool(meta.get("requires_identity_binding"))
+            audit_event = mutation or requires_identity or risk_level.lower() in {"high", "critical"}
+            extra = {
+                "capability_id": _sanitize_event_value(meta.get("capability_id"), 200),
+                "policy_tags": _safe_policy_tags(meta),
+                "risk_level": _sanitize_event_value(risk_level, 100),
+                "requires_identity_binding": requires_identity,
+                "mutation": mutation,
+                "audit_event": audit_event,
+                "tool_source_ref": _sanitize_event_value(meta.get("source_ref"), 200),
+            }
+            evt.update(extra)
+            evt["data"].update(extra)
+        else:
+            extra = {"capability_id": None, "policy_tags": [], "risk_level": s_risk or "medium", "requires_identity_binding": False, "mutation": False, "audit_event": False, "tool_source_ref": None}
+            evt.update(extra)
+            evt["data"].update(extra)
     return evt
 
 
@@ -234,12 +295,17 @@ class OpenCodeEventBridge:
         self.last_event_at = None
         self.last_error = None
         self.last_raw_type = ""
+        self.tool_metadata = _build_tool_metadata(settings)
+
+    def refresh_tool_metadata(self) -> dict[str, dict[str, Any]]:
+        self.tool_metadata = _build_tool_metadata(self.settings)
+        return self.tool_metadata
 
     def status_snapshot(self) -> dict[str, Any]:
         return {"enabled": self.enabled, "running": self.running, "connected": self.connected, "reconnects": self.reconnects, "last_event_at": self.last_event_at, "last_error": self.last_error, "last_raw_type": self.last_raw_type}
 
     async def publish_raw_event(self, raw_event: dict) -> dict | None:
-        event = normalize_opencode_event(raw_event, session_store=self.session_store, task_store=self.task_store, settings=self.settings)
+        event = normalize_opencode_event(raw_event, session_store=self.session_store, task_store=self.task_store, settings=self.settings, tool_metadata=self.tool_metadata)
         if not event:
             return None
         self.last_event_at = event.get("created_at")

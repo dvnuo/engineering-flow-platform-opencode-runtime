@@ -164,6 +164,53 @@ async def test_apply_auth_only_llm_marks_llm_updated(tmp_path, monkeypatch):
     await client.close()
 
 
+class PendingRestartClient(FakeAuthOnlyClient):
+    async def patch_config(self, config):
+        return {"success": False, "pending_restart": True, "status": 404}
+
+
+class AuthFailurePatchSuccessClient(FakeAuthOnlyClient):
+    async def put_auth(self, provider, api_key):
+        return {"success": False, "status": 500}
+
+
+@pytest.mark.asyncio
+async def test_profile_status_endpoint_applied(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    app = create_app(Settings.from_env(), opencode_client=FakeAuthOnlyClient()); c = TestClient(TestServer(app)); await c.start_server()
+    body = await (await c.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={"config": {"allowed_skills": []}})).json()
+    assert body["status"] == "applied" and body["applied"] is True and body["pending_restart"] is False
+    st = await (await c.get("/api/internal/runtime-profile/status")).json()
+    assert st["status"] == "applied" and st["applied"] is True and st["pending_restart"] is False
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_status_endpoint_pending_restart(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    app = create_app(Settings.from_env(), opencode_client=PendingRestartClient()); c = TestClient(TestServer(app)); await c.start_server()
+    body = await (await c.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={"config": {"allowed_skills": []}})).json()
+    assert body["status"] == "pending_restart"
+    st = await (await c.get("/api/internal/runtime-profile/status")).json()
+    assert st["status"] == "pending_restart" and st["restart_required"] is True
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_auth_failure_status_partially_applied(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    app = create_app(Settings.from_env(), opencode_client=AuthFailurePatchSuccessClient()); c = TestClient(TestServer(app)); await c.start_server()
+    body = await (await c.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={"config": {"llm": {"provider": "anthropic", "api_key": "SECRET-KEY-SHOULD-NOT-LEAK"}}})).json()
+    assert body["status"] == "partially_applied" and body["auth_update_status"] == "failed"
+    assert any("auth update failed" in x for x in body["warnings"])
+    st = await (await c.get("/api/internal/runtime-profile/status")).json()
+    assert st["status"] == "partially_applied"
+    await c.close()
+
+
 @pytest.mark.asyncio
 async def test_apply_allowed_skills_reflects_capability_state(tmp_path, monkeypatch):
     workspace, state = tmp_path / "workspace", tmp_path / "state"

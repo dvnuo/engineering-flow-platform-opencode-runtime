@@ -184,3 +184,64 @@ def test_skill_sync_yaml_list_tools(tmp_path):
     index = sync_skills(skills_dir, opencode_skills_dir, state_dir)
     entry = next(x for x in index.skills if x.opencode_name == "yaml-list")
     assert entry.tools == ["github_get_pr", "github_get_pr_files"]
+
+def test_skill_markdown_includes_compatibility_warnings(tmp_path):
+    skills_dir = tmp_path / 'skills'; opdir = tmp_path / 'workspace/.opencode/skills'; state = tmp_path / 'state'
+    _write_skill(skills_dir / 'prog' / 'skill.md', {'name':'prog','description':'Programmatic','kind':'programmatic'})
+    (skills_dir / 'prog' / 'skill.py').write_text('print(1)', encoding='utf-8')
+    sync_skills(skills_dir, opdir, state)
+    txt = (opdir / 'prog' / 'SKILL.md').read_text(encoding='utf-8')
+    assert 'Compatibility Warnings' in txt
+    assert 'EFP skill.py is not executed by the OpenCode adapter' in txt
+
+def test_subagent_prompt_contains_compatibility_and_mapped_tools(tmp_path):
+    skills_dir = tmp_path / 'skills'; opdir = tmp_path / 'workspace/.opencode/skills'; state = tmp_path / 'state'
+    _write_skill(skills_dir / 's' / 'skill.md', {'name':'s','description':'d','task_tools':['github_get_pr']})
+    tools_index = {'tools':[{'legacy_name':'github_get_pr','opencode_name':'efp_github_get_pr','enabled':True}]}
+    sync_skills(skills_dir, opdir, state, tools_index=tools_index)
+    agent = (opdir.parent / 'agents' / 'skill-s.md').read_text(encoding='utf-8')
+    for marker in ('Compatibility:','Runtime equivalence:','Mapped OpenCode tools:','Missing required tools:'):
+        assert marker in agent
+
+def test_build_tool_name_map_missing_enabled_defaults_true(tmp_path):
+    skills_dir = tmp_path / 'skills'; opdir = tmp_path / 'workspace/.opencode/skills'; state = tmp_path / 'state'
+    _write_skill(skills_dir / 's' / 'skill.md', {'name':'s','description':'d','tools':['github_get_pr']})
+    idx = {'tools':[{'legacy_name':'github_get_pr','opencode_name':'efp_github_get_pr'}]}
+    res = sync_skills(skills_dir, opdir, state, tools_index=idx)
+    m = res.skills[0].tool_mappings[0]
+    assert m['available'] is True and m['enabled'] is True
+
+def test_explicit_tool_mapping_missing_wrapper_is_not_available(tmp_path):
+    skills_dir = tmp_path / 'skills'; opdir = tmp_path / 'workspace/.opencode/skills'; state = tmp_path / 'state'
+    _write_skill(skills_dir / 's' / 'skill.md', {'name':'s','description':'d','tools':['github_get_pr'],'tool_mapping':{'github_get_pr':'efp_github_get_pr'}})
+    res = sync_skills(skills_dir, opdir, state, tools_index={'tools':[]})
+    m = res.skills[0].tool_mappings[0]
+    assert m['available'] is False and 'declared OpenCode wrapper is not present' in m['missing_reason']
+
+def test_frontmatter_opencode_tools_are_validated_against_tools_index(tmp_path):
+    skills_dir = tmp_path / 'skills'; opdir = tmp_path / 'workspace/.opencode/skills'; state = tmp_path / 'state'
+    _write_skill(skills_dir / 's' / 'skill.md', {'name':'s','description':'d','opencode_tools':['efp_run_command']})
+    res = sync_skills(skills_dir, opdir, state, tools_index={'tools':[{'opencode_name':'efp_run_command','enabled':True}]})
+    assert 'efp_run_command' in res.skills[0].opencode_tools
+    assert any(x.get('mapping_source')=='frontmatter_opencode_tools' for x in res.skills[0].tool_mappings)
+
+def test_frontmatter_opencode_tools_missing_are_exposed(tmp_path):
+    skills_dir = tmp_path / 'skills'; opdir = tmp_path / 'workspace/.opencode/skills'; state = tmp_path / 'state'
+    _write_skill(skills_dir / 'x' / 'skill.md', {'name':'x','description':'d','opencode_tools':['efp_missing_tool']})
+    res = sync_skills(skills_dir, opdir, state, tools_index={'tools':[]})
+    entry = res.skills[0]
+    assert entry.opencode_tools == []
+    assert entry.missing_opencode_tools == ['efp_missing_tool']
+    assert any((not m.get('available')) and m.get('mapping_source')=='frontmatter_opencode_tools' for m in entry.tool_mappings)
+    txt = (opdir / 'x' / 'SKILL.md').read_text(encoding='utf-8')
+    assert '[declared opencode tool] efp_missing_tool' in txt
+    assert 'declared OpenCode tool is not present' in txt
+
+def test_frontmatter_opencode_tools_disabled_are_exposed(tmp_path):
+    skills_dir = tmp_path / 'skills'; opdir = tmp_path / 'workspace/.opencode/skills'; state = tmp_path / 'state'
+    _write_skill(skills_dir / 'x' / 'skill.md', {'name':'x','description':'d','opencode_tools':['efp_run_command']})
+    res = sync_skills(skills_dir, opdir, state, tools_index={'tools':[{'opencode_name':'efp_run_command','enabled':False}]})
+    entry = res.skills[0]
+    assert 'efp_run_command' not in entry.opencode_tools
+    assert entry.missing_opencode_tools == ['efp_run_command']
+    assert any('disabled' in (m.get('missing_reason') or '') for m in entry.tool_mappings)

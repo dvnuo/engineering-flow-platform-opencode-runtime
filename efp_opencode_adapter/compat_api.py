@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import web
+from .app_keys import SETTINGS_KEY, SESSION_STORE_KEY, TASK_STORE_KEY
 
 from .index_loader import load_skills_index
 from .permission_generator import default_permission_baseline, skill_permission_state
@@ -95,7 +96,7 @@ def _git_info_for_dir(path: Path) -> dict[str, str | None]:
 
 
 async def skills_handler(request: web.Request) -> web.Response:
-    settings = request.app["settings"]
+    settings = request.app[SETTINGS_KEY]
     data = load_skills_index(settings)
     cfg = read_json_file(settings.opencode_config_path) or {}
     permission = cfg.get("permission") if isinstance(cfg.get("permission"), dict) else default_permission_baseline()
@@ -105,6 +106,9 @@ async def skills_handler(request: web.Request) -> web.Response:
         if not isinstance(item, dict) or not item.get("opencode_name"):
             continue
         state = skill_permission_state(permission, item["opencode_name"])
+        supported = bool(item.get("opencode_supported", True))
+        callable_flag = state in {"allowed", "ask"} and supported
+        blocked_reason = "skill is not supported for OpenCode runtime" if not supported else ("skill denied by current OpenCode permission profile" if state == "denied" else None)
         skills.append(
             {
                 "name": item["opencode_name"],
@@ -118,20 +122,29 @@ async def skills_handler(request: web.Request) -> web.Response:
                 "runtime_type": "opencode",
                 "engine": "opencode",
                 "permission_state": state,
-                "callable": state in {"allowed", "ask"},
-                "blocked_reason": "skill denied by current OpenCode permission profile" if state == "denied" else None,
+                "callable": callable_flag,
+                "blocked_reason": blocked_reason,
+                "opencode_compatibility": item.get("opencode_compatibility", "prompt_only"),
+                "runtime_equivalence": bool(item.get("runtime_equivalence", True)),
+                "programmatic": bool(item.get("programmatic", False)),
+                "opencode_supported": supported,
+                "compatibility_warnings": item.get("compatibility_warnings", []),
+                "tool_mappings": item.get("tool_mappings", []),
+                "opencode_tools": item.get("opencode_tools", []),
+                "missing_tools": item.get("missing_tools", []),
+                "missing_opencode_tools": item.get("missing_opencode_tools", []),
             }
         )
     return web.json_response({"skills": skills, "engine": "opencode", "count": len(skills), "warnings": data.get("warnings", []) if isinstance(data, dict) else []})
 
 
 async def queue_status_handler(request: web.Request) -> web.Response:
-    records = request.app["task_store"].list_all()
+    records = request.app[TASK_STORE_KEY].list_all()
     counts = {"accepted": 0, "running": 0, "success": 0, "error": 0, "blocked": 0, "cancelled": 0}
     for rec in records:
         if rec.status in counts:
             counts[rec.status] += 1
-    return web.json_response({"status": "ok", "engine": "opencode", "queues": {"default": {"total": len(records), **counts}}, "active_sessions": len(request.app["session_store"].list_active())})
+    return web.json_response({"status": "ok", "engine": "opencode", "queues": {"default": {"total": len(records), **counts}}, "active_sessions": len(request.app[SESSION_STORE_KEY].list_active())})
 
 
 async def git_info_handler(request: web.Request) -> web.Response:
@@ -150,16 +163,16 @@ async def git_info_handler(request: web.Request) -> web.Response:
 
 
 async def skill_git_info_handler(request: web.Request) -> web.Response:
-    settings = request.app["settings"]
+    settings = request.app[SETTINGS_KEY]
     return web.json_response({**_git_info_for_dir(settings.skills_dir), "engine": "opencode"})
 
 
 async def system_prompt_config_get_handler(request: web.Request) -> web.Response:
-    return web.json_response(_load_prompt_config(request.app["settings"]))
+    return web.json_response(_load_prompt_config(request.app[SETTINGS_KEY]))
 
 
 async def system_prompt_config_put_handler(request: web.Request) -> web.Response:
-    settings = request.app["settings"]
+    settings = request.app[SETTINGS_KEY]
     try:
         payload = await request.json()
     except Exception:
@@ -181,7 +194,7 @@ async def system_prompt_config_put_handler(request: web.Request) -> web.Response
 
 
 async def system_prompt_get_handler(request: web.Request) -> web.Response:
-    settings = request.app["settings"]
+    settings = request.app[SETTINGS_KEY]
     name = request.match_info.get("name", "")
     if not _valid_name(name):
         return web.json_response({"error": "Invalid name"}, status=400)
@@ -195,7 +208,7 @@ async def system_prompt_get_handler(request: web.Request) -> web.Response:
 
 
 async def system_prompt_put_handler(request: web.Request) -> web.Response:
-    settings = request.app["settings"]
+    settings = request.app[SETTINGS_KEY]
     name = request.match_info.get("name", "")
     if not _valid_name(name):
         return web.json_response({"error": "Invalid name"}, status=400)

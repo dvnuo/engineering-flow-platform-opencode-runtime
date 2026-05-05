@@ -56,6 +56,16 @@ def test_init_assets_does_not_overwrite_existing_config(tmp_path, monkeypatch):
     skills = tmp_path / "skills"
     tools = tmp_path / "tools"
     tools.mkdir(parents=True, exist_ok=True)
+    (tools / "manifest.yaml").write_text("tools: []\n", encoding="utf-8")
+    generator = tools / "adapters" / "opencode" / "generate_tools.py"
+    generator.parent.mkdir(parents=True, exist_ok=True)
+    generator.write_text(
+        "import argparse, json\nfrom pathlib import Path\n"
+        "p=argparse.ArgumentParser(); p.add_argument('--tools-dir'); p.add_argument('--opencode-tools-dir'); p.add_argument('--state-dir'); a=p.parse_args()\n"
+        "Path(a.opencode_tools_dir).mkdir(parents=True, exist_ok=True)\n"
+        "(Path(a.state_dir)/'tools-index.json').write_text(json.dumps({'generated_at':'now','tools':[]}), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
     state = tmp_path / "state"
     config = workspace / ".opencode" / "opencode.json"
 
@@ -141,3 +151,53 @@ def test_init_assets_creates_tools_dir_from_env_override(tmp_path, monkeypatch):
     with pytest.warns(UserWarning):
         init_assets(Settings.from_env())
     assert tools.exists()
+
+
+def test_init_assets_syncs_tools_before_skills(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(tmp_path / "skills"))
+    monkeypatch.setenv("EFP_TOOLS_DIR", str(tmp_path / "tools"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "workspace/.opencode/opencode.json"))
+
+    def fake_sync_tools(*args, **kwargs):
+        calls.append("tools")
+        return {"tools": [{"legacy_name": "legacy", "opencode_name": "efp_legacy"}]}
+
+    def fake_sync_skills(*args, **kwargs):
+        calls.append("skills")
+        assert kwargs.get("tools_index")
+        return None
+
+    monkeypatch.setattr("efp_opencode_adapter.init_assets.sync_tools", fake_sync_tools)
+    monkeypatch.setattr("efp_opencode_adapter.init_assets.sync_skills", fake_sync_skills)
+    init_assets(Settings.from_env())
+    assert calls[:2] == ["tools", "skills"]
+
+def test_init_assets_real_generator_feeds_skill_tool_mapping(tmp_path, monkeypatch):
+    workspace = tmp_path / 'workspace'; skills = tmp_path / 'skills'; tools = tmp_path / 'tools'; state = tmp_path / 'state'; config = workspace / '.opencode' / 'opencode.json'
+    monkeypatch.setenv('EFP_WORKSPACE_DIR', str(workspace)); monkeypatch.setenv('EFP_SKILLS_DIR', str(skills)); monkeypatch.setenv('EFP_TOOLS_DIR', str(tools)); monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('OPENCODE_CONFIG', str(config))
+    (skills / 'review').mkdir(parents=True, exist_ok=True)
+    (skills / 'review' / 'skill.md').write_text('---\nname: review\ndescription: Review PR\ntools:\n  - github_get_pr\n---\n\nBody\n', encoding='utf-8')
+    tools.mkdir(parents=True, exist_ok=True)
+    (tools / 'manifest.yaml').write_text('tools: []\n', encoding='utf-8')
+    gen = tools / 'adapters' / 'opencode' / 'generate_tools.py'; gen.parent.mkdir(parents=True, exist_ok=True)
+    gen.write_text("""
+import argparse, json
+from pathlib import Path
+p=argparse.ArgumentParser(); p.add_argument('--tools-dir', required=True); p.add_argument('--opencode-tools-dir', required=True); p.add_argument('--state-dir', required=True); a=p.parse_args()
+Path(a.opencode_tools_dir).mkdir(parents=True, exist_ok=True)
+(Path(a.opencode_tools_dir)/'efp_github_get_pr.ts').write_text('//wrapper', encoding='utf-8')
+Path(a.state_dir).mkdir(parents=True, exist_ok=True)
+(Path(a.state_dir)/'tools-index.json').write_text(json.dumps({'generated_at':'now','tools':[{'capability_id':'efp.tool.github.get_pr','legacy_name':'github_get_pr','opencode_name':'efp_github_get_pr','name':'efp_github_get_pr','enabled':True,'policy_tags':['github','read_only'],'risk_level':'low','requires_identity_binding':False,'source_ref':'fake-generator'}]}), encoding='utf-8')
+""", encoding='utf-8')
+    init_assets(Settings.from_env())
+    assert (workspace / '.opencode' / 'tools' / 'efp_github_get_pr.ts').exists()
+    skill_md = (workspace / '.opencode' / 'skills' / 'review' / 'SKILL.md').read_text(encoding='utf-8')
+    assert 'github_get_pr -> efp_github_get_pr' in skill_md
+    idx = json.loads((state / 'skills-index.json').read_text(encoding='utf-8'))['skills'][0]
+    assert idx['opencode_tools'] == ['efp_github_get_pr']
+    assert idx['tool_mappings'][0]['available'] is True
+    assert idx['tool_mappings'][0]['capability_id'] == 'efp.tool.github.get_pr'
+    assert config.exists()

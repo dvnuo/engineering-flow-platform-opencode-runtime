@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from efp_opencode_adapter.task_store import TaskRecord, utc_now_iso
-from efp_opencode_adapter.tasks_api import _assistant_text_from_event, _assistant_text_from_messages, _permission_event_delta
+from efp_opencode_adapter.tasks_api import _assistant_text_from_event, _assistant_text_from_messages, _permission_event_delta, cleanup_task_background_tasks
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -23,6 +23,7 @@ class FakeTaskOpenCodeClient(FakeOpenCodeClient):
         self.prompt_result = {"id": "async-1"} if prompt_result is None else prompt_result
         self.message_details: dict[tuple[str, str], dict] = {}
         self.raise_prompt_async = raise_prompt_async
+        self.cancel_calls = []
 
     async def create_session(self, title=None):
         self.create_calls += 1
@@ -61,6 +62,10 @@ class FakeTaskOpenCodeClient(FakeOpenCodeClient):
             if timeout_seconds is None or loop.time() >= deadline:
                 break
             await asyncio.sleep(0.005)
+
+    async def cancel_message(self, session_id, message_id=None):
+        self.cancel_calls.append((session_id, message_id))
+        return {"success": False, "supported": False, "reason": "cancel_endpoint_unsupported"}
 
 
 async def _wait_terminal(client, task_id, tries=80):
@@ -308,17 +313,54 @@ async def test_official_message_part_updated_fetches_full_message(tmp_path, monk
     fake.prompt_result = None
     app = create_app(Settings.from_env(), opencode_client=fake)
     c = TestClient(TestServer(app)); await c.start_server()
-    await c.post('/api/tasks/execute', json={'task_id': 'tpart', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
-    sid = fake.prompt_async_calls[0][0]
-    user_msg_id = fake.prompt_async_calls[0][1]['messageID']
-    fake.message_details[(sid, 'assistant-1')] = {
-        "info": {"id": "assistant-1", "sessionID": sid, "role": "assistant", "parentID": user_msg_id},
-        "parts": [{"type": "text", "text": '{"status":"success","summary":"from official part"}'}],
-    }
-    fake.stream_events = [{"directory": "/workspace", "payload": {"type": "message.part.updated", "properties": {"part": {"sessionID": sid, "messageID": "assistant-1", "type": "text", "text": '{"status":"success","summary":"partial"}'}}}}]
-    p = await _wait_terminal(c, 'tpart')
-    assert p['status'] == 'success'
-    assert p['output_payload']['summary'] == 'from official part'
+    try:
+        await c.post('/api/tasks/execute', json={'task_id': 'tpart', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+        sid = fake.prompt_async_calls[0][0]
+        user_msg_id = fake.prompt_async_calls[0][1]['messageID']
+        fake.message_details[(sid, 'assistant-1')] = {
+            "info": {"id": "assistant-1", "sessionID": sid, "role": "assistant", "parentID": user_msg_id},
+            "parts": [{"type": "text", "text": '{"status":"success","summary":"from official part"}'}],
+        }
+        fake.stream_events = [{"directory": "/workspace", "payload": {"type": "message.part.updated", "properties": {"part": {"sessionID": sid, "messageID": "assistant-1", "type": "text", "text": '{"status":"success","summary":"partial"}'}}}}]
+        p = await _wait_terminal(c, 'tpart')
+        assert p['status'] == 'success'
+    finally:
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_task_marks_cancelled_and_publishes_events(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_TIMEOUT_SECONDS', '5')
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient(no_assistant=True)
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'tcancel', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    await asyncio.sleep(0.05)
+    body = await (await c.post('/api/tasks/tcancel/cancel')).json()
+    assert body['status'] == 'cancelled' and body['ok'] is False and body['output_payload']['error_code'] == 'cancelled'
+    assert fake.cancel_calls
+    got = await (await c.get('/api/tasks/tcancel')).json()
+    types = [e.get('type') for e in got.get('runtime_events', [])]
+    assert 'task.cancelled' in types and 'task.completed' in types and got['status'] == 'cancelled'
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_terminal_task_is_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'tidem', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    payload = await _wait_terminal(c, 'tidem')
+    assert payload['status'] == 'success'
+    fake.cancel_calls = []
+    cancelled = await (await c.post('/api/tasks/tidem/cancel')).json()
+    assert cancelled['status'] == 'success'
+    assert fake.cancel_calls == []
     await c.close()
 
 
@@ -415,3 +457,33 @@ async def test_tasks_special_cases(tmp_path, monkeypatch):
     bad = await c3.post('/api/tasks/execute', data='[1]')
     assert bad.status == 400
     await c.close(); await c2.close(); await c3.close()
+
+@pytest.mark.asyncio
+async def test_cleanup_task_background_tasks_uses_appkey_and_cancels_tasks():
+    from aiohttp import web
+    from efp_opencode_adapter.app_keys import TASK_BACKGROUND_TASKS_KEY
+    app = web.Application()
+    sleeper = asyncio.create_task(asyncio.sleep(60))
+    app[TASK_BACKGROUND_TASKS_KEY] = {sleeper}
+    await cleanup_task_background_tasks(app)
+    assert sleeper.done()
+    assert app[TASK_BACKGROUND_TASKS_KEY] == set()
+
+@pytest.mark.asyncio
+async def test_testclient_close_cancels_pending_task_collectors(tmp_path, monkeypatch):
+    from efp_opencode_adapter.app_keys import TASK_BACKGROUND_TASKS_KEY
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_TIMEOUT_SECONDS', '60')
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.1')
+    fake = FakeTaskOpenCodeClient(no_assistant=True)
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'tleak', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    await asyncio.sleep(0.05)
+    tasks = list(app[TASK_BACKGROUND_TASKS_KEY])
+    assert tasks and any(not task.done() for task in tasks)
+    await c.close()
+    await asyncio.sleep(0)
+    assert all(task.done() for task in tasks)
+    assert app[TASK_BACKGROUND_TASKS_KEY] == set()

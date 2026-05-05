@@ -1,3 +1,4 @@
+import asyncio
 import base64
 
 import pytest
@@ -187,7 +188,115 @@ async def test_event_stream_parses_sse(monkeypatch):
     monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
     client = OpenCodeClient(Settings.from_env())
     events_iter = client.event_stream()
-    first = await events_iter.__anext__()
-    assert first["type"] == "server.connected"
-    assert first["hello"] is True
-    await server.close()
+    try:
+        first = await events_iter.__anext__()
+        assert first["type"] == "server.connected"
+        assert first["hello"] is True
+    finally:
+        await events_iter.aclose()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_event_stream_partial_consume_can_be_closed_without_leaking_session(monkeypatch):
+    app = web.Application()
+
+    async def events(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(b'event: server.connected\n')
+        await resp.write(b'data: {"hello": true}\n\n')
+        await asyncio.sleep(10)
+        return resp
+
+    app.router.add_get("/event", events)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+    events_iter = client.event_stream()
+    try:
+        first = await events_iter.__anext__()
+        assert first["type"] == "server.connected"
+        assert first["hello"] is True
+    finally:
+        await events_iter.aclose()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_request_closes_owned_session_when_request_raises(monkeypatch):
+    from efp_opencode_adapter import opencode_client as module
+
+    sessions = []
+
+    class FailingSession:
+        def __init__(self):
+            self.closed = False
+            sessions.append(self)
+
+        async def request(self, *args, **kwargs):
+            raise RuntimeError("connection failed before response")
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(module.aiohttp, "ClientSession", FailingSession)
+
+    client = OpenCodeClient(Settings.from_env())
+
+    with pytest.raises(RuntimeError, match="connection failed before response"):
+        await client._request("PUT", "http://127.0.0.1:9/auth/anthropic")
+
+    assert len(sessions) == 1
+    assert sessions[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_close_owned_response_releases_response_and_closes_session():
+    from efp_opencode_adapter.opencode_client import _close_owned_response
+
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class FakeResponse:
+        def __init__(self):
+            self.released = False
+            self._efp_session = FakeSession()
+
+        def release(self):
+            self.released = True
+
+    resp = FakeResponse()
+    await _close_owned_response(resp)
+
+    assert resp.released is True
+    assert resp._efp_session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_request_does_not_close_injected_session_when_request_raises():
+    class InjectedFailingSession:
+        def __init__(self):
+            self.closed = False
+            self.calls = 0
+
+        async def request(self, *args, **kwargs):
+            self.calls += 1
+            raise RuntimeError("injected connection failed")
+
+        async def close(self):
+            self.closed = True
+
+    session = InjectedFailingSession()
+    client = OpenCodeClient(Settings.from_env(), session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="injected connection failed"):
+        await client._request("PUT", "http://127.0.0.1:9/auth/anthropic")
+
+    assert session.calls == 1
+    assert session.closed is False
