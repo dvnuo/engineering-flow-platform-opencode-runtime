@@ -56,6 +56,16 @@ def test_init_assets_does_not_overwrite_existing_config(tmp_path, monkeypatch):
     skills = tmp_path / "skills"
     tools = tmp_path / "tools"
     tools.mkdir(parents=True, exist_ok=True)
+    (tools / "manifest.yaml").write_text("tools: []\n", encoding="utf-8")
+    generator = tools / "adapters" / "opencode" / "generate_tools.py"
+    generator.parent.mkdir(parents=True, exist_ok=True)
+    generator.write_text(
+        "import argparse, json\nfrom pathlib import Path\n"
+        "p=argparse.ArgumentParser(); p.add_argument('--tools-dir'); p.add_argument('--opencode-tools-dir'); p.add_argument('--state-dir'); a=p.parse_args()\n"
+        "Path(a.opencode_tools_dir).mkdir(parents=True, exist_ok=True)\n"
+        "(Path(a.state_dir)/'tools-index.json').write_text(json.dumps({'generated_at':'now','tools':[]}), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
     state = tmp_path / "state"
     config = workspace / ".opencode" / "opencode.json"
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from aiohttp import WSMsgType, web
-from .app_keys import *
+from .app_keys import EVENT_BUS_KEY
 
 ALLOWED_FILTER_KEYS = {"session_id", "task_id", "request_id", "agent_id", "group_id", "coordination_run_id"}
 

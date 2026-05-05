@@ -252,3 +252,15 @@ async def test_policy_tags_dict_does_not_leak_secret(tmp_path, monkeypatch):
     assert event['policy_tags'] == []
     assert 'SECRET-SHOULD-NOT-LEAK' not in json.dumps(event)
     assert event['audit_event'] is False
+
+@pytest.mark.asyncio
+async def test_policy_tags_dict_mutation_key_is_ignored_and_does_not_leak_secret(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state')); monkeypatch.setenv('EFP_WORKSPACE_DIR', str(tmp_path / 'workspace'))
+    settings = Settings.from_env(); settings.adapter_state_dir.mkdir(parents=True, exist_ok=True)
+    (settings.adapter_state_dir / 'tools-index.json').write_text(json.dumps({'tools':[{'opencode_name':'efp_bad_tags2','capability_id':'tool.bad_tags2','policy_tags':{'mutation':'SECRET-SHOULD-NOT-LEAK'},'mutation':False,'risk_level':'low','requires_identity_binding':False}]}), encoding='utf-8')
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({'type':'tool.start','tool':'efp_bad_tags2'})
+    assert event['policy_tags'] == []
+    assert event['mutation'] is False
+    assert event['audit_event'] is False
+    assert 'SECRET-SHOULD-NOT-LEAK' not in json.dumps(event)

@@ -4,7 +4,21 @@ import argparse
 from datetime import datetime, timezone
 
 from aiohttp import web
-from .app_keys import *
+from .app_keys import (
+    SETTINGS_KEY,
+    STATE_PATHS_KEY,
+    SESSION_STORE_KEY,
+    TASK_STORE_KEY,
+    CHATLOG_STORE_KEY,
+    USAGE_TRACKER_KEY,
+    EVENT_BUS_KEY,
+    TASK_BACKGROUND_TASKS_KEY,
+    OPENCODE_CLIENT_KEY,
+    PORTAL_METADATA_CLIENT_KEY,
+    RECOVERY_MANAGER_KEY,
+    EVENT_BRIDGE_KEY,
+    EVENT_BRIDGE_TASK_KEY,
+)
 
 from .capabilities import build_capability_catalog
 from .chat_api import chat_handler, chat_stream_handler
@@ -57,7 +71,7 @@ async def health_handler(request: web.Request) -> web.Response:
     opencode_healthy = bool(info.get("healthy"))
     state_health = build_state_health_snapshot(settings, request.app[STATE_PATHS_KEY])
     state_healthy = bool(state_health.get("healthy"))
-    bridge = request.app.get("event_bridge")
+    bridge = request.app.get(EVENT_BRIDGE_KEY)
     event_bridge_status = bridge.status_snapshot() if bridge and hasattr(bridge, "status_snapshot") else {"enabled": False, "running": False}
     healthy = opencode_healthy and state_healthy
     payload = {
@@ -221,11 +235,11 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
 
     app.on_startup.append(_run_recovery)
     async def _start_event_bridge(app):
-        bridge = app.get("event_bridge")
+        bridge = app.get(EVENT_BRIDGE_KEY)
         if bridge:
             app[EVENT_BRIDGE_TASK_KEY] = asyncio.create_task(bridge.run_forever())
     async def _cleanup_event_bridge(app):
-        task = app.get("event_bridge_task")
+        task = app.get(EVENT_BRIDGE_TASK_KEY)
         if task:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

@@ -1,5 +1,5 @@
 from aiohttp import web
-from .app_keys import *
+from .app_keys import USAGE_TRACKER_KEY
 
 
 async def usage_handler(request: web.Request) -> web.Response:

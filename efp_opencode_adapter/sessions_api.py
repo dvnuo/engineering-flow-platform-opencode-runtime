@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from aiohttp import web
-from .app_keys import *
+from .app_keys import CHATLOG_STORE_KEY, OPENCODE_CLIENT_KEY, SESSION_STORE_KEY
 
 from .opencode_client import OpenCodeClientError
 

@@ -147,7 +147,7 @@ def _safe_policy_tags(meta: dict[str, Any]) -> list[str]:
     return out
 
 def _is_mutation_tool(meta: dict[str, Any]) -> bool:
-    tags = {str(x).lower() for x in (meta.get("policy_tags") or [])}
+    tags = {str(x).lower() for x in _safe_policy_tags(meta)}
     risk = str(meta.get("risk_level") or "").lower()
     return bool(meta.get("mutation") is True or {"mutation", "write", "writeback", "external_write", "destructive"} & tags or risk in {"high", "critical"})
 

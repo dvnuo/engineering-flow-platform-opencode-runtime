@@ -7,7 +7,13 @@ from typing import Any
 from uuid import uuid4
 
 from aiohttp import web
-from .app_keys import *
+from .app_keys import (
+    EVENT_BUS_KEY,
+    OPENCODE_CLIENT_KEY,
+    SESSION_STORE_KEY,
+    TASK_BACKGROUND_TASKS_KEY,
+    TASK_STORE_KEY,
+)
 
 from .chat_api import extract_assistant_text
 from .opencode_client import OpenCodeClientError
@@ -553,11 +559,13 @@ async def collect_task_completion(app: web.Application, task_id: str) -> None:
 
 
 async def cleanup_task_background_tasks(app: web.Application) -> None:
-    tasks = list(app.get("task_background_tasks", set()))
+    task_set = app.get(TASK_BACKGROUND_TASKS_KEY, set())
+    tasks = list(task_set)
     for task in tasks:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+    task_set.clear()
 
 
 async def get_task_handler(request: web.Request) -> web.Response:

@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 
 from aiohttp import web
-from .app_keys import *
+from .app_keys import (
+    EVENT_BUS_KEY,
+    OPENCODE_CLIENT_KEY,
+    PORTAL_METADATA_CLIENT_KEY,
+    SESSION_STORE_KEY,
+)
 
 from .opencode_client import OpenCodeClientError
 from .thinking_events import build_thinking_event
@@ -35,7 +40,7 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
     event = build_thinking_event("permission_resolved", session_id=str(sid or ""), request_id="", opencode_session_id=str(opencode_session_id), state="success", summary=f"Permission {decision}", data={"permission_id": permission_id, **payload})
     await request.app[EVENT_BUS_KEY].publish(event)
 
-    portal_metadata_client = request.app.get("portal_metadata_client")
+    portal_metadata_client = request.app.get(PORTAL_METADATA_CLIENT_KEY)
     if portal_metadata_client is not None:
         try:
             await portal_metadata_client.publish_session_metadata(

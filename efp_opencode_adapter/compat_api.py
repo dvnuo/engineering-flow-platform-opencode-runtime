@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import web
-from .app_keys import *
+from .app_keys import SETTINGS_KEY, SESSION_STORE_KEY, TASK_STORE_KEY
 
 from .index_loader import load_skills_index
 from .permission_generator import default_permission_baseline, skill_permission_state

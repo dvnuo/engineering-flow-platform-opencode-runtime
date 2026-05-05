@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from aiohttp import web
-from .app_keys import *
+from .app_keys import SETTINGS_KEY, FILE_SERVICE_KEY, ATTACHMENT_SERVICE_KEY
 
 from .attachment_service import AttachmentService
 from .file_service import WorkspaceFileService
@@ -63,8 +63,8 @@ async def _multipart_upload(request: web.Request) -> tuple[UploadedPart | None, 
 
 def register_file_routes(app: web.Application) -> None:
     settings = app[SETTINGS_KEY]
-    file_service = app.get("file_service") or WorkspaceFileService(settings)
-    attachment_service = app.get("attachment_service") or AttachmentService(settings)
+    file_service = app.get(FILE_SERVICE_KEY) or WorkspaceFileService(settings)
+    attachment_service = app.get(ATTACHMENT_SERVICE_KEY) or AttachmentService(settings)
     app[FILE_SERVICE_KEY] = file_service
     app[ATTACHMENT_SERVICE_KEY] = attachment_service
 
