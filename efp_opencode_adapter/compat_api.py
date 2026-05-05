@@ -10,6 +10,8 @@ from urllib.parse import urlsplit, urlunsplit
 from aiohttp import web
 
 from .index_loader import load_skills_index
+from .permission_generator import default_permission_baseline, skill_permission_state
+from .index_loader import read_json_file
 
 ALLOWED_PROMPT_SECTIONS = {"soul", "user", "agents", "tools", "memory", "daily_notes"}
 
@@ -95,11 +97,14 @@ def _git_info_for_dir(path: Path) -> dict[str, str | None]:
 async def skills_handler(request: web.Request) -> web.Response:
     settings = request.app["settings"]
     data = load_skills_index(settings)
+    cfg = read_json_file(settings.opencode_config_path) or {}
+    permission = cfg.get("permission") if isinstance(cfg.get("permission"), dict) else default_permission_baseline()
     items = data.get("skills", []) if isinstance(data, dict) else []
     skills = []
     for item in items:
         if not isinstance(item, dict) or not item.get("opencode_name"):
             continue
+        state = skill_permission_state(permission, item["opencode_name"])
         skills.append(
             {
                 "name": item["opencode_name"],
@@ -112,6 +117,9 @@ async def skills_handler(request: web.Request) -> web.Response:
                 "source_path": item.get("source_path"),
                 "runtime_type": "opencode",
                 "engine": "opencode",
+                "permission_state": state,
+                "callable": state in {"allowed", "ask"},
+                "blocked_reason": "skill denied by current OpenCode permission profile" if state == "denied" else None,
             }
         )
     return web.json_response({"skills": skills, "engine": "opencode", "count": len(skills), "warnings": data.get("warnings", []) if isinstance(data, dict) else []})

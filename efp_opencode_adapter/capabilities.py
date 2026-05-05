@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .index_loader import load_skills_index, load_tools_index, read_json_file
+from .permission_generator import default_permission_baseline, skill_permission_state
 from .profile_store import sanitize_public_secrets
 from .settings import Settings
 
@@ -31,6 +32,8 @@ def _drop_none(payload: dict[str, Any]) -> dict[str, Any]:
 
 def load_skills_capabilities(settings: Settings) -> list[dict[str, Any]]:
     data = load_skills_index(settings)
+    cfg = read_json_file(settings.opencode_config_path) or {}
+    permission = cfg.get("permission") if isinstance(cfg.get("permission"), dict) else default_permission_baseline()
     out = []
     for item in data.get("skills", []):
         if not isinstance(item, dict) or not item.get("opencode_name"):
@@ -38,7 +41,9 @@ def load_skills_capabilities(settings: Settings) -> list[dict[str, Any]]:
         tags = ["skill"]
         if item.get("risk_level"):
             tags.append(item["risk_level"])
-        out.append({"capability_id": f"opencode.skill.{item['opencode_name']}", "type": "skill", "name": item["opencode_name"], "description": item.get("description", ""), "enabled": True, "policy_tags": tags, "source_ref": "skills_repo", "metadata": {"efp_name": item.get("efp_name"), "tools": item.get("tools", []), "task_tools": item.get("task_tools", [])}})
+        state = skill_permission_state(permission, item["opencode_name"])
+        callable = state in {"allowed", "ask"}
+        out.append({"capability_id": f"opencode.skill.{item['opencode_name']}", "type": "skill", "name": item["opencode_name"], "description": item.get("description", ""), "enabled": True, "policy_tags": tags, "source_ref": "skills_repo", "permission_state": state, "callable": callable, "blocked_reason": "skill denied by current OpenCode permission profile" if state == "denied" else None, "metadata": _drop_none({"efp_name": item.get("efp_name"), "tools": item.get("tools", []), "task_tools": item.get("task_tools", []), "permission_state": state, "callable": callable})})
     return out
 
 

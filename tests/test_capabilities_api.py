@@ -73,7 +73,7 @@ async def test_capabilities_catalog(tmp_path, monkeypatch):
         "    opencode_name: opencode_tool\n"
         "    runtime_compat: [opencode]\n"
     )
-    (workspace / ".opencode/opencode.json").write_text(json.dumps({"agent": {"efp-main": {"description": "Main"}}, "api_key": "SECRET"}))
+    (workspace / ".opencode/opencode.json").write_text(json.dumps({"agent": {"efp-main": {"description": "Main"}}, "permission": {"skill": {"*": "deny", "my-skill": "allow"}}, "api_key": "SECRET"}))
 
     app = create_app(Settings.from_env(), opencode_client=FakeClient())
     client = TestClient(TestServer(app))
@@ -83,6 +83,12 @@ async def test_capabilities_catalog(tmp_path, monkeypatch):
     names = {c.get("name") for c in caps}
     assert {"read", "bash", "websearch", "my-skill", "efp_read", "efp-main", "github_status", "safe_mcp_tool", "opencode_tool"}.issubset(names)
     assert "native_only" not in names
+    skill = next(c for c in caps if c.get("type") == "skill" and c.get("name") == "my-skill")
+    assert skill["permission_state"] == "allowed"
+    assert skill["callable"] is True
+    skills_payload = await (await client.get("/api/skills")).json()
+    s = next(i for i in skills_payload["skills"] if i["name"] == "my-skill")
+    assert s["permission_state"] == "allowed"
 
     for c in caps:
         for key in ("capability_id", "type", "name", "enabled", "policy_tags", "source_ref"):

@@ -19,7 +19,7 @@ def init_assets(settings: Settings) -> None:
         settings.workspace_dir / ".opencode" / "agents",
         settings.skills_dir,
         settings.tools_dir,
-        home / ".local" / "share" / "opencode",
+        settings.opencode_data_dir,
         settings.adapter_state_dir,
     ]
     for d in required_dirs:

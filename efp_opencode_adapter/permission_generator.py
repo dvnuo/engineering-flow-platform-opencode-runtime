@@ -45,6 +45,28 @@ def _as_set(value: Any) -> set[str]:
     return {str(v) for v in value} if isinstance(value, list) else set()
 
 
+def _as_name_set(value: Any) -> set[str]:
+    out: set[str] = set()
+    if isinstance(value, str) and value.strip():
+        out.add(value.strip())
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                out.add(item.strip())
+            elif isinstance(item, dict):
+                for key in ("name", "opencode_name", "efp_name"):
+                    v = item.get(key)
+                    if isinstance(v, str) and v.strip():
+                        out.add(v.strip())
+    elif isinstance(value, dict):
+        out |= {str(k).strip() for k in value.keys() if str(k).strip()}
+        for key in ("name", "opencode_name", "efp_name"):
+            v = value.get(key)
+            if isinstance(v, str) and v.strip():
+                out.add(v.strip())
+    return out
+
+
 def _is_opencode_compatible_tool(tool: dict[str, Any]) -> bool:
     compat = tool.get("runtime_compat")
     if compat is None:
@@ -100,11 +122,11 @@ def _apply_builtin_denies(permission: dict[str, Any], denied_actions: set[str], 
             permission[key] = "deny"
 
 
-def _collect_allowed_and_denied(config: dict) -> tuple[set[str], set[str], set[str], set[str], set[str], set[str]]:
-    allowed_ids, allowed_actions, allowed_types, denied_actions, denied_types, allowed_external_systems = set(), set(), set(), set(), set(), set()
+def _collect_allowed_and_denied(config: dict) -> tuple[set[str], set[str], set[str], set[str], set[str], set[str], set[str], set[str]]:
+    allowed_ids, allowed_actions, allowed_types, denied_actions, denied_types, allowed_external_systems, allowed_skill_names, denied_skill_names = set(), set(), set(), set(), set(), set(), set(), set()
 
     def _merge_rule_block(block: Any) -> None:
-        nonlocal allowed_ids, allowed_actions, allowed_types, denied_actions, denied_types, allowed_external_systems
+        nonlocal allowed_ids, allowed_actions, allowed_types, denied_actions, denied_types, allowed_external_systems, allowed_skill_names, denied_skill_names
         if not isinstance(block, dict):
             return
         allowed_ids |= _as_set(block.get("allowed_capability_ids"))
@@ -114,6 +136,17 @@ def _collect_allowed_and_denied(config: dict) -> tuple[set[str], set[str], set[s
         denied_actions |= _as_set(block.get("denied_actions"))
         denied_types |= _as_set(block.get("denied_capability_types"))
         allowed_external_systems |= {x.lower() for x in _as_set(block.get("allowed_external_systems"))}
+        allowed_skill_names |= _as_name_set(block.get("allowed_skills"))
+        allowed_skill_names |= _as_name_set(block.get("skill_set"))
+        allowed_skill_names |= _as_name_set(block.get("allowed_skill_names"))
+        denied_skill_names |= _as_name_set(block.get("denied_skills"))
+        denied_skill_names |= _as_name_set(block.get("denied_skill_names"))
+        for nested in (block.get("capability_profile"), block.get("runtime_profile"), block.get("policy_profile")):
+            if isinstance(nested, dict):
+                allowed_skill_names |= _as_name_set(nested.get("skill_set"))
+                allowed_skill_names |= _as_name_set(nested.get("skills"))
+                allowed_skill_names |= _as_name_set(nested.get("allowed_skills"))
+                denied_skill_names |= _as_name_set(nested.get("denied_skills"))
 
     _merge_rule_block(config)
     llm = config.get("llm") if isinstance(config.get("llm"), dict) else {}
@@ -131,15 +164,17 @@ def _collect_allowed_and_denied(config: dict) -> tuple[set[str], set[str], set[s
         denied_types |= _as_set(llm_tools.get("denied_capability_types"))
         allowed_types |= _as_set(llm_tools.get("allowed_capability_types"))
         allowed_external_systems |= {x.lower() for x in _as_set(llm_tools.get("allowed_external_systems"))}
+        allowed_skill_names |= _as_name_set(llm_tools.get("allowed_skills"))
+        denied_skill_names |= _as_name_set(llm_tools.get("denied_skills"))
     _merge_rule_block(config.get("derived_runtime_rules"))
     _merge_rule_block(config.get("policy_context"))
-    return allowed_ids, allowed_actions, allowed_types, denied_actions, denied_types, allowed_external_systems
+    return allowed_ids, allowed_actions, allowed_types, denied_actions, denied_types, allowed_external_systems, allowed_skill_names, denied_skill_names
 
 
 def build_permission(config: dict, skills_index: dict | None = None, tools_index: dict | None = None) -> dict:
     permission = copy.deepcopy(default_permission_baseline())
     config = config if isinstance(config, dict) else {}
-    allowed_ids, allowed_actions, allowed_types, denied_actions, denied_types, allowed_external_systems = _collect_allowed_and_denied(config)
+    allowed_ids, allowed_actions, allowed_types, denied_actions, denied_types, allowed_external_systems, allowed_skill_names, denied_skill_names = _collect_allowed_and_denied(config)
     _apply_builtin_denies(permission, denied_actions, denied_types)
 
     derived = config.get("derived_runtime_rules") if isinstance(config.get("derived_runtime_rules"), dict) else {}
@@ -147,14 +182,17 @@ def build_permission(config: dict, skills_index: dict | None = None, tools_index
     auto_allow = bool(derived.get("auto_allow_adapter_actions") or derived.get("allow_auto_run") or derived.get("auto_run_adapter_actions") or policy_ctx.get("auto_allow_adapter_actions") or policy_ctx.get("allow_auto_run") or policy_ctx.get("auto_run_adapter_actions"))
 
     skills = (skills_index or {}).get("skills", []) if isinstance(skills_index, dict) else []
-    known_skills = {str(i.get("opencode_name")) for i in skills if isinstance(i, dict) and i.get("opencode_name")}
+    known_skills = [i for i in skills if isinstance(i, dict) and i.get("opencode_name")]
     deny_all_skills = "tool" in denied_types or "skill" in denied_types or "skill" in denied_actions or "opencode.builtin.skill" in denied_actions
-    for name in known_skills:
-        aliases = {name, f"skill:{name}", f"opencode.skill.{name}"}
-        if deny_all_skills or aliases & denied_actions:
+    for skill in known_skills:
+        name = str(skill.get("opencode_name"))
+        efp_name = str(skill.get("efp_name") or "")
+        aliases = {name, efp_name, f"skill:{name}", f"skill:{efp_name}", f"opencode.skill.{name}"}
+        aliases = {a for a in aliases if a}
+        if deny_all_skills or (aliases & denied_actions) or (aliases & denied_skill_names):
             permission["skill"][name] = "deny"
             continue
-        if aliases & (allowed_ids | allowed_actions) or "skill" in allowed_types:
+        if (aliases & (allowed_ids | allowed_actions | allowed_skill_names)) or "skill" in allowed_types:
             permission["skill"][name] = "allow"
 
     tools = (tools_index or {}).get("tools", []) if isinstance(tools_index, dict) else []
@@ -183,3 +221,12 @@ def build_permission(config: dict, skills_index: dict | None = None, tools_index
         else:
             permission[name] = "ask"
     return permission
+
+
+def skill_permission_state(permission: dict[str, Any], skill_name: str) -> str:
+    skill_perm = permission.get("skill") if isinstance(permission, dict) else None
+    if not isinstance(skill_perm, dict):
+        return "unknown"
+    raw = skill_perm.get(skill_name, skill_perm.get("*"))
+    mapping = {"allow": "allowed", "ask": "ask", "deny": "denied"}
+    return mapping.get(str(raw), "unknown")

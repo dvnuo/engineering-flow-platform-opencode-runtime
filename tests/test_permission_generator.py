@@ -140,3 +140,15 @@ def test_denied_actions_opencode_builtin_bash_denies_all_bash_patterns():
     assert p["bash"]["git status*"] == "deny"
     assert p["bash"]["git diff*"] == "deny"
     assert p["bash"]["git log*"] == "deny"
+
+
+def test_allowed_skills_and_denied_skills_and_aliases():
+    skills = {"skills": [{"opencode_name": "review-pull-request", "efp_name": "review_pull_request"}]}
+    p1 = build_permission({"allowed_skills": ["review-pull-request"]}, skills, None)
+    assert p1["skill"]["review-pull-request"] == "allow"
+    p2 = build_permission({"allowed_skills": ["review_pull_request"]}, skills, None)
+    assert p2["skill"]["review-pull-request"] == "allow"
+    p3 = build_permission({"allowed_skills": ["review-pull-request"], "denied_skills": ["review-pull-request"]}, skills, None)
+    assert p3["skill"]["review-pull-request"] == "deny"
+    p4 = build_permission({"capability_profile": {"skill_set": ["review-pull-request"]}}, skills, None)
+    assert p4["skill"]["review-pull-request"] == "allow"

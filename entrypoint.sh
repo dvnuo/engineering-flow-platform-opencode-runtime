@@ -19,6 +19,7 @@ export EFP_SKILLS_DIR="${EFP_SKILLS_DIR:-/app/skills}"
 export EFP_TOOLS_DIR="${EFP_TOOLS_DIR:-/app/tools}"
 export EFP_WORKSPACE_DIR="${EFP_WORKSPACE_DIR:-/workspace}"
 export EFP_ADAPTER_STATE_DIR="${EFP_ADAPTER_STATE_DIR:-/home/opencode/.local/share/efp-compat}"
+export OPENCODE_DATA_DIR="${OPENCODE_DATA_DIR:-/home/opencode/.local/share/opencode}"
 export EFP_OPENCODE_URL="${EFP_OPENCODE_URL:-http://127.0.0.1:4096}"
 export PYTHONPATH="${EFP_TOOLS_DIR}/python:${PYTHONPATH:-}"
 

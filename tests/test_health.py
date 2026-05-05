@@ -31,6 +31,7 @@ async def test_health_ok(monkeypatch):
         assert payload["engine"] == "opencode"
         assert payload["opencode_version"] == "1.14.29"
         assert payload["opencode"]["healthy"] is True
+        assert payload["state"]["healthy"] is True
 
     await client.close()
 
@@ -52,6 +53,23 @@ async def test_health_degraded(monkeypatch):
         assert payload["opencode_version"] == "1.14.29"
         assert payload["opencode"]["healthy"] is False
         assert payload["opencode"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_health_degraded_when_state_unwritable(monkeypatch):
+    monkeypatch.setenv("OPENCODE_VERSION", "1.14.29")
+    app = create_app(Settings.from_env(), opencode_client=FakeHealthyClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    from efp_opencode_adapter import state as state_mod
+    orig = state_mod.probe_writable
+    state_mod.probe_writable = lambda p: {"path": str(p), "exists": True, "writable": False, "error": "forced"}
+    resp = await client.get("/health")
+    payload = await resp.json()
+    assert resp.status == 503
+    assert payload["state"]["healthy"] is False
+    state_mod.probe_writable = orig
+    await client.close()
 
     await client.close()
 
