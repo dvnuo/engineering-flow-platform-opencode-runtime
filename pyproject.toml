@@ -17,7 +17,11 @@ test = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = ["-p", "no:ddtrace"]
+addopts = [
+  "-p", "no:ddtrace",
+  "-p", "no:ddtrace.pytest_bdd",
+  "-p", "no:ddtrace.pytest_benchmark",
+]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

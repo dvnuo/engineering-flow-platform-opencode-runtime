@@ -19,7 +19,7 @@ STRING_APP_KEY_NAMES = {
 
 def test_adapter_does_not_use_string_aiohttp_app_keys():
     offenders = []
-    for path in ADAPTER_DIR.glob('*.py'):
+    for path in ADAPTER_DIR.rglob('*.py'):
         if path.name == 'app_keys.py':
             continue
         tree = ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
@@ -64,7 +64,7 @@ def test_adapter_does_not_use_string_aiohttp_app_keys():
 
 def test_adapter_does_not_wildcard_import_app_keys():
     offenders=[]
-    for path in ADAPTER_DIR.glob('*.py'):
+    for path in ADAPTER_DIR.rglob('*.py'):
         if 'from .app_keys import *' in path.read_text(encoding='utf-8'):
             offenders.append(path.name)
     assert not offenders
