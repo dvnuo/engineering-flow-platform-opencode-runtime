@@ -206,6 +206,11 @@ class OpenCodeClient:
         return {"success": False, "supported": False, "reason": "cancel_endpoint_unsupported"}
 
     async def event_stream(self, *, global_events: bool = False, timeout_seconds: int | None = None) -> AsyncIterator[dict[str, Any]]:
+        """Yield OpenCode SSE events.
+
+        Callers that stop after partially consuming this async generator must call
+        ``aclose()`` so an owned aiohttp ClientSession can be closed promptly.
+        """
         path = "/global/event" if global_events else "/event"
         own_session = self._session is None
         session = self._session or aiohttp.ClientSession()

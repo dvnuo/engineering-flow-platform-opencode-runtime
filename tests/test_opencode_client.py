@@ -1,3 +1,4 @@
+import asyncio
 import base64
 
 import pytest
@@ -187,7 +188,37 @@ async def test_event_stream_parses_sse(monkeypatch):
     monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
     client = OpenCodeClient(Settings.from_env())
     events_iter = client.event_stream()
-    first = await events_iter.__anext__()
-    assert first["type"] == "server.connected"
-    assert first["hello"] is True
-    await server.close()
+    try:
+        first = await events_iter.__anext__()
+        assert first["type"] == "server.connected"
+        assert first["hello"] is True
+    finally:
+        await events_iter.aclose()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_event_stream_partial_consume_can_be_closed_without_leaking_session(monkeypatch):
+    app = web.Application()
+
+    async def events(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(b'event: server.connected\n')
+        await resp.write(b'data: {"hello": true}\n\n')
+        await asyncio.sleep(10)
+        return resp
+
+    app.router.add_get("/event", events)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+    events_iter = client.event_stream()
+    try:
+        first = await events_iter.__anext__()
+        assert first["type"] == "server.connected"
+        assert first["hello"] is True
+    finally:
+        await events_iter.aclose()
+        await server.close()
