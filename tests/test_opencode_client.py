@@ -276,3 +276,27 @@ async def test_close_owned_response_releases_response_and_closes_session():
 
     assert resp.released is True
     assert resp._efp_session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_request_does_not_close_injected_session_when_request_raises():
+    class InjectedFailingSession:
+        def __init__(self):
+            self.closed = False
+            self.calls = 0
+
+        async def request(self, *args, **kwargs):
+            self.calls += 1
+            raise RuntimeError("injected connection failed")
+
+        async def close(self):
+            self.closed = True
+
+    session = InjectedFailingSession()
+    client = OpenCodeClient(Settings.from_env(), session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="injected connection failed"):
+        await client._request("PUT", "http://127.0.0.1:9/auth/anthropic")
+
+    assert session.calls == 1
+    assert session.closed is False
