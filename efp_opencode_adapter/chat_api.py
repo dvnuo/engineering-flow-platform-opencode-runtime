@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -282,6 +284,42 @@ async def chat_handler(request: web.Request) -> web.Response:
     return web.json_response(await handle_chat_payload(request, payload))
 
 
+STREAM_HEARTBEAT_SECONDS = 15.0
+
+
+def _sse_encode(event_name: str, payload: dict[str, Any]) -> bytes:
+    return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+
+
+async def _write_sse(resp: web.StreamResponse, event_name: str, payload: dict[str, Any]) -> None:
+    await resp.write(_sse_encode(event_name, payload))
+
+
+def _event_dedupe_key(event: dict[str, Any]) -> tuple:
+    return (event.get("type"), event.get("session_id"), event.get("request_id"), json.dumps(event.get("data", {}), sort_keys=True, ensure_ascii=False)[:500])
+
+
+def _is_stream_relevant_event(event: dict[str, Any], *, session_id: str, request_id: str) -> bool:
+    if str(event.get("session_id") or "") != session_id:
+        return False
+    ev_req = event.get("request_id")
+    return (not ev_req) or str(ev_req) == request_id
+
+
+def _event_delta_text(event: dict[str, Any]) -> str:
+    for k in ("delta", "message"):
+        v = event.get(k)
+        if isinstance(v, str) and v:
+            return safe_preview(v, 300)
+    data = event.get("data")
+    if isinstance(data, dict):
+        for k in ("delta", "message"):
+            v = data.get(k)
+            if isinstance(v, str) and v:
+                return safe_preview(v, 300)
+    return ""
+
+
 async def _stream_error_response(request: web.Request, error: str, detail: str | None = None) -> web.StreamResponse:
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "keep-alive"})
     await resp.prepare(request)
@@ -302,30 +340,67 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         session_id = _portal_session_id_from_payload(payload)
         req_id = _request_id_from_payload(payload)
     except web.HTTPException as exc:
-        err = "chat_failed"
-        try:
-            j = json.loads(exc.text or "{}")
-            if isinstance(j, dict) and isinstance(j.get("error"), str):
-                err = j["error"]
-        except Exception:
-            pass
-        return await _stream_error_response(request, err, exc.text)
+        return await _stream_error_response(request, "chat_failed", exc.text)
 
     payload = {**payload, "session_id": session_id, "request_id": req_id}
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "keep-alive"})
     await resp.prepare(request)
 
-    pre = chat_started_event(session_id=session_id, request_id=req_id)
-    await resp.write(f"event: runtime_event\ndata: {json.dumps(pre, ensure_ascii=False)}\n\n".encode())
+    bus = request.app["event_bus"]
+    sub = bus.subscribe({"session_id": session_id})
+    run_task = asyncio.create_task(handle_chat_payload(request, payload))
+    seen: set[tuple] = set()
+    await _write_sse(resp, "runtime_event", {"type": "stream.started", "engine": "opencode", "session_id": session_id, "request_id": req_id, "created_at": utc_now_iso()})
+
+    async def _forward(event: dict[str, Any]) -> None:
+        if not _is_stream_relevant_event(event, session_id=session_id, request_id=req_id):
+            return
+        key = _event_dedupe_key(event)
+        if key in seen:
+            return
+        seen.add(key)
+        await _write_sse(resp, "runtime_event", event)
+        if event.get("type") == "assistant_delta":
+            delta = _event_delta_text(event)
+            if delta:
+                await _write_sse(resp, "delta", {"delta": delta, "session_id": session_id, "request_id": req_id})
+
     try:
-        result = await handle_chat_payload(request, payload)
-        for event in result.get("runtime_events", []):
-            if event.get("type") == pre.get("type") and event.get("session_id") == pre.get("session_id") and event.get("request_id") == pre.get("request_id"):
+        while not run_task.done():
+            try:
+                event = await asyncio.wait_for(sub.queue.get(), timeout=STREAM_HEARTBEAT_SECONDS)
+            except asyncio.TimeoutError:
+                await _write_sse(resp, "heartbeat", {"ok": True, "ts": time.time()})
                 continue
-            await resp.write(f"event: runtime_event\ndata: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
-        await resp.write(f"event: final\ndata: {json.dumps(result, ensure_ascii=False)}\n\n".encode())
-        await resp.write(b'event: done\ndata: {"ok":true}\n\n')
-    except web.HTTPException as exc:
-        await resp.write(f"event: error\ndata: {json.dumps({'error': 'chat_failed', 'detail': exc.text}, ensure_ascii=False)}\n\n".encode())
-    await resp.write_eof()
+            await _forward(event)
+
+        error_payload = None
+        final_result = None
+        try:
+            final_result = run_task.result()
+        except web.HTTPException as exc:
+            error_payload = {"error": "chat_failed", "detail": exc.text}
+        except Exception as exc:
+            error_payload = {"error": "chat_failed", "detail": safe_preview(str(exc), 500)}
+
+        deadline = asyncio.get_running_loop().time() + 0.1
+        drained = 0
+        while asyncio.get_running_loop().time() < deadline and drained < 100:
+            try:
+                event = sub.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            await _forward(event); drained += 1
+
+        if error_payload:
+            await _write_sse(resp, "error", error_payload)
+        else:
+            await _write_sse(resp, "final", final_result or {})
+            await _write_sse(resp, "done", {"ok": True})
+    finally:
+        bus.unsubscribe(sub)
+        if not run_task.done():
+            run_task.cancel()
+            await asyncio.gather(run_task, return_exceptions=True)
+        await resp.write_eof()
     return resp
