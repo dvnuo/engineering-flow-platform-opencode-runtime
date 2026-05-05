@@ -222,3 +222,57 @@ async def test_event_stream_partial_consume_can_be_closed_without_leaking_sessio
     finally:
         await events_iter.aclose()
         await server.close()
+
+
+@pytest.mark.asyncio
+async def test_request_closes_owned_session_when_request_raises(monkeypatch):
+    from efp_opencode_adapter import opencode_client as module
+
+    sessions = []
+
+    class FailingSession:
+        def __init__(self):
+            self.closed = False
+            sessions.append(self)
+
+        async def request(self, *args, **kwargs):
+            raise RuntimeError("connection failed before response")
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(module.aiohttp, "ClientSession", FailingSession)
+
+    client = OpenCodeClient(Settings.from_env())
+
+    with pytest.raises(RuntimeError, match="connection failed before response"):
+        await client._request("PUT", "http://127.0.0.1:9/auth/anthropic")
+
+    assert len(sessions) == 1
+    assert sessions[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_close_owned_response_releases_response_and_closes_session():
+    from efp_opencode_adapter.opencode_client import _close_owned_response
+
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class FakeResponse:
+        def __init__(self):
+            self.released = False
+            self._efp_session = FakeSession()
+
+        def release(self):
+            self.released = True
+
+    resp = FakeResponse()
+    await _close_owned_response(resp)
+
+    assert resp.released is True
+    assert resp._efp_session.closed is True

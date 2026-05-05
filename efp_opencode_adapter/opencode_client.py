@@ -18,6 +18,18 @@ class OpenCodeClientError(Exception):
         self.payload = payload
 
 
+
+
+async def _close_owned_response(resp: aiohttp.ClientResponse) -> None:
+    session = getattr(resp, "_efp_session", None)
+    if session is None:
+        return
+    try:
+        resp.release()
+    finally:
+        await session.close()
+
+
 class OpenCodeClient:
     def __init__(self, settings: Settings, session: aiohttp.ClientSession | None = None):
         self.settings = settings
@@ -57,7 +69,11 @@ class OpenCodeClient:
         if self._session is not None:
             return await self._session.request(method, url, **kwargs)
         session = aiohttp.ClientSession()
-        resp = await session.request(method, url, **kwargs)
+        try:
+            resp = await session.request(method, url, **kwargs)
+        except Exception:
+            await session.close()
+            raise
         resp._efp_session = session
         return resp
 
@@ -93,8 +109,7 @@ class OpenCodeClient:
                     return {"success": True, "status": resp.status}
                 return {"success": False, "status": resp.status, "error": "auth update failed"}
             finally:
-                if hasattr(resp, "_efp_session"):
-                    await resp._efp_session.close()
+                await _close_owned_response(resp)
         except Exception as exc:
             return {"success": False, "error": str(exc).replace(api_key, "***REDACTED***")}
 
@@ -107,8 +122,7 @@ class OpenCodeClient:
                     return {"success": True, "status": resp.status}
                 return {"success": False, "pending_restart": True, "status": resp.status, "error": "config patch unsupported"}
             finally:
-                if hasattr(resp, "_efp_session"):
-                    await resp._efp_session.close()
+                await _close_owned_response(resp)
         except Exception:
             return {"success": False, "pending_restart": True, "error": "config patch unsupported"}
 
@@ -122,8 +136,7 @@ class OpenCodeClient:
                 payload = await resp.json()
                 return {"success": True, "tools": payload.get("tools", [])} if isinstance(payload, dict) else {"success": False, "tools": []}
             finally:
-                if hasattr(resp, "_efp_session"):
-                    await resp._efp_session.close()
+                await _close_owned_response(resp)
         except Exception:
             return {"success": False, "tools": []}
 
@@ -199,8 +212,7 @@ class OpenCodeClient:
                         continue
                     return {"success": False, "supported": True, "status": resp.status}
                 finally:
-                    if hasattr(resp, "_efp_session"):
-                        await resp._efp_session.close()
+                    await _close_owned_response(resp)
             except Exception:
                 continue
         return {"success": False, "supported": False, "reason": "cancel_endpoint_unsupported"}
