@@ -1,3 +1,4 @@
+from efp_opencode_adapter.app_keys import EVENT_BUS_KEY, OPENCODE_CLIENT_KEY
 import asyncio
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -20,7 +21,7 @@ async def test_chat_stream_forwards_runtime_event_before_final(tmp_path, monkeyp
     fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
     t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-1','request_id':'req-stream-1'}))
     await fake.entered.wait()
-    await app['event_bus'].publish({'type':'tool.started','session_id':'portal-stream-1','request_id':'raw-opencode-tool-call-id-not-portal-request','tool':'efp_test_tool','engine':'opencode','raw_type':'tool.start'})
+    await app[EVENT_BUS_KEY].publish({'type':'tool.started','session_id':'portal-stream-1','request_id':'raw-opencode-tool-call-id-not-portal-request','tool':'efp_test_tool','engine':'opencode','raw_type':'tool.start'})
     fake.release.set(); resp=await t; body=await resp.text()
     assert body.index('tool.started') < body.index('event: final')
     await c.close()
@@ -31,7 +32,7 @@ async def test_chat_stream_sends_delta_event_for_assistant_delta(tmp_path, monke
     fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
     t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-2','request_id':'req-stream-2'}))
     await fake.entered.wait()
-    await app['event_bus'].publish({'type':'assistant_delta','session_id':'portal-stream-2','request_id':'raw-message-part-id','data':{'delta':'hello delta'},'engine':'opencode','raw_type':'message.part.updated'})
+    await app[EVENT_BUS_KEY].publish({'type':'assistant_delta','session_id':'portal-stream-2','request_id':'raw-message-part-id','data':{'delta':'hello delta'},'engine':'opencode','raw_type':'message.part.updated'})
     fake.release.set(); resp=await t; body=await resp.text()
     assert 'event: delta' in body and 'hello delta' in body and body.index('event: delta') < body.index('event: final')
     await c.close()
@@ -43,7 +44,7 @@ async def test_chat_stream_unsubscribes_on_error(tmp_path, monkeypatch):
     t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-3','request_id':'req-stream-3'}))
     await fake.entered.wait(); fake.release.set(); resp=await t; body=await resp.text()
     assert 'event: error' in body
-    assert len(app['event_bus']._subs) == 0
+    assert len(app[EVENT_BUS_KEY]._subs) == 0
     await c.close()
 
 
@@ -53,7 +54,7 @@ async def test_chat_stream_respects_explicit_portal_request_id(tmp_path, monkeyp
     fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
     t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-3','request_id':'req-stream-3'}))
     await fake.entered.wait()
-    await app['event_bus'].publish({'type':'assistant_delta','session_id':'portal-stream-3','portal_request_id':'other-request','data':{'delta':'should not appear'}})
+    await app[EVENT_BUS_KEY].publish({'type':'assistant_delta','session_id':'portal-stream-3','portal_request_id':'other-request','data':{'delta':'should not appear'}})
     fake.release.set(); resp=await t; body=await resp.text()
     assert 'should not appear' not in body
     await c.close()
@@ -82,7 +83,7 @@ class RaceFake(FakeOpenCodeClient):
 async def test_chat_stream_drains_event_published_at_completion_before_final(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
     app=create_app(Settings.from_env(), opencode_client=RaceFake())
-    app['opencode_client']._bus = app['event_bus']
+    app[OPENCODE_CLIENT_KEY]._bus = app[EVENT_BUS_KEY]
     c=TestClient(TestServer(app)); await c.start_server()
     try:
         resp=await c.post('/api/chat/stream', json={'message':'hello','session_id':'portal-race-1','request_id':'req-race-1'})

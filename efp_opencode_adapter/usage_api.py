@@ -1,8 +1,9 @@
 from aiohttp import web
+from .app_keys import *
 
 
 async def usage_handler(request: web.Request) -> web.Response:
-    tracker = request.app["usage_tracker"]
+    tracker = request.app[USAGE_TRACKER_KEY]
     try:
         days = int(request.query.get("days", "30"))
     except Exception:

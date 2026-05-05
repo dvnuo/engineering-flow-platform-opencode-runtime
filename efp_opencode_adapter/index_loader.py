@@ -53,13 +53,15 @@ def normalize_tool_descriptor(raw: dict) -> dict[str, Any] | None:
     name = opencode_name
     if not cap_id or not name:
         return None
+    raw_tags = raw.get("policy_tags")
+    tags = raw_tags if isinstance(raw_tags, list) else ([raw_tags] if isinstance(raw_tags, (str, int, float, bool)) else [])
     descriptor = {
         "capability_id": str(cap_id),
         "type": str(raw.get("type") or "adapter_action"),
         "name": str(name),
         "description": str(raw.get("description") or ""),
         "enabled": bool(raw.get("enabled", True)),
-        "policy_tags": [str(x) for x in (raw.get("policy_tags") or []) if isinstance(x, (str, int, float))],
+        "policy_tags": [str(x) for x in tags if isinstance(x, (str, int, float, bool))],
         "source_ref": str(raw.get("source_ref") or "tools_repo"),
         "opencode_name": str(opencode_name),
         "legacy_name": raw.get("legacy_name") or raw.get("native_name") or raw.get("efp_name") or (raw_name if raw_name and str(raw_name) != str(opencode_name) else None),

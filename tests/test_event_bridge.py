@@ -241,3 +241,14 @@ async def test_tool_metadata_prefers_enabled_descriptor(tmp_path, monkeypatch):
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({'type':'tool.start','tool':'efp_same'})
     assert event['risk_level'] == 'low' and event['mutation'] is False and event['audit_event'] is False
+
+@pytest.mark.asyncio
+async def test_policy_tags_dict_does_not_leak_secret(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state')); monkeypatch.setenv('EFP_WORKSPACE_DIR', str(tmp_path / 'workspace'))
+    settings = Settings.from_env(); settings.adapter_state_dir.mkdir(parents=True, exist_ok=True)
+    (settings.adapter_state_dir / 'tools-index.json').write_text(json.dumps({'tools':[{'opencode_name':'efp_bad_tags','capability_id':'tool.bad_tags','policy_tags':{'token':'SECRET-SHOULD-NOT-LEAK'},'risk_level':'low','mutation':False}]}), encoding='utf-8')
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({'type':'tool.start','tool':'efp_bad_tags'})
+    assert event['policy_tags'] == []
+    assert 'SECRET-SHOULD-NOT-LEAK' not in json.dumps(event)
+    assert event['audit_event'] is False

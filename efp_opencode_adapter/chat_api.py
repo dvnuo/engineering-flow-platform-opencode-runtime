@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from aiohttp import web
+from .app_keys import *
 
 from .opencode_client import OpenCodeClientError
 from .session_store import SessionRecord
@@ -211,12 +212,12 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
     agent = _optional_str(metadata.get("agent"))
     system = _optional_str(metadata.get("system"))
 
-    store = request.app["session_store"]
-    bus = request.app["event_bus"]
-    client = request.app["opencode_client"]
-    chatlog_store = request.app["chatlog_store"]
-    usage_tracker = request.app["usage_tracker"]
-    portal_metadata_client = request.app["portal_metadata_client"]
+    store = request.app[SESSION_STORE_KEY]
+    bus = request.app[EVENT_BUS_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
+    chatlog_store = request.app[CHATLOG_STORE_KEY]
+    usage_tracker = request.app[USAGE_TRACKER_KEY]
+    portal_metadata_client = request.app[PORTAL_METADATA_CLIENT_KEY]
 
     runtime_events: list[dict[str, Any]] = []
     context_state = {"objective": message[:300], "summary": "OpenCode request accepted", "current_state": "running", "next_step": "Waiting for OpenCode assistant response", "constraints": [], "decisions": [], "open_loops": [], "budget": {"usage_percent": 0}}
@@ -375,7 +376,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "keep-alive"})
     await resp.prepare(request)
 
-    bus = request.app["event_bus"]
+    bus = request.app[EVENT_BUS_KEY]
     sub = bus.subscribe({"session_id": session_id})
     run_task = asyncio.create_task(handle_chat_payload(request, payload))
     seen: set[tuple] = set()

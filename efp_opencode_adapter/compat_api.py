@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import web
+from .app_keys import *
 
 from .index_loader import load_skills_index
 from .permission_generator import default_permission_baseline, skill_permission_state
@@ -95,7 +96,7 @@ def _git_info_for_dir(path: Path) -> dict[str, str | None]:
 
 
 async def skills_handler(request: web.Request) -> web.Response:
-    settings = request.app["settings"]
+    settings = request.app[SETTINGS_KEY]
     data = load_skills_index(settings)
     cfg = read_json_file(settings.opencode_config_path) or {}
     permission = cfg.get("permission") if isinstance(cfg.get("permission"), dict) else default_permission_baseline()
@@ -131,18 +132,19 @@ async def skills_handler(request: web.Request) -> web.Response:
                 "tool_mappings": item.get("tool_mappings", []),
                 "opencode_tools": item.get("opencode_tools", []),
                 "missing_tools": item.get("missing_tools", []),
+                "missing_opencode_tools": item.get("missing_opencode_tools", []),
             }
         )
     return web.json_response({"skills": skills, "engine": "opencode", "count": len(skills), "warnings": data.get("warnings", []) if isinstance(data, dict) else []})
 
 
 async def queue_status_handler(request: web.Request) -> web.Response:
-    records = request.app["task_store"].list_all()
+    records = request.app[TASK_STORE_KEY].list_all()
     counts = {"accepted": 0, "running": 0, "success": 0, "error": 0, "blocked": 0, "cancelled": 0}
     for rec in records:
         if rec.status in counts:
             counts[rec.status] += 1
-    return web.json_response({"status": "ok", "engine": "opencode", "queues": {"default": {"total": len(records), **counts}}, "active_sessions": len(request.app["session_store"].list_active())})
+    return web.json_response({"status": "ok", "engine": "opencode", "queues": {"default": {"total": len(records), **counts}}, "active_sessions": len(request.app[SESSION_STORE_KEY].list_active())})
 
 
 async def git_info_handler(request: web.Request) -> web.Response:
@@ -161,16 +163,16 @@ async def git_info_handler(request: web.Request) -> web.Response:
 
 
 async def skill_git_info_handler(request: web.Request) -> web.Response:
-    settings = request.app["settings"]
+    settings = request.app[SETTINGS_KEY]
     return web.json_response({**_git_info_for_dir(settings.skills_dir), "engine": "opencode"})
 
 
 async def system_prompt_config_get_handler(request: web.Request) -> web.Response:
-    return web.json_response(_load_prompt_config(request.app["settings"]))
+    return web.json_response(_load_prompt_config(request.app[SETTINGS_KEY]))
 
 
 async def system_prompt_config_put_handler(request: web.Request) -> web.Response:
-    settings = request.app["settings"]
+    settings = request.app[SETTINGS_KEY]
     try:
         payload = await request.json()
     except Exception:
@@ -192,7 +194,7 @@ async def system_prompt_config_put_handler(request: web.Request) -> web.Response
 
 
 async def system_prompt_get_handler(request: web.Request) -> web.Response:
-    settings = request.app["settings"]
+    settings = request.app[SETTINGS_KEY]
     name = request.match_info.get("name", "")
     if not _valid_name(name):
         return web.json_response({"error": "Invalid name"}, status=400)
@@ -206,7 +208,7 @@ async def system_prompt_get_handler(request: web.Request) -> web.Response:
 
 
 async def system_prompt_put_handler(request: web.Request) -> web.Response:
-    settings = request.app["settings"]
+    settings = request.app[SETTINGS_KEY]
     name = request.match_info.get("name", "")
     if not _valid_name(name):
         return web.json_response({"error": "Invalid name"}, status=400)

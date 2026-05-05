@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from aiohttp import web
+from .app_keys import *
 
 from .opencode_client import OpenCodeClientError
 
@@ -93,7 +94,7 @@ def _to_efp_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def list_sessions_handler(request: web.Request) -> web.Response:
-    store = request.app["session_store"]
+    store = request.app[SESSION_STORE_KEY]
     records = sorted(store.list_active(), key=lambda x: x.updated_at, reverse=True)
     return web.json_response(
         {
@@ -114,8 +115,8 @@ async def list_sessions_handler(request: web.Request) -> web.Response:
 
 async def get_session_handler(request: web.Request) -> web.Response:
     sid = request.match_info["session_id"]
-    store = request.app["session_store"]
-    client = request.app["opencode_client"]
+    store = request.app[SESSION_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
     record = store.get(sid)
     if not record or record.deleted:
         raise web.HTTPNotFound(text=json.dumps({"error": "session_not_found"}), content_type="application/json")
@@ -140,7 +141,7 @@ async def get_session_handler(request: web.Request) -> web.Response:
 
 async def session_chatlog_handler(request: web.Request) -> web.Response:
     sid = request.match_info["session_id"]
-    chatlog_store = request.app["chatlog_store"]
+    chatlog_store = request.app[CHATLOG_STORE_KEY]
     try:
         chatlog = chatlog_store.get(sid)
     except Exception:
@@ -153,8 +154,8 @@ async def session_chatlog_handler(request: web.Request) -> web.Response:
 
 async def rename_session_handler(request: web.Request) -> web.Response:
     sid = request.match_info["session_id"]
-    store = request.app["session_store"]
-    client = request.app["opencode_client"]
+    store = request.app[SESSION_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
     record = store.get(sid)
     if not record or record.deleted:
         raise web.HTTPNotFound(text=json.dumps({"error": "session_not_found"}), content_type="application/json")
@@ -176,8 +177,8 @@ async def rename_session_handler(request: web.Request) -> web.Response:
 
 async def delete_session_handler(request: web.Request) -> web.Response:
     sid = request.match_info["session_id"]
-    store = request.app["session_store"]
-    client = request.app["opencode_client"]
+    store = request.app[SESSION_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
     record = store.mark_deleted(sid)
     if record:
         try:
@@ -189,8 +190,8 @@ async def delete_session_handler(request: web.Request) -> web.Response:
 
 
 async def clear_sessions_handler(request: web.Request) -> web.Response:
-    store = request.app["session_store"]
-    client = request.app["opencode_client"]
+    store = request.app[SESSION_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
     cleared = store.clear()
     for rec in cleared:
         try:

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from aiohttp import WSMsgType, web
+from .app_keys import *
 
 ALLOWED_FILTER_KEYS = {"session_id", "task_id", "request_id", "agent_id", "group_id", "coordination_run_id"}
 
@@ -49,7 +50,7 @@ class EventBus:
 
 
 async def events_ws_handler(request: web.Request) -> web.WebSocketResponse:
-    bus: EventBus = request.app["event_bus"]
+    bus: EventBus = request.app[EVENT_BUS_KEY]
     filters = {k: request.query.get(k, "") for k in ALLOWED_FILTER_KEYS}
     sub = bus.subscribe(filters)
     ws = web.WebSocketResponse(heartbeat=30)

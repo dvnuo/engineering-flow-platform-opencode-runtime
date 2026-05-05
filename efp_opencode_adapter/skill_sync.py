@@ -54,6 +54,15 @@ class SkillIndexEntry:
     tool_mappings: list[dict[str, Any]] = field(default_factory=list)
     opencode_tools: list[str] = field(default_factory=list)
     missing_tools: list[str] = field(default_factory=list)
+    missing_opencode_tools: list[str] = field(default_factory=list)
+
+
+def _mapping_display_name(mapping: dict[str, Any]) -> str:
+    if mapping.get("efp_name"):
+        return str(mapping["efp_name"])
+    if mapping.get("opencode_name"):
+        return f"[declared opencode tool] {mapping['opencode_name']}"
+    return "[unknown tool]"
 
 
 @dataclass(frozen=True)
@@ -270,7 +279,7 @@ def _render_skill_markdown(opencode_name: str, entry: SkillIndexEntry, frontmatt
         + ("Runtime equivalence is partial. Explain this limitation to the user when it affects execution.\n\n" if not entry.runtime_equivalence else "")
         + ("## Compatibility Warnings\n" + "\n".join([f"- {w}" for w in entry.compatibility_warnings]) + "\n\n" if entry.compatibility_warnings else "")
         + ("## Available OpenCode Tools\n" + ("\n".join([f"- {(m['efp_name'] or '[declared]')} -> {m['opencode_name']}" for m in entry.tool_mappings if m.get("available")]) or "No mapped OpenCode tools were found.") + "\n\n")
-        + ("## Missing Required Tools\n" + "\n".join([f"- {m['efp_name']}: {m.get('missing_reason')}" for m in entry.tool_mappings if not m.get("available")]) + "\n\n" if any(not m.get("available") for m in entry.tool_mappings) else "")
+        + ("## Missing Required Tools\n" + "\n".join([f"- {_mapping_display_name(m)}: {m.get('missing_reason')}" for m in entry.tool_mappings if not m.get("available")]) + "\n\n" if any(not m.get("available") for m in entry.tool_mappings) else "")
         + f"{body.rstrip()}\n\n"
         "## OpenCode Runtime Notes\n"
         "- Use only the mapped OpenCode tool names listed above.\n"
@@ -287,6 +296,7 @@ def _write_subagent_prompt(agents_dir: Path, entry: SkillIndexEntry) -> None:
     runtime = "full" if entry.runtime_equivalence else ("unsupported" if not entry.opencode_supported else "partial")
     op_tools = ", ".join(entry.opencode_tools) if entry.opencode_tools else "none"
     missing = ", ".join(entry.missing_tools) if entry.missing_tools else "none"
+    missing_declared = ", ".join(entry.missing_opencode_tools) if entry.missing_opencode_tools else "none"
     warnings_text = "; ".join(entry.compatibility_warnings) if entry.compatibility_warnings else "none"
     content = f"""---
 name: skill-{entry.opencode_name}
@@ -308,6 +318,7 @@ Skill:
 - Compatibility warnings: {warnings_text}
 - Mapped OpenCode tools: {op_tools}
 - Missing required tools: {missing}
+- Missing declared OpenCode tools: {missing_declared}
 
 Instructions:
 - Follow the generated skill at .opencode/skills/{entry.opencode_name}/SKILL.md.
@@ -316,6 +327,7 @@ Instructions:
 - Use mapped OpenCode tool names only.
 - Do not call external writeback tools unless Portal policy allows it.
 - If a required tool is missing, report blocker instead of inventing raw curl/bash/API calls.
+- Declared OpenCode tools are usable only when present and enabled in tools-index.
 """
     prompt_path.write_text(content, encoding="utf-8")
 
@@ -415,7 +427,7 @@ def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path, to
             if not runtime_eq: compat_warnings.append("programmatic OpenCode wrapper declared but runtime equivalence is not marked full")
         else:
             op_compat = "prompt_only"; runtime_eq = True
-        tool_mappings=[]; op_tools=[]; miss=[]
+        tool_mappings=[]; op_tools=[]; miss=[]; missing_op_tools=[]
         explicit_map = _frontmatter_tool_mapping(frontmatter)
         explicit_op_tools = _frontmatter_opencode_tools(frontmatter)
         seen_tools = []
@@ -451,6 +463,9 @@ def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path, to
                 tool_mappings.append({"efp_name":"","opencode_name":meta.get("opencode_name"),"available":True,"capability_id":meta.get("capability_id"),"policy_tags":meta.get("policy_tags",[]),"risk_level":meta.get("risk_level"),"requires_identity_binding":bool(meta.get("requires_identity_binding")),"source_ref":meta.get("source_ref"),"enabled":enabled,"mapping_source":"frontmatter_opencode_tools"})
             else:
                 compat_warnings.append(f"declared OpenCode tool {op_tool} is not present/enabled in tools-index")
+                missing_op_tools.append(op_tool)
+                reason = "declared OpenCode tool is disabled" if meta and meta.get("opencode_name") and not enabled else "declared OpenCode tool is not present in tools-index"
+                tool_mappings.append({"efp_name":"","opencode_name":op_tool,"available":False,"enabled":(False if isinstance(meta, dict) else None),"missing_reason":reason,"mapping_source":"frontmatter_opencode_tools"})
 
         entry = SkillIndexEntry(
             efp_name=raw_efp_name,
@@ -461,7 +476,7 @@ def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path, to
             risk_level=risk_level,
             source_path=str(source_path.resolve()),
             target_path=str(target_path.resolve()),
-            opencode_compatibility=op_compat, runtime_equivalence=runtime_eq, programmatic=programmatic, opencode_supported=supported, compatibility_warnings=compat_warnings, tool_mappings=tool_mappings, opencode_tools=op_tools, missing_tools=miss,
+            opencode_compatibility=op_compat, runtime_equivalence=runtime_eq, programmatic=programmatic, opencode_supported=supported, compatibility_warnings=compat_warnings, tool_mappings=tool_mappings, opencode_tools=op_tools, missing_tools=miss, missing_opencode_tools=missing_op_tools,
         )
         target_path.write_text(_render_skill_markdown(opencode_name, entry, frontmatter, body), encoding="utf-8")
         skills.append(entry)

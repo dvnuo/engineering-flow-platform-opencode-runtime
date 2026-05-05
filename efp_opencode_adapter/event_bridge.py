@@ -131,10 +131,20 @@ def _build_tool_metadata(settings) -> dict[str, dict[str, Any]]:
 
 
 def _safe_policy_tags(meta: dict[str, Any]) -> list[str]:
-    tags = meta.get("policy_tags") or []
-    if not isinstance(tags, list):
-        tags = [tags]
-    return [safe_preview(str(x), 100) for x in tags if x is not None]
+    raw = meta.get("policy_tags") or []
+    if isinstance(raw, list):
+        candidates = raw
+    elif isinstance(raw, (str, int, float, bool)):
+        candidates = [raw]
+    else:
+        candidates = []
+    out: list[str] = []
+    for item in candidates:
+        if isinstance(item, (str, int, float, bool)):
+            value = safe_preview(str(item), 100)
+            if isinstance(value, str) and value:
+                out.append(value)
+    return out
 
 def _is_mutation_tool(meta: dict[str, Any]) -> bool:
     tags = {str(x).lower() for x in (meta.get("policy_tags") or [])}

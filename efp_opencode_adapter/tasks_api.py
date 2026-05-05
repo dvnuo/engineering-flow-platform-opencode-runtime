@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from aiohttp import web
+from .app_keys import *
 
 from .chat_api import extract_assistant_text
 from .opencode_client import OpenCodeClientError
@@ -305,14 +306,14 @@ async def _publish_task_event(app: web.Application, record: TaskRecord, event_ty
         event["group_id"] = gid
     if cid:
         event["coordination_run_id"] = cid
-    store: TaskStore = app["task_store"]
+    store: TaskStore = app[TASK_STORE_KEY]
     store.append_event(record.task_id, event)
-    await app["event_bus"].publish(event)
+    await app[EVENT_BUS_KEY].publish(event)
 
 
 async def _ensure_session(request: web.Request, portal_session_id: str, task_type: str, task_id: str) -> SessionRecord:
-    store = request.app["session_store"]
-    client = request.app["opencode_client"]
+    store = request.app[SESSION_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
     record = store.get(portal_session_id)
     if record is None:
         created = await client.create_session(title=f"Task {task_type}: {task_id}")
@@ -366,14 +367,14 @@ async def execute_task_handler(request: web.Request) -> web.Response:
     portal_session_id = payload.get("session_id") or f"task-{task_id}"
     request_id = payload.get("request_id") or f"task-{uuid4()}"
 
-    task_store: TaskStore = request.app["task_store"]
+    task_store: TaskStore = request.app[TASK_STORE_KEY]
     existing = task_store.get(task_id)
     if existing:
         if existing.status in {"accepted", "running"}:
             return web.json_response({"ok": True, "status": "accepted", "task_id": task_id, "request_id": existing.request_id}, status=202)
         return web.json_response(_to_public(existing), status=200)
 
-    client = request.app["opencode_client"]
+    client = request.app[OPENCODE_CLIENT_KEY]
     try:
         session_record = await _ensure_session(request, portal_session_id, task_type, task_id)
         prompt = build_task_prompt(task_id=task_id, task_type=task_type, input_payload=input_payload, metadata=metadata, source=source, shared_context_ref=shared_context_ref, context_ref=context_ref)
@@ -414,7 +415,7 @@ async def execute_task_handler(request: web.Request) -> web.Response:
 
 
 async def _mark_dispatch_error(app: web.Application, task_id: str, *, task_type: str, request_id: str, portal_session_id: str, input_payload: dict[str, Any], metadata: dict[str, Any], source: str | None, shared_context_ref: str | None, context_ref: Any, exc: Exception) -> TaskRecord:
-    store: TaskStore = app["task_store"]
+    store: TaskStore = app[TASK_STORE_KEY]
     existing = store.get(task_id)
     out = {
         "summary": "OpenCode request failed",
@@ -433,8 +434,8 @@ async def _mark_dispatch_error(app: web.Application, task_id: str, *, task_type:
 
 def schedule_task_collector(app: web.Application, task_id: str) -> None:
     bg = asyncio.create_task(collect_task_completion(app, task_id))
-    app["task_background_tasks"].add(bg)
-    bg.add_done_callback(app["task_background_tasks"].discard)
+    app[TASK_BACKGROUND_TASKS_KEY].add(bg)
+    bg.add_done_callback(app[TASK_BACKGROUND_TASKS_KEY].discard)
 
 
 async def _try_read_completion_from_messages(record: TaskRecord, client: Any) -> str | None:
@@ -446,7 +447,7 @@ async def _try_read_completion_from_messages(record: TaskRecord, client: Any) ->
 
 
 async def _try_read_completion_from_events(app: web.Application, record: TaskRecord, max_seconds: float) -> tuple[str | None, list[dict[str, Any]]]:
-    client = app["opencode_client"]
+    client = app[OPENCODE_CLIENT_KEY]
     observed: list[dict[str, Any]] = []
     if not hasattr(client, "event_stream"):
         return None, observed
@@ -487,8 +488,8 @@ async def collect_task_completion(app: web.Application, task_id: str) -> None:
     timeout = float(os.getenv("EFP_TASK_COMPLETION_TIMEOUT_SECONDS", "900"))
     poll = float(os.getenv("EFP_TASK_COMPLETION_POLL_SECONDS", "1.0"))
     deadline = time.monotonic() + timeout
-    store: TaskStore = app["task_store"]
-    client = app["opencode_client"]
+    store: TaskStore = app[TASK_STORE_KEY]
+    client = app[OPENCODE_CLIENT_KEY]
     try:
         while time.monotonic() < deadline:
             record = store.get(task_id)
@@ -563,7 +564,7 @@ async def get_task_handler(request: web.Request) -> web.Response:
     task_id = request.match_info["task_id"]
     if not is_valid_task_id(task_id):
         return web.json_response({"error": "invalid_task_id"}, status=400)
-    store: TaskStore = request.app["task_store"]
+    store: TaskStore = request.app[TASK_STORE_KEY]
     record = store.get(task_id)
     if record is None:
         return web.json_response({"error": "task_not_found"}, status=404)
@@ -574,13 +575,13 @@ async def cancel_task_handler(request: web.Request) -> web.Response:
     task_id = request.match_info["task_id"]
     if not is_valid_task_id(task_id):
         return web.json_response({"error": "invalid_task_id"}, status=400)
-    store: TaskStore = request.app["task_store"]
+    store: TaskStore = request.app[TASK_STORE_KEY]
     record = store.get(task_id)
     if record is None:
         return web.json_response({"error": "task_not_found"}, status=404)
     if record.status in TERMINAL:
         return web.json_response(_to_public(record), status=200)
-    client = request.app["opencode_client"]
+    client = request.app[OPENCODE_CLIENT_KEY]
     message_id = record.opencode_message_id or record.opencode_prompt_id
     remote_cancel = {"success": False, "supported": False, "reason": "cancel_not_attempted"}
     if hasattr(client, "cancel_message"):

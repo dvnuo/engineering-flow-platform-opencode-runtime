@@ -224,3 +224,24 @@ def test_frontmatter_opencode_tools_are_validated_against_tools_index(tmp_path):
     res = sync_skills(skills_dir, opdir, state, tools_index={'tools':[{'opencode_name':'efp_run_command','enabled':True}]})
     assert 'efp_run_command' in res.skills[0].opencode_tools
     assert any(x.get('mapping_source')=='frontmatter_opencode_tools' for x in res.skills[0].tool_mappings)
+
+def test_frontmatter_opencode_tools_missing_are_exposed(tmp_path):
+    skills_dir = tmp_path / 'skills'; opdir = tmp_path / 'workspace/.opencode/skills'; state = tmp_path / 'state'
+    _write_skill(skills_dir / 'x' / 'skill.md', {'name':'x','description':'d','opencode_tools':['efp_missing_tool']})
+    res = sync_skills(skills_dir, opdir, state, tools_index={'tools':[]})
+    entry = res.skills[0]
+    assert entry.opencode_tools == []
+    assert entry.missing_opencode_tools == ['efp_missing_tool']
+    assert any((not m.get('available')) and m.get('mapping_source')=='frontmatter_opencode_tools' for m in entry.tool_mappings)
+    txt = (opdir / 'x' / 'SKILL.md').read_text(encoding='utf-8')
+    assert '[declared opencode tool] efp_missing_tool' in txt
+    assert 'declared OpenCode tool is not present' in txt
+
+def test_frontmatter_opencode_tools_disabled_are_exposed(tmp_path):
+    skills_dir = tmp_path / 'skills'; opdir = tmp_path / 'workspace/.opencode/skills'; state = tmp_path / 'state'
+    _write_skill(skills_dir / 'x' / 'skill.md', {'name':'x','description':'d','opencode_tools':['efp_run_command']})
+    res = sync_skills(skills_dir, opdir, state, tools_index={'tools':[{'opencode_name':'efp_run_command','enabled':False}]})
+    entry = res.skills[0]
+    assert 'efp_run_command' not in entry.opencode_tools
+    assert entry.missing_opencode_tools == ['efp_run_command']
+    assert any('disabled' in (m.get('missing_reason') or '') for m in entry.tool_mappings)

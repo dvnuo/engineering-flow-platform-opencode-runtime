@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 
 from aiohttp import web
+from .app_keys import *
 
 from .capabilities import build_capability_catalog
 from .chat_api import chat_handler, chat_stream_handler
@@ -47,14 +48,14 @@ import asyncio
 
 
 async def health_handler(request: web.Request) -> web.Response:
-    settings: Settings = request.app["settings"]
-    client: OpenCodeClient = request.app["opencode_client"]
+    settings: Settings = request.app[SETTINGS_KEY]
+    client: OpenCodeClient = request.app[OPENCODE_CLIENT_KEY]
     try:
         info = await client.health()
     except Exception:
         info = {"healthy": False, "error": "unavailable"}
     opencode_healthy = bool(info.get("healthy"))
-    state_health = build_state_health_snapshot(settings, request.app["state_paths"])
+    state_health = build_state_health_snapshot(settings, request.app[STATE_PATHS_KEY])
     state_healthy = bool(state_health.get("healthy"))
     bridge = request.app.get("event_bridge")
     event_bridge_status = bridge.status_snapshot() if bridge and hasattr(bridge, "status_snapshot") else {"enabled": False, "running": False}
@@ -86,8 +87,8 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
         return web.json_response({"success": False, "error": "invalid json", "engine": "opencode"}, status=400)
     if not isinstance(payload, dict) or not isinstance(payload.get("config"), dict):
         return web.json_response({"success": False, "error": "config must be an object", "engine": "opencode"}, status=400)
-    settings: Settings = request.app["settings"]
-    client = request.app["opencode_client"]
+    settings: Settings = request.app[SETTINGS_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
     runtime_config = payload["config"]
     runtime_profile_id = payload.get("runtime_profile_id")
     revision = payload.get("revision")
@@ -147,12 +148,12 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
 
 
 async def runtime_profile_status_handler(request: web.Request) -> web.Response:
-    return web.json_response(build_profile_status_payload(request.app["settings"]))
+    return web.json_response(build_profile_status_payload(request.app[SETTINGS_KEY]))
 
 
 async def capabilities_handler(request: web.Request) -> web.Response:
     try:
-        payload = await build_capability_catalog(request.app["settings"], request.app["opencode_client"])
+        payload = await build_capability_catalog(request.app[SETTINGS_KEY], request.app[OPENCODE_CLIENT_KEY])
         return web.json_response(payload)
     except Exception:
         return web.json_response({"error": "capabilities unavailable", "engine": "opencode"}, status=500)
@@ -160,24 +161,24 @@ async def capabilities_handler(request: web.Request) -> web.Response:
 
 def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None, *, start_event_bridge: bool | None = None) -> web.Application:
     app = web.Application()
-    app["settings"] = settings
+    app[SETTINGS_KEY] = settings
     state_paths = ensure_state_dirs(settings)
-    app["state_paths"] = state_paths
-    app["session_store"] = SessionStore(state_paths.sessions_dir)
-    app["task_store"] = TaskStore(state_paths.tasks_dir)
-    app["chatlog_store"] = ChatLogStore(state_paths.chatlogs_dir)
-    app["usage_tracker"] = UsageTracker(state_paths.usage_file)
-    app["event_bus"] = EventBus()
-    app["task_background_tasks"] = set()
+    app[STATE_PATHS_KEY] = state_paths
+    app[SESSION_STORE_KEY] = SessionStore(state_paths.sessions_dir)
+    app[TASK_STORE_KEY] = TaskStore(state_paths.tasks_dir)
+    app[CHATLOG_STORE_KEY] = ChatLogStore(state_paths.chatlogs_dir)
+    app[USAGE_TRACKER_KEY] = UsageTracker(state_paths.usage_file)
+    app[EVENT_BUS_KEY] = EventBus()
+    app[TASK_BACKGROUND_TASKS_KEY] = set()
     injected_client = opencode_client is not None
     client = opencode_client or OpenCodeClient(settings)
-    app["opencode_client"] = client
+    app[OPENCODE_CLIENT_KEY] = client
     app.on_cleanup.append(cleanup_task_background_tasks)
-    app["portal_metadata_client"] = PortalMetadataClient(settings, pending_file=state_paths.portal_metadata_pending_file)
-    app["recovery_manager"] = RecoveryManager(settings=settings, state_paths=state_paths, session_store=app["session_store"], chatlog_store=app["chatlog_store"], opencode_client=app["opencode_client"])
+    app[PORTAL_METADATA_CLIENT_KEY] = PortalMetadataClient(settings, pending_file=state_paths.portal_metadata_pending_file)
+    app[RECOVERY_MANAGER_KEY] = RecoveryManager(settings=settings, state_paths=state_paths, session_store=app[SESSION_STORE_KEY], chatlog_store=app[CHATLOG_STORE_KEY], opencode_client=app[OPENCODE_CLIENT_KEY])
     should_start_event_bridge = settings.event_bridge_enabled and (start_event_bridge if start_event_bridge is not None else not injected_client) and hasattr(client, "event_stream")
     if should_start_event_bridge:
-        app["event_bridge"] = OpenCodeEventBridge(settings, client, app["event_bus"], app["session_store"], app["task_store"], app["chatlog_store"])
+        app[EVENT_BRIDGE_KEY] = OpenCodeEventBridge(settings, client, app[EVENT_BUS_KEY], app[SESSION_STORE_KEY], app[TASK_STORE_KEY], app[CHATLOG_STORE_KEY])
     register_file_routes(app)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/actuator/health", health_handler)
@@ -213,7 +214,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
 
     async def _run_recovery(app):
         try:
-            summary = await app["recovery_manager"].recover()
+            summary = await app[RECOVERY_MANAGER_KEY].recover()
             print(f"recovery summary: {summary}")
         except Exception as exc:
             print(f"recovery failed: {exc}")
@@ -222,7 +223,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     async def _start_event_bridge(app):
         bridge = app.get("event_bridge")
         if bridge:
-            app["event_bridge_task"] = asyncio.create_task(bridge.run_forever())
+            app[EVENT_BRIDGE_TASK_KEY] = asyncio.create_task(bridge.run_forever())
     async def _cleanup_event_bridge(app):
         task = app.get("event_bridge_task")
         if task:
