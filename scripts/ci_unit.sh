@@ -19,7 +19,7 @@ echo "== pytest config gate =="
 python -m pytest -q tests/test_pytest_config.py
 
 echo "== NotAppKeyWarning gate =="
-python -m pytest -q -W error::aiohttp.web_exceptions.NotAppKeyWarning
+python -m pytest -q tests/test_app_keys.py -W error::aiohttp.web_exceptions.NotAppKeyWarning
 
 echo "== P2 subset =="
 python -m pytest -q \

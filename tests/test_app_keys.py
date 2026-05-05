@@ -1,5 +1,6 @@
 from pathlib import Path
 import asyncio
+import ast
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -8,17 +9,57 @@ from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 
 ADAPTER_DIR = Path(__file__).resolve().parents[1] / 'efp_opencode_adapter'
-BAD_SNIPPETS = ['app.get("settings"','app.get("state_paths"','app.get("session_store"','app.get("task_store"','app.get("chatlog_store"','app.get("usage_tracker"','app.get("event_bus"','app.get("task_background_tasks"','app.get("opencode_client"','app.get("portal_metadata_client"','app.get("recovery_manager"','app.get("event_bridge"','app.get("event_bridge_task"','app.get("file_service"','app.get("attachment_service"','request.app.get("settings"','request.app.get("state_paths"','request.app.get("session_store"','request.app.get("task_store"','request.app.get("chatlog_store"','request.app.get("usage_tracker"','request.app.get("event_bus"','request.app.get("task_background_tasks"','request.app.get("opencode_client"','request.app.get("portal_metadata_client"','request.app.get("recovery_manager"','request.app.get("event_bridge"','request.app.get("event_bridge_task"','request.app.get("file_service"','request.app.get("attachment_service"','app["','request.app["']
+
+STRING_APP_KEY_NAMES = {
+    'settings', 'state_paths', 'session_store', 'task_store', 'chatlog_store',
+    'usage_tracker', 'event_bus', 'task_background_tasks', 'opencode_client',
+    'portal_metadata_client', 'recovery_manager', 'event_bridge', 'event_bridge_task',
+    'file_service', 'attachment_service'
+}
 
 def test_adapter_does_not_use_string_aiohttp_app_keys():
-    offenders=[]
+    offenders = []
     for path in ADAPTER_DIR.glob('*.py'):
         if path.name == 'app_keys.py':
             continue
-        text = path.read_text(encoding='utf-8')
-        for snippet in BAD_SNIPPETS:
-            if snippet in text:
-                offenders.append(f'{path.name}: {snippet}')
+        tree = ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Attribute) or node.func.attr != 'get':
+                continue
+            target = node.func.value
+            is_app_get = isinstance(target, ast.Name) and target.id == 'app'
+            is_request_app_get = (
+                isinstance(target, ast.Attribute)
+                and target.attr == 'app'
+                and isinstance(target.value, ast.Name)
+                and target.value.id == 'request'
+            )
+            if not (is_app_get or is_request_app_get) or not node.args:
+                continue
+            first_arg = node.args[0]
+            if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str) and first_arg.value in STRING_APP_KEY_NAMES:
+                offenders.append(f"{path.name}:{node.lineno} uses string key via .get('{first_arg.value}')")
+
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Subscript):
+                continue
+            target = node.value
+            is_app_subscript = isinstance(target, ast.Name) and target.id == 'app'
+            is_request_app_subscript = (
+                isinstance(target, ast.Attribute)
+                and target.attr == 'app'
+                and isinstance(target.value, ast.Name)
+                and target.value.id == 'request'
+            )
+            if not (is_app_subscript or is_request_app_subscript):
+                continue
+            key_node = node.slice
+            if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str):
+                offenders.append(f"{path.name}:{node.lineno} uses string key via subscript '{key_node.value}'")
+
     assert not offenders
 
 def test_adapter_does_not_wildcard_import_app_keys():
@@ -28,14 +69,17 @@ def test_adapter_does_not_wildcard_import_app_keys():
             offenders.append(path.name)
     assert not offenders
 
+
 class IdleEventStreamClient:
     async def health(self):
         return {'healthy': True, 'version': '1.14.29'}
+
     async def event_stream(self, global_events=True, timeout_seconds=None):
         while True:
             await asyncio.sleep(1)
             if False:
                 yield {}
+
 
 @pytest.mark.asyncio
 async def test_event_bridge_starts_and_cleans_up_with_appkeys(tmp_path, monkeypatch):
