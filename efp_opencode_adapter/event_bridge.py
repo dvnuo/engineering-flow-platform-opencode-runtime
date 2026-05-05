@@ -128,6 +128,14 @@ def _build_tool_metadata(settings) -> dict[str, dict[str, Any]]:
     return out
 
 
+
+
+def _safe_policy_tags(meta: dict[str, Any]) -> list[str]:
+    tags = meta.get("policy_tags") or []
+    if not isinstance(tags, list):
+        tags = [tags]
+    return [safe_preview(str(x), 100) for x in tags if x is not None]
+
 def _is_mutation_tool(meta: dict[str, Any]) -> bool:
     tags = {str(x).lower() for x in (meta.get("policy_tags") or [])}
     risk = str(meta.get("risk_level") or "").lower()
@@ -246,7 +254,7 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
             audit_event = mutation or requires_identity or risk_level.lower() in {"high", "critical"}
             extra = {
                 "capability_id": _sanitize_event_value(meta.get("capability_id"), 200),
-                "policy_tags": _sanitize_event_value(meta.get("policy_tags", []), 300),
+                "policy_tags": _safe_policy_tags(meta),
                 "risk_level": _sanitize_event_value(risk_level, 100),
                 "requires_identity_binding": requires_identity,
                 "mutation": mutation,

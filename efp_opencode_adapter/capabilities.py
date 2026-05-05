@@ -45,7 +45,17 @@ def load_skills_capabilities(settings: Settings) -> list[dict[str, Any]]:
         supported = bool(item.get("opencode_supported", True))
         callable = state in {"allowed", "ask"} and supported
         blocked = "skill is not supported for OpenCode runtime" if not supported else ("skill denied by current OpenCode permission profile" if state == "denied" else None)
-        out.append({"capability_id": f"opencode.skill.{item['opencode_name']}", "type": "skill", "name": item["opencode_name"], "description": item.get("description", ""), "enabled": True, "policy_tags": tags, "source_ref": "skills_repo", "permission_state": state, "callable": callable, "blocked_reason": blocked, "metadata": _drop_none({"efp_name": item.get("efp_name"), "tools": item.get("tools", []), "task_tools": item.get("task_tools", []), "permission_state": state, "callable": callable, "opencode_compatibility": item.get("opencode_compatibility"), "runtime_equivalence": item.get("runtime_equivalence"), "programmatic": item.get("programmatic"), "opencode_supported": supported, "compatibility_warnings": item.get("compatibility_warnings", []), "tool_mappings": item.get("tool_mappings", []), "opencode_tools": item.get("opencode_tools", []), "missing_tools": item.get("missing_tools", [])})})
+        compat_payload = {
+            "opencode_compatibility": item.get("opencode_compatibility", "prompt_only"),
+            "runtime_equivalence": bool(item.get("runtime_equivalence", True)),
+            "programmatic": bool(item.get("programmatic", False)),
+            "opencode_supported": supported,
+            "compatibility_warnings": item.get("compatibility_warnings", []),
+            "tool_mappings": item.get("tool_mappings", []),
+            "opencode_tools": item.get("opencode_tools", []),
+            "missing_tools": item.get("missing_tools", []),
+        }
+        out.append({"capability_id": f"opencode.skill.{item['opencode_name']}", "type": "skill", "name": item["opencode_name"], "description": item.get("description", ""), "enabled": True, "policy_tags": tags, "source_ref": "skills_repo", "permission_state": state, "callable": callable, "blocked_reason": blocked, **compat_payload, "metadata": _drop_none({"efp_name": item.get("efp_name"), "tools": item.get("tools", []), "task_tools": item.get("task_tools", []), "permission_state": state, "callable": callable, **compat_payload})})
     return out
 
 

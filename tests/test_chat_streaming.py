@@ -72,3 +72,28 @@ async def test_chat_stream_immediate_error_does_not_wait_for_heartbeat(tmp_path,
     assert 'event: error' in body and 'runtime_profile_must_be_object' in body
     assert elapsed < 1.0
     await c.close()
+
+class RaceFake(FakeOpenCodeClient):
+    async def send_message(self, payload, **kwargs):
+        await self._bus.publish({'type':'tool.completed','session_id':'portal-race-1','request_id':'raw-opencode-tool-call-id','tool':'efp_race_tool','raw_type':'tool.complete'})
+        return {'ok': True, 'session_id': payload.get('session_id'), 'request_id': payload.get('request_id')}
+
+@pytest.mark.asyncio
+async def test_chat_stream_drains_event_published_at_completion_before_final(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
+    app=create_app(Settings.from_env(), opencode_client=RaceFake())
+    app['opencode_client']._bus = app['event_bus']
+    c=TestClient(TestServer(app)); await c.start_server()
+    try:
+        resp=await c.post('/api/chat/stream', json={'message':'hello','session_id':'portal-race-1','request_id':'req-race-1'})
+        body=await resp.text()
+        assert 'tool.completed' in body
+        boundary = body.find('event: final')
+        if boundary < 0:
+            boundary = body.find('event: done')
+        if boundary < 0:
+            boundary = body.find('event: error')
+        assert boundary > 0
+        assert body.index('tool.completed') < boundary
+    finally:
+        await c.close()

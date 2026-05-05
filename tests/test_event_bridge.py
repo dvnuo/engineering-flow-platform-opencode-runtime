@@ -212,3 +212,32 @@ async def test_read_only_tool_event_not_audit_by_default(tmp_path, monkeypatch):
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({"type":"tool.start","sessionID":"oc-1","tool":"efp_github_get_pr"})
     assert event["mutation"] is False and event["audit_event"] is False
+
+@pytest.mark.asyncio
+async def test_unknown_tool_event_has_stable_false_audit_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state')); monkeypatch.setenv('EFP_WORKSPACE_DIR', str(tmp_path / 'workspace'))
+    settings = Settings.from_env(); bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({'type':'tool.start','tool':'unknown_tool'})
+    assert event['mutation'] is False and event['audit_event'] is False and event['policy_tags'] == []
+    assert event['data']['mutation'] is False and event['data']['audit_event'] is False
+
+@pytest.mark.asyncio
+async def test_refresh_tool_metadata_picks_up_updated_tools_index(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state')); monkeypatch.setenv('EFP_WORKSPACE_DIR', str(tmp_path / 'workspace'))
+    settings = Settings.from_env(); settings.adapter_state_dir.mkdir(parents=True, exist_ok=True)
+    (settings.adapter_state_dir / 'tools-index.json').write_text(json.dumps({'tools':[]}), encoding='utf-8')
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event1 = await bridge.publish_raw_event({'type':'tool.start','tool':'efp_refresh'})
+    assert event1['audit_event'] is False
+    (settings.adapter_state_dir / 'tools-index.json').write_text(json.dumps({'tools':[{'capability_id':'tool.refresh','opencode_name':'efp_refresh','mutation':True,'risk_level':'high'}]}), encoding='utf-8')
+    bridge.refresh_tool_metadata(); event2 = await bridge.publish_raw_event({'type':'tool.start','tool':'efp_refresh'})
+    assert event2['mutation'] is True and event2['audit_event'] is True
+
+@pytest.mark.asyncio
+async def test_tool_metadata_prefers_enabled_descriptor(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state')); monkeypatch.setenv('EFP_WORKSPACE_DIR', str(tmp_path / 'workspace'))
+    settings = Settings.from_env(); settings.adapter_state_dir.mkdir(parents=True, exist_ok=True)
+    (settings.adapter_state_dir / 'tools-index.json').write_text(json.dumps({'tools':[{'capability_id':'tool.same.disabled','opencode_name':'efp_same','enabled':False,'risk_level':'high','mutation':True},{'capability_id':'tool.same.enabled','opencode_name':'efp_same','enabled':True,'risk_level':'low','policy_tags':['read_only'],'mutation':False}]}), encoding='utf-8')
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({'type':'tool.start','tool':'efp_same'})
+    assert event['risk_level'] == 'low' and event['mutation'] is False and event['audit_event'] is False

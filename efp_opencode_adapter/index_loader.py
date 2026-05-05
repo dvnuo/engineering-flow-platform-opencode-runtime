@@ -43,7 +43,7 @@ def is_opencode_compatible_tool(tool: dict[str, Any]) -> bool:
         values = {str(x).lower() for x in compat}
     else:
         return True
-    return "opencode" in values
+    return bool({"opencode", "all"} & values)
 
 
 def normalize_tool_descriptor(raw: dict) -> dict[str, Any] | None:
