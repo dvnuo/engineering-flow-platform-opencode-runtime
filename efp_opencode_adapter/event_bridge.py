@@ -13,6 +13,15 @@ def _sanitize_event_value(value: Any, max_chars: int) -> Any:
     return safe_preview(sanitized, max_chars)
 
 
+def _sanitize_event_text(value: Any, max_chars: int = 300) -> str:
+    sanitized = _sanitize_event_value(value, max_chars)
+    if isinstance(sanitized, str):
+        return sanitized
+    if sanitized in (None, ""):
+        return ""
+    return "[redacted]"
+
+
 def _canonical(raw_event: dict[str, Any]) -> dict[str, Any]:
     payload = raw_event.get("payload")
     if isinstance(payload, dict):
@@ -173,14 +182,19 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         "status": s_status,
     }
 
+    s_session_id = _sanitize_event_text(session_id, 300)
+    s_opencode_session_id = _sanitize_event_text(opencode_session_id, 300)
+    s_request_id = _sanitize_event_text(request_id, 300)
+    s_raw_type = _sanitize_event_text(raw_type, 200)
+
     evt = {
         "type": normalized_type,
         "event_type": normalized_type,
         "engine": "opencode",
-        "raw_type": raw_type,
-        "session_id": session_id,
-        "opencode_session_id": opencode_session_id,
-        "request_id": request_id,
+        "raw_type": s_raw_type,
+        "session_id": s_session_id,
+        "opencode_session_id": s_opencode_session_id,
+        "request_id": s_request_id,
         "state": "received",
         "summary": normalized_type,
         "data": data,

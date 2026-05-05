@@ -217,33 +217,49 @@ def _permission_event_delta(event: dict[str, Any]) -> tuple[str | None, str | No
     properties = canonical.get("properties")
     if not isinstance(properties, dict):
         properties = {}
-    def _pid() -> str | None:
-        pid = properties.get("requestID") or properties.get("permissionID") or properties.get("id")
-        if not pid:
-            pid = canonical.get("requestID") or canonical.get("permissionID") or canonical.get("permission_id")
+
+    def _first_str_from_event(*keys: str) -> str:
+        for key in keys:
+            value = properties.get(key)
+            if isinstance(value, str) and value:
+                return value
+            value = canonical.get(key)
+            if isinstance(value, str) and value:
+                return value
         permission = canonical.get("permission")
-        if not pid and isinstance(permission, dict):
-            pid = permission.get("id")
+        if isinstance(permission, dict):
+            for key in keys:
+                value = permission.get(key)
+                if isinstance(value, str) and value:
+                    return value
+        return ""
+
+    def _permission_status_value() -> str:
+        return _first_str_from_event("status", "state", "decision", "resolution", "response", "answer", "action").strip().lower()
+
+    def _pid() -> str | None:
+        pid = _first_str_from_event("requestID", "request_id", "permissionID", "permission_id", "id")
         return pid if isinstance(pid, str) and pid else None
 
-    if event_type in {"permission.asked", "permission.updated", "permission.created", "permission.requested", "permission.pending"}:
-        pid = _pid()
-        return ("open", pid or "permission-request")
     if event_type in {"permission.replied", "permission.resolved", "permission.denied", "permission.approved", "permission.rejected", "permission.closed"}:
         return ("resolved", _pid())
+
     if event_type == "permission.updated":
-        pid = properties.get("id")
-        return ("open", pid if isinstance(pid, str) and pid else "permission-request")
-    if event_type == "permission.replied":
-        pid = properties.get("permissionID")
-        return ("resolved", pid if isinstance(pid, str) and pid else None)
+        status = _permission_status_value()
+        if status in {"approved", "allow", "allowed", "accepted", "granted", "denied", "deny", "rejected", "refused", "blocked", "resolved", "replied", "closed"}:
+            return ("resolved", _pid())
+        return ("open", _pid() or "permission-request")
+
+    if event_type in {"permission.asked", "permission.created", "permission.requested", "permission.pending"}:
+        return ("open", _pid() or "permission-request")
+
     if "permission" not in event_type:
         return (None, None)
     if any(x in event_type for x in ("granted", "approved", "denied", "resolved", "closed", "replied")):
-        pid = properties.get("permissionID") or canonical.get("permissionID") or canonical.get("permission_id")
+        pid = _pid()
         return ("resolved", pid if isinstance(pid, str) and pid else None)
     if any(x in event_type for x in ("request", "pending", "created", "open")):
-        pid = properties.get("id") or canonical.get("permissionID") or canonical.get("permission_id")
+        pid = _pid()
         return ("open", pid if isinstance(pid, str) and pid else "permission-request")
     permission = canonical.get("permission")
     if isinstance(permission, dict):

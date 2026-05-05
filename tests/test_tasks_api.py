@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from efp_opencode_adapter.task_store import TaskRecord, utc_now_iso
-from efp_opencode_adapter.tasks_api import _assistant_text_from_event, _assistant_text_from_messages
+from efp_opencode_adapter.tasks_api import _assistant_text_from_event, _assistant_text_from_messages, _permission_event_delta
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -222,6 +222,26 @@ async def test_official_permission_asked_timeout_blocked(tmp_path, monkeypatch):
     assert p['output_payload']['error_code'] == 'permission_request_timeout'
     assert 'perm-asked-1' in p['output_payload']['pending_permission_ids']
     await c.close()
+
+
+def test_permission_updated_approved_resolves_pending():
+    event = {"payload": {"type": "permission.updated", "properties": {"id": "perm-1", "status": "approved"}}}
+    assert _permission_event_delta(event) == ("resolved", "perm-1")
+
+
+def test_permission_updated_denied_resolves_pending():
+    event = {"payload": {"type": "permission.updated", "properties": {"id": "perm-1", "status": "denied"}}}
+    assert _permission_event_delta(event) == ("resolved", "perm-1")
+
+
+def test_permission_updated_without_status_remains_open():
+    event = {"payload": {"type": "permission.updated", "properties": {"id": "perm-1"}}}
+    assert _permission_event_delta(event) == ("open", "perm-1")
+
+
+def test_permission_updated_response_allow_resolves_pending():
+    event = {"payload": {"type": "permission.updated", "properties": {"id": "perm-1", "response": "allow"}}}
+    assert _permission_event_delta(event) == ("resolved", "perm-1")
 
 
 @pytest.mark.asyncio
