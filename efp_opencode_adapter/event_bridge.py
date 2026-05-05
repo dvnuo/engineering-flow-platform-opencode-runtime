@@ -68,7 +68,7 @@ def _first_string(values: dict[str, str], *keys: str) -> str:
 
 
 def _status_value(values: dict[str, str]) -> str:
-    return _first_string(values, "status", "state", "decision", "resolution", "action", "answer").lower()
+    return _first_string(values, "status", "state", "decision", "resolution", "response", "action", "answer").lower()
 
 
 def _tool_name(values: dict[str, str]) -> str:
@@ -209,7 +209,7 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         evt["input_preview"] = s_input
         evt["risk_level"] = s_risk
         if normalized_type == "permission_resolved":
-            evt["decision"] = s_status or _sanitize_event_value(_first_string(values, "decision", "resolution", "answer"), 100)
+            evt["decision"] = s_status or _sanitize_event_value(_first_string(values, "decision", "resolution", "response", "answer"), 100)
     if normalized_type.startswith("tool."):
         evt["tool"] = s_tool
         if input_preview:

@@ -134,3 +134,39 @@ async def test_event_bridge_uses_raw_session_for_mapping_but_sanitizes_output(tm
     assert event["session_id"] == "portal-1"
     assert event["opencode_session_id"] == "[redacted]"
     assert "oc-secret-token" not in json.dumps(event).lower()
+
+
+@pytest.mark.asyncio
+async def test_permission_updated_response_allow_is_resolved(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({"payload": {"type": "permission.updated", "properties": {"id": "perm-1", "response": "allow", "tool": "bash"}}})
+    assert event["type"] == "permission_resolved"
+    assert event["permission_id"] == "perm-1"
+    assert event["tool"] == "bash"
+    assert event.get("decision") == "allow"
+
+
+@pytest.mark.asyncio
+async def test_permission_updated_response_deny_is_resolved(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({"payload": {"type": "permission.updated", "properties": {"id": "perm-2", "response": "deny", "tool": "bash"}}})
+    assert event["type"] == "permission_resolved"
+    assert event["permission_id"] == "perm-2"
+    assert event.get("decision") == "deny"
+
+
+@pytest.mark.asyncio
+async def test_permission_updated_without_status_or_response_remains_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({"payload": {"type": "permission.updated", "properties": {"id": "perm-3", "tool": "bash"}}})
+    assert event["type"] == "permission_request"
+    assert event["permission_id"] == "perm-3"
