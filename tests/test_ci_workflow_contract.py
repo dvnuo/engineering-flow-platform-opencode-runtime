@@ -21,3 +21,9 @@ def test_ci_docker_smoke_installs_jq_for_smoke_script():
 def test_ci_docker_smoke_runs_smoke_script():
     workflow = _workflow()
     assert 'bash scripts/smoke.sh' in workflow
+
+
+def test_ci_docker_smoke_does_not_enable_live_llm_contracts():
+    workflow = _workflow()
+    assert 'RUNTIME_CONTRACT_ENABLE_CHAT' not in workflow
+    assert 'RUNTIME_CONTRACT_ENABLE_TASKS' not in workflow

@@ -45,6 +45,10 @@ def test_smoke_script_passes_runtime_contract_expected_asset_env_and_timeout():
     script = _script()
     assert 'RUNTIME_CONTRACT_TIMEOUT_SECONDS' in script
     assert 'RUNTIME_CONTRACT_EXPECT_SKILL' in script
+    assert 'RUNTIME_CONTRACT_EXPECT_LEGACY_TOOL' in script
+    assert 'RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL' in script
+    assert 'RUNTIME_CONTRACT_EXPECT_TOOL_MAPPING' in script
     assert 'RUNTIME_CONTRACT_EXPECT_TOOL' in script
     assert 'RUNTIME_CONTRACT_EXPECT_EFP_TOOL' in script
+    assert '${RUNTIME_CONTRACT_EXPECT_LEGACY_TOOL}:${RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL}' in script
     assert 'timeout "${RUNTIME_CONTRACT_TIMEOUT_SECONDS}" env' in script

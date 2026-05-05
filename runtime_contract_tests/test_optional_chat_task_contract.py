@@ -49,3 +49,10 @@ def test_task_contract_when_enabled(post_json, get_json):
         "blocked",
         "cancelled",
     }
+
+
+    if detail["status"] in {"accepted", "running"}:
+        cancel_status, cancel_body = post_json(f"/api/tasks/{task_id}/cancel", {})
+        assert cancel_status == 200
+        assert cancel_body["task_id"] == task_id
+        assert cancel_body["status"] in {"cancelled", "success", "error", "blocked"}

@@ -45,9 +45,30 @@ def test_runtime_optional_task_contract_uses_current_execute_payload_fields():
     assert 'portal_session_id' not in text
 
 
-def test_runtime_smoke_asset_mapping_contract_is_env_gated():
+def test_runtime_smoke_asset_mapping_contract_is_env_gated_and_generic():
     text = (RCT / 'test_optional_smoke_asset_mapping_contract.py').read_text(encoding='utf-8')
     assert 'RUNTIME_CONTRACT_EXPECT_SKILL' in text
+    assert 'RUNTIME_CONTRACT_EXPECT_LEGACY_TOOL' in text
+    assert 'RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL' in text
+    assert 'RUNTIME_CONTRACT_EXPECT_TOOL_MAPPING' in text
     assert 'RUNTIME_CONTRACT_EXPECT_TOOL' in text
     assert 'RUNTIME_CONTRACT_EXPECT_EFP_TOOL' in text
     assert 'pytest.skip' in text
+    assert '/api/skills' in text
+    assert '/api/capabilities' in text
+    assert 'tool_mappings' in text
+    assert 'opencode_tools' in text
+
+
+def test_runtime_optional_task_contract_cleans_up_running_tasks():
+    text = (RCT / 'test_optional_chat_task_contract.py').read_text(encoding='utf-8')
+    assert '/api/tasks/{task_id}/cancel' in text or '/cancel' in text
+    assert 'accepted' in text and 'running' in text
+
+
+def test_runtime_asset_mapping_contract_checks_capability_tool_surface():
+    text = (RCT / 'test_optional_smoke_asset_mapping_contract.py').read_text(encoding='utf-8')
+    assert '/api/capabilities' in text
+    assert 'tool_mappings' in text
+    assert 'opencode_tools' in text
+    assert 'tool_cap' in text or 'expected tool capability' in text
