@@ -147,8 +147,10 @@ def _opencode_supported(frontmatter: dict[str, Any]) -> bool:
     if frontmatter.get("opencode_supported") is False:
         return False
     rc = frontmatter.get("runtime_compat")
-    if isinstance(rc, list) and "opencode" not in [str(x).lower() for x in rc]:
-        return False
+    if isinstance(rc, list):
+        values = {str(x).lower() for x in rc}
+        if not ({"opencode", "all"} & values):
+            return False
     if isinstance(rc, str) and rc.lower() not in {"opencode", "all"}:
         return False
     op = frontmatter.get("opencode") if isinstance(frontmatter.get("opencode"), dict) else {}
@@ -162,6 +164,12 @@ def _has_explicit_opencode_wrapper(frontmatter: dict[str, Any]) -> bool:
     return bool(frontmatter.get("opencode_tools") or frontmatter.get("tool_mapping") or op.get("execution_tool") or op.get("wrapper"))
 
 
+def _declared_runtime_equivalence(frontmatter: dict[str, Any]) -> str:
+    op = frontmatter.get("opencode") if isinstance(frontmatter.get("opencode"), dict) else {}
+    value = op.get("runtime_equivalence") or frontmatter.get("opencode_runtime_equivalence")
+    return str(value or "").lower()
+
+
 def build_tool_name_map(tools_index: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     out = {}
     tools = (tools_index or {}).get("tools", []) if isinstance(tools_index, dict) else []
@@ -171,7 +179,10 @@ def build_tool_name_map(tools_index: dict[str, Any] | None) -> dict[str, dict[st
         base = {k: t.get(k) for k in ("legacy_name", "opencode_name", "capability_id", "policy_tags", "enabled", "source_ref", "risk_level", "requires_identity_binding")}
         for k in [t.get("legacy_name"), t.get("native_name"), t.get("efp_name"), t.get("name"), t.get("opencode_name"), t.get("capability_id"), t.get("tool_id")]:
             if isinstance(k, str) and k:
-                out[k] = base
+                if k not in out:
+                    out[k] = base
+                elif not bool(out[k].get("enabled", True)) and bool(base.get("enabled", True)):
+                    out[k] = base
     return out
 
 def _render_skill_markdown(opencode_name: str, entry: SkillIndexEntry, frontmatter: dict, body: str) -> str:
@@ -344,19 +355,25 @@ def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path, to
         elif programmatic and not has_wrapper:
             op_compat = "programmatic_prompt_only"; runtime_eq = False; compat_warnings.append("EFP skill.py is not executed by the OpenCode adapter; generated skill is prompt-only")
         elif programmatic and has_wrapper:
-            op_compat = "programmatic_wrapper"; runtime_eq = bool((frontmatter.get("opencode") or {}).get("runtime_equivalence") == "full")
+            op_compat = "programmatic_wrapper"; runtime_eq = _declared_runtime_equivalence(frontmatter) == "full"
             if not runtime_eq: compat_warnings.append("programmatic OpenCode wrapper declared but runtime equivalence is not marked full")
         else:
             op_compat = "prompt_only"; runtime_eq = True
         tool_mappings=[]; op_tools=[]; miss=[]
-        for efp_tool in list(tools)+list(task_tools):
+        seen_tools = []
+        for x in list(tools)+list(task_tools):
+            if x not in seen_tools:
+                seen_tools.append(x)
+        for efp_tool in seen_tools:
             meta=tool_map.get(efp_tool)
-            if meta and meta.get("opencode_name"):
-                m={"efp_name":efp_tool,"opencode_name":meta.get("opencode_name"),"available":True,"capability_id":meta.get("capability_id"),"policy_tags":meta.get("policy_tags",[])}
+            enabled = bool(meta.get("enabled", True)) if isinstance(meta, dict) else False
+            if meta and meta.get("opencode_name") and enabled:
+                m={"efp_name":efp_tool,"opencode_name":meta.get("opencode_name"),"available":True,"capability_id":meta.get("capability_id"),"policy_tags":meta.get("policy_tags",[]),"risk_level":meta.get("risk_level"),"requires_identity_binding":bool(meta.get("requires_identity_binding")),"source_ref":meta.get("source_ref"),"enabled":enabled}
                 tool_mappings.append(m)
                 if meta.get("opencode_name") not in op_tools: op_tools.append(meta.get("opencode_name"))
             else:
-                tool_mappings.append({"efp_name":efp_tool,"opencode_name":None,"available":False,"missing_reason":"no matching OpenCode wrapper in tools-index"})
+                reason = "matching OpenCode wrapper is disabled" if meta and meta.get("opencode_name") and not enabled else "no matching OpenCode wrapper in tools-index"
+                tool_mappings.append({"efp_name":efp_tool,"opencode_name":(meta.get("opencode_name") if isinstance(meta, dict) else None),"available":False,"enabled":(False if isinstance(meta, dict) else None),"missing_reason":reason})
                 if efp_tool not in miss: miss.append(efp_tool)
 
         entry = SkillIndexEntry(

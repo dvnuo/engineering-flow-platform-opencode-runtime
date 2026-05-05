@@ -57,3 +57,18 @@ async def test_chat_stream_respects_explicit_portal_request_id(tmp_path, monkeyp
     fake.release.set(); resp=await t; body=await resp.text()
     assert 'should not appear' not in body
     await c.close()
+
+@pytest.mark.asyncio
+async def test_chat_stream_immediate_error_does_not_wait_for_heartbeat(tmp_path, monkeypatch):
+    import time
+    import efp_opencode_adapter.chat_api as chat_api
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
+    monkeypatch.setattr(chat_api, 'STREAM_HEARTBEAT_SECONDS', 15.0)
+    app=create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    c=TestClient(TestServer(app)); await c.start_server()
+    t0=time.monotonic()
+    resp=await c.post('/api/chat/stream', json={'message':'hello','metadata':{'runtime_profile':'bad'}})
+    body=await resp.text(); elapsed=time.monotonic()-t0
+    assert 'event: error' in body and 'runtime_profile_must_be_object' in body
+    assert elapsed < 1.0
+    await c.close()

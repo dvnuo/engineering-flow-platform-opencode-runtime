@@ -121,7 +121,10 @@ def _build_tool_metadata(settings) -> dict[str, dict[str, Any]]:
         for key in ("name", "opencode_name", "legacy_name", "native_name", "capability_id", "tool_id"):
             value = tool.get(key)
             if isinstance(value, str) and value:
-                out[value] = tool
+                if value not in out:
+                    out[value] = tool
+                elif not bool(out[value].get("enabled", True)) and bool(tool.get("enabled", True)):
+                    out[value] = tool
     return out
 
 
@@ -252,6 +255,10 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
             }
             evt.update(extra)
             evt["data"].update(extra)
+        else:
+            extra = {"capability_id": None, "policy_tags": [], "risk_level": s_risk or "medium", "requires_identity_binding": False, "mutation": False, "audit_event": False, "tool_source_ref": None}
+            evt.update(extra)
+            evt["data"].update(extra)
     return evt
 
 
@@ -271,6 +278,10 @@ class OpenCodeEventBridge:
         self.last_error = None
         self.last_raw_type = ""
         self.tool_metadata = _build_tool_metadata(settings)
+
+    def refresh_tool_metadata(self) -> dict[str, dict[str, Any]]:
+        self.tool_metadata = _build_tool_metadata(self.settings)
+        return self.tool_metadata
 
     def status_snapshot(self) -> dict[str, Any]:
         return {"enabled": self.enabled, "running": self.running, "connected": self.connected, "reconnects": self.reconnects, "last_event_at": self.last_event_at, "last_error": self.last_error, "last_raw_type": self.last_raw_type}

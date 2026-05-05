@@ -297,6 +297,21 @@ async def _write_sse(resp: web.StreamResponse, event_name: str, payload: dict[st
     await resp.write(_sse_encode(event_name, payload))
 
 
+async def _wait_for_event_or_completion(sub_queue: asyncio.Queue, run_task: asyncio.Task, timeout: float) -> tuple[str, dict[str, Any] | None]:
+    queue_task = asyncio.create_task(sub_queue.get())
+    try:
+        done, _ = await asyncio.wait({run_task, queue_task}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        if queue_task in done:
+            return "event", queue_task.result()
+        if run_task in done:
+            return "completed", None
+        return "timeout", None
+    finally:
+        if not queue_task.done():
+            queue_task.cancel()
+            await asyncio.gather(queue_task, return_exceptions=True)
+
+
 def _event_dedupe_key(event: dict[str, Any]) -> tuple:
     data = event.get("data") if isinstance(event.get("data"), dict) else {}
     raw_preview = json.dumps(data.get("raw_event_preview", {}), sort_keys=True, ensure_ascii=False)
@@ -381,12 +396,13 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
 
     try:
         while not run_task.done():
-            try:
-                event = await asyncio.wait_for(sub.queue.get(), timeout=STREAM_HEARTBEAT_SECONDS)
-            except asyncio.TimeoutError:
-                await _write_sse(resp, "heartbeat", {"ok": True, "ts": time.time()})
+            kind, event = await _wait_for_event_or_completion(sub.queue, run_task, STREAM_HEARTBEAT_SECONDS)
+            if kind == "event" and event is not None:
+                await _forward(event)
                 continue
-            await _forward(event)
+            if kind == "completed":
+                break
+            await _write_sse(resp, "heartbeat", {"ok": True, "ts": time.time()})
 
         error_payload = None
         final_result = None

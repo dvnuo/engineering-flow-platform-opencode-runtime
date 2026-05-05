@@ -48,7 +48,9 @@ def is_opencode_compatible_tool(tool: dict[str, Any]) -> bool:
 
 def normalize_tool_descriptor(raw: dict) -> dict[str, Any] | None:
     cap_id = raw.get("capability_id") or raw.get("tool_id") or raw.get("action_id")
-    name = raw.get("opencode_name") or raw.get("name")
+    raw_name = raw.get("name")
+    opencode_name = raw.get("opencode_name") or raw_name
+    name = opencode_name
     if not cap_id or not name:
         return None
     descriptor = {
@@ -59,8 +61,8 @@ def normalize_tool_descriptor(raw: dict) -> dict[str, Any] | None:
         "enabled": bool(raw.get("enabled", True)),
         "policy_tags": [str(x) for x in (raw.get("policy_tags") or []) if isinstance(x, (str, int, float))],
         "source_ref": str(raw.get("source_ref") or "tools_repo"),
-        "opencode_name": str(raw.get("opencode_name") or raw.get("name")),
-        "legacy_name": raw.get("legacy_name") or raw.get("native_name") or raw.get("efp_name"),
+        "opencode_name": str(opencode_name),
+        "legacy_name": raw.get("legacy_name") or raw.get("native_name") or raw.get("efp_name") or (raw_name if raw_name and str(raw_name) != str(opencode_name) else None),
         "native_name": raw.get("native_name"),
         "tool_id": raw.get("tool_id"),
     }
