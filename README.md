@@ -25,7 +25,8 @@ This repository contains the **T05-T13 OpenCode runtime adapter** for an EFP-com
 ## Local development
 ```bash
 python -m pytest -q
-docker build -t efp-opencode-runtime:1.14.29 .
+bash scripts/ci_unit.sh
 bash scripts/smoke.sh
-RUNTIME_BASE_URL=http://localhost:8000 pytest runtime_contract_tests
+RUN_RUNTIME_CONTRACT_TESTS=1 bash scripts/smoke.sh
+RUNTIME_BASE_URL=http://localhost:8000 python -m pytest -q runtime_contract_tests
 ```
