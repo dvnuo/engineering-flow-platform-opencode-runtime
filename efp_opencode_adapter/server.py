@@ -19,6 +19,7 @@ from .compat_api import (
     system_prompt_put_handler,
 )
 from .event_bus import EventBus, events_ws_handler
+from .event_bridge import OpenCodeEventBridge
 from .file_routes import register_file_routes
 from .opencode_client import OpenCodeClient
 from .permissions_api import permission_respond_handler
@@ -41,7 +42,8 @@ from .sessions_api import (
     unsupported_message_mutation_handler,
 )
 from .settings import Settings
-from .state import ensure_state_dirs
+from .state import build_state_health_snapshot, ensure_state_dirs
+import asyncio
 
 
 async def health_handler(request: web.Request) -> web.Response:
@@ -51,15 +53,22 @@ async def health_handler(request: web.Request) -> web.Response:
         info = await client.health()
     except Exception:
         info = {"healthy": False, "error": "unavailable"}
-    healthy = bool(info.get("healthy"))
+    opencode_healthy = bool(info.get("healthy"))
+    state_health = build_state_health_snapshot(settings, request.app["state_paths"])
+    state_healthy = bool(state_health.get("healthy"))
+    bridge = request.app.get("event_bridge")
+    event_bridge_status = bridge.status_snapshot() if bridge and hasattr(bridge, "status_snapshot") else {"enabled": False, "running": False}
+    healthy = opencode_healthy and state_healthy
     payload = {
         "status": "ok" if healthy else "degraded",
         "service": "efp-opencode-runtime",
         "engine": "opencode",
         "opencode_version": settings.opencode_version,
-        "opencode": {"healthy": healthy},
+        "opencode": {"healthy": opencode_healthy},
+        "state": state_health,
+        "event_bridge": event_bridge_status,
     }
-    if healthy:
+    if opencode_healthy:
         payload["opencode"]["version"] = info.get("version")
     else:
         error = sanitize_public_secrets(str(info.get("error", "unavailable")))
@@ -126,7 +135,7 @@ async def capabilities_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "capabilities unavailable", "engine": "opencode"}, status=500)
 
 
-def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None) -> web.Application:
+def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None, *, start_event_bridge: bool | None = None) -> web.Application:
     app = web.Application()
     app["settings"] = settings
     state_paths = ensure_state_dirs(settings)
@@ -137,10 +146,15 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app["usage_tracker"] = UsageTracker(state_paths.usage_file)
     app["event_bus"] = EventBus()
     app["task_background_tasks"] = set()
-    app["opencode_client"] = opencode_client or OpenCodeClient(settings)
+    injected_client = opencode_client is not None
+    client = opencode_client or OpenCodeClient(settings)
+    app["opencode_client"] = client
     app.on_cleanup.append(cleanup_task_background_tasks)
     app["portal_metadata_client"] = PortalMetadataClient(settings, pending_file=state_paths.portal_metadata_pending_file)
     app["recovery_manager"] = RecoveryManager(settings=settings, state_paths=state_paths, session_store=app["session_store"], chatlog_store=app["chatlog_store"], opencode_client=app["opencode_client"])
+    should_start_event_bridge = settings.event_bridge_enabled and (start_event_bridge if start_event_bridge is not None else not injected_client) and hasattr(client, "event_stream")
+    if should_start_event_bridge:
+        app["event_bridge"] = OpenCodeEventBridge(settings, client, app["event_bus"], app["session_store"], app["task_store"], app["chatlog_store"])
     register_file_routes(app)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/actuator/health", health_handler)
@@ -180,6 +194,18 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             print(f"recovery failed: {exc}")
 
     app.on_startup.append(_run_recovery)
+    async def _start_event_bridge(app):
+        bridge = app.get("event_bridge")
+        if bridge:
+            app["event_bridge_task"] = asyncio.create_task(bridge.run_forever())
+    async def _cleanup_event_bridge(app):
+        task = app.get("event_bridge_task")
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    if should_start_event_bridge:
+        app.on_startup.append(_start_event_bridge)
+        app.on_cleanup.append(_cleanup_event_bridge)
     return app
 
 

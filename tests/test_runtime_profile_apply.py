@@ -162,3 +162,24 @@ async def test_apply_auth_only_llm_marks_llm_updated(tmp_path, monkeypatch):
     assert fake.auth_calls == [("anthropic", secret)]
 
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_allowed_skills_reflects_capability_state(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    state.mkdir(parents=True)
+    (state / "skills-index.json").write_text(json.dumps({"skills": [{"opencode_name": "my-skill"}]}))
+    app = create_app(Settings.from_env(), opencode_client=FakeAuthOnlyClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    resp = await client.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={"config": {"allowed_skills": ["my-skill"]}})
+    assert resp.status == 200
+    cfg = json.loads((workspace / ".opencode/opencode.json").read_text())
+    assert cfg["permission"]["skill"]["my-skill"] == "allow"
+    caps = await (await client.get("/api/capabilities")).json()
+    skill = next(c for c in caps["capabilities"] if c.get("type") == "skill" and c.get("name") == "my-skill")
+    assert skill["permission_state"] == "allowed"
+    await client.close()

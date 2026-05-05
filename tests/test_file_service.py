@@ -18,6 +18,7 @@ def make_settings(tmp_path: Path) -> Settings:
         workspace_dir=tmp_path / "workspace",
         skills_dir=tmp_path / "skills",
         tools_dir=tmp_path / "tools",
+        opencode_data_dir=tmp_path / "opencode-state",
         opencode_config_path=tmp_path / "workspace/.opencode/opencode.json",
         opencode_version="1.14.29",
         opencode_server_username="opencode",

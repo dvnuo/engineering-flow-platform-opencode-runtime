@@ -123,6 +123,12 @@ class SessionStore:
     def get(self, portal_session_id: str) -> SessionRecord | None:
         return self._sessions.get(portal_session_id)
 
+    def find_by_opencode_session_id(self, opencode_session_id: str) -> SessionRecord | None:
+        for rec in self.list_active():
+            if rec.opencode_session_id == opencode_session_id:
+                return rec
+        return None
+
     def upsert(self, record: SessionRecord) -> SessionRecord:
         self._sessions[record.portal_session_id] = record
         self.save()
