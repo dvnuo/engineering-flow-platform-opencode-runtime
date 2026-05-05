@@ -1,4 +1,4 @@
-from efp_opencode_adapter.permission_generator import build_permission, default_permission_baseline
+from efp_opencode_adapter.permission_generator import build_permission, default_permission_baseline, skill_permission_state
 
 
 def test_baseline_safety():
@@ -152,3 +152,10 @@ def test_allowed_skills_and_denied_skills_and_aliases():
     assert p3["skill"]["review-pull-request"] == "deny"
     p4 = build_permission({"capability_profile": {"skill_set": ["review-pull-request"]}}, skills, None)
     assert p4["skill"]["review-pull-request"] == "allow"
+
+
+def test_skill_permission_state_supports_scalar_and_aliases():
+    assert skill_permission_state({"skill": "allow"}, "my-skill") == "allowed"
+    assert skill_permission_state({"skill": {"skill:my-skill": "allow"}}, "my-skill") == "allowed"
+    assert skill_permission_state({"skill": {"opencode.skill.my_skill": "deny"}}, "my-skill") == "denied"
+    assert skill_permission_state({"skill": {"*": "deny"}}, "my-skill") == "denied"

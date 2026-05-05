@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -64,3 +65,42 @@ async def test_create_app_can_force_start_bridge_for_injected_fake_client(tmp_pa
     client = TestClient(TestServer(app))
     await client.start_server()
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_redacts_secret_strings_and_top_level_tool_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({"type": "tool.start", "sessionID": "oc-1", "tool": "efp_secret_tool", "input": "use token SECRET-KEY-SHOULD-NOT-LEAK here"})
+    encoded = json.dumps(event).lower()
+    assert "secret-key-should-not-leak" not in encoded
+    assert "token" not in encoded
+    assert event["type"] == "tool.started"
+    assert event["tool"]
+    assert "input_preview" in event
+
+
+@pytest.mark.asyncio
+async def test_permission_updated_with_approved_status_is_resolved(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({"payload": {"type": "permission.updated", "properties": {"sessionID": "oc-1", "permissionID": "perm-1", "status": "approved", "tool": "bash"}}})
+    assert event["type"] == "permission_resolved"
+    assert event["permission_id"] == "perm-1"
+    assert event["tool"] == "bash"
+    assert "decision" in event
+
+
+@pytest.mark.asyncio
+async def test_message_part_updated_extracts_delta_text(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({"type": "message.part.updated", "sessionID": "oc-1", "part": {"type": "text", "text": "hello delta"}})
+    assert event["type"] == "assistant_delta"
+    assert "hello delta" in event["data"]["delta"]

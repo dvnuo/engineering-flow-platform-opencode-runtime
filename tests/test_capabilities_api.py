@@ -103,3 +103,32 @@ async def test_capabilities_catalog(tmp_path, monkeypatch):
         assert marker not in encoded
     assert "query" in encoded
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_denied_skill_state_exposed_in_capabilities_and_skills(tmp_path, monkeypatch):
+    workspace, state, tools, skills = tmp_path / "workspace", tmp_path / "state", tmp_path / "tools", tmp_path / "skills"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("EFP_TOOLS_DIR", str(tools))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    state.mkdir(parents=True)
+    tools.mkdir(parents=True)
+    (workspace / ".opencode").mkdir(parents=True)
+    (state / "skills-index.json").write_text(json.dumps({"skills": [{"opencode_name": "denied-skill"}]}))
+    (workspace / ".opencode/opencode.json").write_text(json.dumps({"permission": {"skill": {"*": "deny"}}}))
+    app = create_app(Settings.from_env(), opencode_client=FakeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    caps = await (await client.get("/api/capabilities")).json()
+    denied_cap = next(c for c in caps["capabilities"] if c.get("type") == "skill" and c.get("name") == "denied-skill")
+    assert denied_cap["permission_state"] == "denied"
+    assert denied_cap["callable"] is False
+    assert denied_cap["blocked_reason"]
+    skills_payload = await (await client.get("/api/skills")).json()
+    denied_skill = next(s for s in skills_payload["skills"] if s.get("name") == "denied-skill")
+    assert denied_skill["permission_state"] == "denied"
+    assert denied_skill["callable"] is False
+    assert denied_skill["blocked_reason"]
+    await client.close()

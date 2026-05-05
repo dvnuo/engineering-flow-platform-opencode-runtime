@@ -60,11 +60,27 @@ chmod +x "${TOOLS_DIR}/adapters/opencode/generate_tools.py"
 docker build -t efp-opencode-runtime:test .
 docker run -d --name "${NAME}" -p 8000:8000 -e OPENCODE_SERVER_PASSWORD=test-password -e OPENCODE_DATA_DIR=/home/opencode/.local/share/opencode -e EFP_ADAPTER_STATE_DIR=/home/opencode/.local/share/efp-compat -v "${WORKSPACE_DIR}:/workspace" -v "${ADAPTER_STATE_DIR}:/home/opencode/.local/share/efp-compat" -v "${OPENCODE_STATE_DIR}:/home/opencode/.local/share/opencode" -v "${SKILLS_DIR}:/app/skills:ro" -v "${TOOLS_DIR}:/app/tools:ro" efp-opencode-runtime:test >/dev/null
 
-for _ in $(seq 1 60); do curl -fsS http://localhost:8000/health >"${HEALTH_FILE}" && break || sleep 1; done
-jq -e '.state.healthy == true' "${HEALTH_FILE}" >/dev/null
-jq -e '.state.paths.adapter_state_dir.writable == true' "${HEALTH_FILE}" >/dev/null
-jq -e '.state.paths.opencode_data_dir.writable == true' "${HEALTH_FILE}" >/dev/null
-jq -e '.event_bridge.enabled == true' "${HEALTH_FILE}" >/dev/null
+wait_health() {
+  : > "${HEALTH_FILE}"
+  for _ in $(seq 1 60); do
+    if curl -fsS http://localhost:8000/health >"${HEALTH_FILE}"; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "health did not become ready" >&2
+  docker logs "${NAME}" >&2 || true
+  return 1
+}
+assert_health_state() {
+  jq -e '.state.healthy == true' "${HEALTH_FILE}" >/dev/null
+  jq -e '.state.paths.adapter_state_dir.writable == true' "${HEALTH_FILE}" >/dev/null
+  jq -e '.state.paths.opencode_data_dir.writable == true' "${HEALTH_FILE}" >/dev/null
+  jq -e '.event_bridge.enabled == true' "${HEALTH_FILE}" >/dev/null
+}
+
+wait_health
+assert_health_state
 
 docker exec "${NAME}" test -f /workspace/.opencode/skills/smoke-skill/SKILL.md
 docker exec "${NAME}" test -f /workspace/.opencode/tools/efp_smoke_tool.ts
@@ -74,5 +90,15 @@ curl -fsS http://localhost:8000/api/skills | jq -e '.count >= 1' >/dev/null
 curl -fsS http://localhost:8000/api/skills | jq -e '.skills[] | select(.name == "smoke-skill")' >/dev/null
 curl -fsS http://localhost:8000/api/capabilities | jq -e '.capabilities[] | select(.name == "smoke-skill" and .type == "skill")' >/dev/null
 curl -fsS http://localhost:8000/api/capabilities | jq -e '.capabilities[] | select(.name == "efp_smoke_tool")' >/dev/null
+
+docker exec "${NAME}" sh -lc 'echo adapter-persist > /home/opencode/.local/share/efp-compat/persistence-sentinel.txt'
+docker exec "${NAME}" sh -lc 'echo opencode-persist > /home/opencode/.local/share/opencode/persistence-sentinel.txt'
+docker restart "${NAME}" >/dev/null
+wait_health
+assert_health_state
+docker exec "${NAME}" test -f /home/opencode/.local/share/efp-compat/persistence-sentinel.txt
+docker exec "${NAME}" test -f /home/opencode/.local/share/opencode/persistence-sentinel.txt
+docker exec "${NAME}" test -f /workspace/.opencode/skills/smoke-skill/SKILL.md
+docker exec "${NAME}" test -f /workspace/.opencode/tools/efp_smoke_tool.ts
 
 echo "smoke passed"

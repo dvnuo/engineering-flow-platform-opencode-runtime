@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from .profile_store import sanitize_public_secrets
 from .settings import Settings
 
 
@@ -36,6 +37,12 @@ def ensure_state_dirs(settings: Settings) -> CompatStatePaths:
     return paths
 
 
+def _public_error(exc: Exception) -> str:
+    raw = str(exc).split("\n", 1)[0][:500]
+    sanitized = sanitize_public_secrets(raw)
+    return sanitized if isinstance(sanitized, str) else "[redacted]"
+
+
 def probe_writable(path: Path) -> dict:
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -44,7 +51,7 @@ def probe_writable(path: Path) -> dict:
         probe_file.unlink(missing_ok=True)
         return {"path": str(path), "exists": path.exists(), "writable": True}
     except Exception as exc:
-        return {"path": str(path), "exists": path.exists(), "writable": False, "error": str(exc).split("\n", 1)[0][:200]}
+        return {"path": str(path), "exists": path.exists(), "writable": False, "error": _public_error(exc)}
 
 
 def build_state_health_snapshot(settings: Settings, state_paths: CompatStatePaths) -> dict:

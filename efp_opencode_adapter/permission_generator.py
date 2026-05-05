@@ -223,10 +223,37 @@ def build_permission(config: dict, skills_index: dict | None = None, tools_index
     return permission
 
 
+def _normalize_permission_state(raw: Any) -> str:
+    value = str(raw or "").strip().lower()
+    mapping = {"allow": "allowed", "allowed": "allowed", "ask": "ask", "prompt": "ask", "deny": "denied", "denied": "denied"}
+    return mapping.get(value, "unknown")
+
+
+def _skill_aliases(skill_name: str) -> list[str]:
+    name = str(skill_name or "").strip()
+    if not name:
+        return []
+    hyphen = name.replace("_", "-")
+    underscore = name.replace("-", "_")
+    aliases = [
+        name, hyphen, underscore,
+        f"skill:{name}", f"skill:{hyphen}", f"skill:{underscore}",
+        f"opencode.skill.{name}", f"opencode.skill.{hyphen}", f"opencode.skill.{underscore}",
+    ]
+    return list(dict.fromkeys(aliases))
+
+
 def skill_permission_state(permission: dict[str, Any], skill_name: str) -> str:
-    skill_perm = permission.get("skill") if isinstance(permission, dict) else None
+    if not isinstance(permission, dict):
+        return "unknown"
+    skill_perm = permission.get("skill")
+    if isinstance(skill_perm, str):
+        return _normalize_permission_state(skill_perm)
     if not isinstance(skill_perm, dict):
         return "unknown"
-    raw = skill_perm.get(skill_name, skill_perm.get("*"))
-    mapping = {"allow": "allowed", "ask": "ask", "deny": "denied"}
-    return mapping.get(str(raw), "unknown")
+    for alias in _skill_aliases(skill_name):
+        if alias in skill_perm:
+            return _normalize_permission_state(skill_perm.get(alias))
+    if "*" in skill_perm:
+        return _normalize_permission_state(skill_perm.get("*"))
+    return "unknown"
