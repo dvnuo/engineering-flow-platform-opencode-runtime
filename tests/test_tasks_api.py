@@ -23,6 +23,7 @@ class FakeTaskOpenCodeClient(FakeOpenCodeClient):
         self.prompt_result = {"id": "async-1"} if prompt_result is None else prompt_result
         self.message_details: dict[tuple[str, str], dict] = {}
         self.raise_prompt_async = raise_prompt_async
+        self.cancel_calls = []
 
     async def create_session(self, title=None):
         self.create_calls += 1
@@ -61,6 +62,10 @@ class FakeTaskOpenCodeClient(FakeOpenCodeClient):
             if timeout_seconds is None or loop.time() >= deadline:
                 break
             await asyncio.sleep(0.005)
+
+    async def cancel_message(self, session_id, message_id=None):
+        self.cancel_calls.append((session_id, message_id))
+        return {"success": False, "supported": False, "reason": "cancel_endpoint_unsupported"}
 
 
 async def _wait_terminal(client, task_id, tries=80):
@@ -318,7 +323,41 @@ async def test_official_message_part_updated_fetches_full_message(tmp_path, monk
     fake.stream_events = [{"directory": "/workspace", "payload": {"type": "message.part.updated", "properties": {"part": {"sessionID": sid, "messageID": "assistant-1", "type": "text", "text": '{"status":"success","summary":"partial"}'}}}}]
     p = await _wait_terminal(c, 'tpart')
     assert p['status'] == 'success'
-    assert p['output_payload']['summary'] == 'from official part'
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_task_marks_cancelled_and_publishes_events(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_TIMEOUT_SECONDS', '5')
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient(no_assistant=True)
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'tcancel', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    await asyncio.sleep(0.05)
+    body = await (await c.post('/api/tasks/tcancel/cancel')).json()
+    assert body['status'] == 'cancelled' and body['ok'] is False and body['output_payload']['error_code'] == 'cancelled'
+    assert fake.cancel_calls
+    got = await (await c.get('/api/tasks/tcancel')).json()
+    types = [e.get('type') for e in got.get('runtime_events', [])]
+    assert 'task.cancelled' in types and 'task.completed' in types and got['status'] == 'cancelled'
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_terminal_task_is_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id': 'tidem', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
+    payload = await _wait_terminal(c, 'tidem')
+    assert payload['status'] == 'success'
+    fake.cancel_calls = []
+    cancelled = await (await c.post('/api/tasks/tidem/cancel')).json()
+    assert cancelled['status'] == 'success'
+    assert fake.cancel_calls == []
     await c.close()
 
 

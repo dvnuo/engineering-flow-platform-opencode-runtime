@@ -132,3 +132,18 @@ async def test_denied_skill_state_exposed_in_capabilities_and_skills(tmp_path, m
     assert denied_skill["callable"] is False
     assert denied_skill["blocked_reason"]
     await client.close()
+
+@pytest.mark.asyncio
+async def test_unsupported_skill_is_not_callable_even_if_permission_allow(tmp_path, monkeypatch):
+    workspace, state, tools, skills = tmp_path / "workspace", tmp_path / "state", tmp_path / "tools", tmp_path / "skills"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("EFP_TOOLS_DIR", str(tools)); monkeypatch.setenv("EFP_SKILLS_DIR", str(skills)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    state.mkdir(parents=True); tools.mkdir(parents=True); (workspace / '.opencode').mkdir(parents=True)
+    (state / 'skills-index.json').write_text(json.dumps({"skills":[{"efp_name":"native-only","opencode_name":"native-only","description":"Native only","tools":[],"task_tools":[],"risk_level":"low","source_path":"x","target_path":"y","opencode_supported":False,"opencode_compatibility":"unsupported","runtime_equivalence":False,"programmatic":False,"compatibility_warnings":["skill is marked unsupported for OpenCode runtime"]}]}), encoding='utf-8')
+    (workspace / '.opencode/opencode.json').write_text(json.dumps({"permission":{"skill":{"native-only":"allow"}}}), encoding='utf-8')
+    app = create_app(Settings.from_env(), opencode_client=FakeClient()); client = TestClient(TestServer(app)); await client.start_server()
+    caps = await (await client.get('/api/capabilities')).json()
+    skill = next(c for c in caps['capabilities'] if c.get('type') == 'skill' and c.get('name') == 'native-only')
+    assert skill['callable'] is False
+    assert 'not supported' in (skill.get('blocked_reason') or '')
+    assert skill['metadata']['opencode_compatibility'] == 'unsupported'
+    await client.close()

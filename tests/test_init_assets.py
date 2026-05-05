@@ -141,3 +141,26 @@ def test_init_assets_creates_tools_dir_from_env_override(tmp_path, monkeypatch):
     with pytest.warns(UserWarning):
         init_assets(Settings.from_env())
     assert tools.exists()
+
+
+def test_init_assets_syncs_tools_before_skills(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(tmp_path / "skills"))
+    monkeypatch.setenv("EFP_TOOLS_DIR", str(tmp_path / "tools"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "workspace/.opencode/opencode.json"))
+
+    def fake_sync_tools(*args, **kwargs):
+        calls.append("tools")
+        return {"tools": [{"legacy_name": "legacy", "opencode_name": "efp_legacy"}]}
+
+    def fake_sync_skills(*args, **kwargs):
+        calls.append("skills")
+        assert kwargs.get("tools_index")
+        return None
+
+    monkeypatch.setattr("efp_opencode_adapter.init_assets.sync_tools", fake_sync_tools)
+    monkeypatch.setattr("efp_opencode_adapter.init_assets.sync_skills", fake_sync_skills)
+    init_assets(Settings.from_env())
+    assert calls[:2] == ["tools", "skills"]

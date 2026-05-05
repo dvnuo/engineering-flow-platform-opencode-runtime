@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -285,6 +286,7 @@ async def chat_handler(request: web.Request) -> web.Response:
 
 
 STREAM_HEARTBEAT_SECONDS = 15.0
+BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.completed", "session.updated"}
 
 
 def _sse_encode(event_name: str, payload: dict[str, Any]) -> bytes:
@@ -296,24 +298,36 @@ async def _write_sse(resp: web.StreamResponse, event_name: str, payload: dict[st
 
 
 def _event_dedupe_key(event: dict[str, Any]) -> tuple:
-    return (event.get("type"), event.get("session_id"), event.get("request_id"), json.dumps(event.get("data", {}), sort_keys=True, ensure_ascii=False)[:500])
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    raw_preview = json.dumps(data.get("raw_event_preview", {}), sort_keys=True, ensure_ascii=False)
+    raw_hash = hashlib.sha256(raw_preview.encode("utf-8")).hexdigest()[:12] if raw_preview else ""
+    return (event.get("type"), event.get("session_id"), event.get("request_id"), event.get("task_id"), event.get("tool"), event.get("permission_id"), event.get("raw_type"), data.get("status"), data.get("delta"), raw_hash)
 
 
 def _is_stream_relevant_event(event: dict[str, Any], *, session_id: str, request_id: str) -> bool:
     if str(event.get("session_id") or "") != session_id:
         return False
+    explicit_portal_req = event.get("portal_request_id")
+    if not explicit_portal_req and isinstance(event.get("data"), dict):
+        explicit_portal_req = event["data"].get("portal_request_id")
+    if explicit_portal_req:
+        return str(explicit_portal_req) == request_id
+    event_type = str(event.get("type") or event.get("event_type") or "")
+    raw_type = str(event.get("raw_type") or "")
+    if event_type in BRIDGE_EVENT_TYPES or event_type.startswith("tool.") or event_type.startswith("permission_") or event_type.startswith("opencode.") or raw_type:
+        return True
     ev_req = event.get("request_id")
     return (not ev_req) or str(ev_req) == request_id
 
 
 def _event_delta_text(event: dict[str, Any]) -> str:
-    for k in ("delta", "message"):
+    for k in ("delta", "message", "text", "content"):
         v = event.get(k)
         if isinstance(v, str) and v:
             return safe_preview(v, 300)
     data = event.get("data")
     if isinstance(data, dict):
-        for k in ("delta", "message"):
+        for k in ("delta", "message", "text", "content"):
             v = data.get(k)
             if isinstance(v, str) and v:
                 return safe_preview(v, 300)
