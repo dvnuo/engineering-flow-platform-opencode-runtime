@@ -26,9 +26,11 @@ def test_ci_unit_writes_per_gate_logs_and_tails_on_failure():
     script = _script()
     assert 'CI_LOG_DIR' in script
     assert 'mkdir -p' in script
-    assert 'tee' in script
+    assert '>"${log_file}" 2>&1' in script
+    assert 'cat "${log_file}"' in script
     assert 'tail -120' in script
     assert 'failed; tail of' in script
+    assert '| tee' not in script
 
 
 def test_ci_unit_keeps_required_gates():
@@ -95,3 +97,9 @@ def test_ci_unit_static_grep_covers_single_and_double_quote_app_keys():
     assert "app\\['" in script
     assert 'request.app\\["' in script
     assert "request.app\\['" in script
+
+
+def test_ci_unit_does_not_use_tee_pipeline_for_pytest_gates():
+    script = _script()
+    assert '| tee' not in script
+    assert 'PIPESTATUS' not in script

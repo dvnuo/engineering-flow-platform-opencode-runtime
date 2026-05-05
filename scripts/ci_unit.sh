@@ -41,9 +41,11 @@ run_pytest_gate() {
   echo "log: ${log_file}"
 
   set +e
-  run_pytest "${timeout_seconds}" "$@" 2>&1 | tee "${log_file}"
-  local status="${PIPESTATUS[0]}"
+  run_pytest "${timeout_seconds}" "$@" >"${log_file}" 2>&1
+  local status="$?"
   set -e
+
+  cat "${log_file}"
 
   if [[ "${status}" -ne 0 ]]; then
     echo "== ${label} failed; tail of ${log_file} ==" >&2
