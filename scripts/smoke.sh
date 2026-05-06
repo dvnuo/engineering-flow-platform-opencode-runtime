@@ -77,7 +77,7 @@ import argparse, json
 from pathlib import Path
 p=argparse.ArgumentParser(); p.add_argument('--tools-dir'); p.add_argument('--opencode-tools-dir'); p.add_argument('--state-dir'); a=p.parse_args()
 out=Path(a.opencode_tools_dir); out.mkdir(parents=True, exist_ok=True)
-(out/'efp_smoke_tool.ts').write_text('export default async function efp_smoke_tool() { return { ok: true }; }\n', encoding='utf-8')
+(out/'efp_smoke_tool.ts').write_text('import { tool } from "@opencode-ai/plugin"\n\nexport default tool({\n  description: "Smoke read-only tool",\n  args: {\n    query: tool.schema.string().describe("query")\n  },\n  async execute(args, context) {\n    return {\n      output: JSON.stringify({\n        ok: true,\n        query: args.query,\n        session_id: context.sessionID,\n        runtime_type: "opencode"\n      })\n    }\n  }\n})\n', encoding='utf-8')
 state=Path(a.state_dir); state.mkdir(parents=True, exist_ok=True)
 (state/'tools-index.json').write_text(json.dumps({'tools':[{'capability_id':'smoke.tool','tool_id':'smoke.tool','name':'efp_smoke_tool','opencode_name':'efp_smoke_tool','legacy_name':'smoke_tool','description':'Smoke read-only tool','enabled':True,'policy_tags':['read_only','smoke'],'runtime_compat':['opencode'],'risk_level':'low','requires_identity_binding':False,'type':'adapter_action','source_ref':'scripts/smoke.sh'}]}), encoding='utf-8')
 PY
@@ -131,6 +131,7 @@ docker exec "${NAME}" sh -lc 'test "${HOME:-}" = "/root"'
 
 docker exec "${NAME}" test -f /workspace/.opencode/skills/smoke-skill/SKILL.md
 docker exec "${NAME}" test -f /workspace/.opencode/tools/efp_smoke_tool.ts
+docker exec "${NAME}" test -f /workspace/.opencode/node_modules/@opencode-ai/plugin/package.json
 docker exec "${NAME}" test -f /root/.local/share/efp-compat/skills-index.json
 docker exec "${NAME}" test -f /root/.local/share/efp-compat/tools-index.json
 docker exec "${NAME}" sh -lc "grep -q 'smoke_tool -> efp_smoke_tool' /workspace/.opencode/skills/smoke-skill/SKILL.md"
@@ -144,6 +145,18 @@ curl -fsS http://localhost:8000/api/capabilities | jq -e '.capabilities[] | sele
 curl -fsS http://localhost:8000/api/capabilities | jq -e '.capabilities[] | select(.name == "efp_smoke_tool")' >/dev/null
 run_runtime_contract_tests
 
+docker exec "${NAME}" sh -lc '
+  curl -fsS -u "${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}" \
+    http://127.0.0.1:4096/experimental/tool/ids \
+  | python -c "
+import json, sys
+payload=json.load(sys.stdin)
+ids = payload if isinstance(payload, list) else payload.get("ids") or payload.get("tools") or []
+if "efp_smoke_tool" not in ids:
+    raise SystemExit(f"efp_smoke_tool not found in {ids!r}")
+"
+'
+
 docker exec "${NAME}" sh -lc 'echo adapter-persist > /root/.local/share/efp-compat/persistence-sentinel.txt'
 docker exec "${NAME}" sh -lc 'echo opencode-persist > /root/.local/share/opencode/persistence-sentinel.txt'
 docker restart "${NAME}" >/dev/null
@@ -153,6 +166,7 @@ docker exec "${NAME}" test -f /root/.local/share/efp-compat/persistence-sentinel
 docker exec "${NAME}" test -f /root/.local/share/opencode/persistence-sentinel.txt
 docker exec "${NAME}" test -f /workspace/.opencode/skills/smoke-skill/SKILL.md
 docker exec "${NAME}" test -f /workspace/.opencode/tools/efp_smoke_tool.ts
+docker exec "${NAME}" test -f /workspace/.opencode/node_modules/@opencode-ai/plugin/package.json
 docker exec "${NAME}" sh -lc "grep -q 'smoke_tool -> efp_smoke_tool' /workspace/.opencode/skills/smoke-skill/SKILL.md"
 docker exec "${NAME}" sh -lc "jq -e '.skills[] | select(.opencode_name == \"smoke-skill\") | .opencode_tools | index(\"efp_smoke_tool\")' /root/.local/share/efp-compat/skills-index.json >/dev/null"
 run_runtime_contract_tests

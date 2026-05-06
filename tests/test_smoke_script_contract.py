@@ -15,6 +15,28 @@ def test_smoke_script_asserts_skill_tool_mapping_contract():
     assert 'tool_mappings' in script
 
 
+def test_smoke_script_uses_real_plugin_tool_wrapper():
+    script = _script()
+    assert 'import { tool } from "@opencode-ai/plugin"' in script
+    assert 'export default tool({' in script
+    assert 'async execute(args, context)' in script
+    assert 'tool.schema.string()' in script
+    assert 'export default async function efp_smoke_tool()' not in script
+
+
+def test_smoke_script_asserts_local_opencode_plugin_dependency():
+    script = _script()
+    assert '/workspace/.opencode/node_modules/@opencode-ai/plugin/package.json' in script
+
+
+def test_smoke_script_forces_opencode_tool_registry_import():
+    script = _script()
+    assert '/experimental/tool/ids' in script
+    assert 'efp_smoke_tool' in script
+    assert 'OPENCODE_SERVER_USERNAME' in script
+    assert 'OPENCODE_SERVER_PASSWORD' in script
+
+
 def test_smoke_script_can_run_runtime_contract_tests():
     script = _script()
     assert 'RUN_RUNTIME_CONTRACT_TESTS' in script

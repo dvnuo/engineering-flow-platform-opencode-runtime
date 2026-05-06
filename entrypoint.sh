@@ -27,6 +27,12 @@ export PYTHONPATH="${EFP_TOOLS_DIR}/python:${PYTHONPATH:-}"
 echo "Initializing EFP OpenCode runtime assets..."
 python -m efp_opencode_adapter.init_assets
 
+echo "Ensuring OpenCode custom tool dependencies..."
+python -m efp_opencode_adapter.tool_deps \
+  --workspace-dir "${EFP_WORKSPACE_DIR}" \
+  --vendored-dir "${EFP_OPENCODE_TOOL_DEPS_DIR:-/opt/opencode-tool-deps}" \
+  --opencode-version "${OPENCODE_VERSION:-}"
+
 echo "opencode version $(opencode --version)"
 echo "Starting opencode serve on 127.0.0.1:4096..."
 opencode serve --hostname 127.0.0.1 --port 4096 &

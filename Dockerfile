@@ -12,6 +12,7 @@ ENV PATH="/opt/venv/bin:/usr/local/bin:${PATH}"
 ENV NODE_PATH=/usr/local/lib/node_modules
 ENV NPM_CONFIG_PREFIX=/usr/local
 ENV HOME=/root
+ENV EFP_OPENCODE_TOOL_DEPS_DIR=/opt/opencode-tool-deps
 
 RUN set -eux; \
   apt-get update; \
@@ -45,6 +46,15 @@ RUN set -eux; \
 
 RUN set -eux; \
   npm install -g "opencode-ai@${OPENCODE_VERSION}" "@opencode-ai/plugin@${OPENCODE_VERSION}"; \
+  mkdir -p "${EFP_OPENCODE_TOOL_DEPS_DIR}"; \
+  npm install \
+    --prefix "${EFP_OPENCODE_TOOL_DEPS_DIR}" \
+    --omit=dev \
+    --ignore-scripts \
+    --no-audit \
+    --no-fund \
+    "@opencode-ai/plugin@${OPENCODE_VERSION}"; \
+  test -f "${EFP_OPENCODE_TOOL_DEPS_DIR}/node_modules/@opencode-ai/plugin/package.json"; \
   opencode --version
 
 WORKDIR /app/runtime
