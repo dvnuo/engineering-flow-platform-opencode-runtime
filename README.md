@@ -5,7 +5,7 @@ This repository contains the **T05-T13 OpenCode runtime adapter** for an EFP-com
 ## Runtime topology
 - Portal-facing runtime endpoint: `0.0.0.0:8000`
 - Internal native OpenCode server: `127.0.0.1:4096`
-- OpenCode version pinned to `1.14.29`
+- OpenCode is installed from Docker build arg `OPENCODE_VERSION`; the adapter reports the observed OpenCode version and does not enforce an exact runtime version match.
 
 ## Status
 - T12:

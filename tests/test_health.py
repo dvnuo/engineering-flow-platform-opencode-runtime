@@ -7,7 +7,7 @@ from efp_opencode_adapter.settings import Settings
 
 class FakeHealthyClient:
     async def health(self):
-        return {"healthy": True, "version": "1.14.29"}
+        return {"healthy": True, "version": "9.9.9"}
 
 
 class FakeUnhealthyClient:
@@ -29,10 +29,25 @@ async def test_health_ok(monkeypatch):
         assert payload["status"] == "ok"
         assert payload["service"] == "efp-opencode-runtime"
         assert payload["engine"] == "opencode"
-        assert payload["opencode_version"] == "1.14.29"
+        assert payload["opencode_version"] == "9.9.9"
+        assert payload["opencode"]["version"] == "9.9.9"
         assert payload["opencode"]["healthy"] is True
         assert payload["state"]["healthy"] is True
 
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_health_reports_observed_opencode_version_without_enforcing_config(monkeypatch):
+    monkeypatch.setenv("OPENCODE_VERSION", "1.14.29")
+    app = create_app(Settings.from_env(), opencode_client=FakeHealthyClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    resp = await client.get("/health")
+    assert resp.status == 200
+    payload = await resp.json()
+    assert payload["opencode_version"] == "9.9.9"
+    assert payload["opencode"]["version"] == "9.9.9"
     await client.close()
 
 
@@ -50,7 +65,7 @@ async def test_health_degraded(monkeypatch):
         assert payload["status"] == "degraded"
         assert payload["service"] == "efp-opencode-runtime"
         assert payload["engine"] == "opencode"
-        assert payload["opencode_version"] == "1.14.29"
+        assert payload["opencode_version"] == Settings.from_env().opencode_version
         assert payload["opencode"]["healthy"] is False
         assert payload["opencode"]["error"]
 

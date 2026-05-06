@@ -69,6 +69,7 @@ async def health_handler(request: web.Request) -> web.Response:
     except Exception:
         info = {"healthy": False, "error": "unavailable"}
     opencode_healthy = bool(info.get("healthy"))
+    observed_opencode_version = info.get("version") if opencode_healthy else None
     state_health = build_state_health_snapshot(settings, request.app[STATE_PATHS_KEY])
     state_healthy = bool(state_health.get("healthy"))
     bridge = request.app.get(EVENT_BRIDGE_KEY)
@@ -78,7 +79,7 @@ async def health_handler(request: web.Request) -> web.Response:
         "status": "ok" if healthy else "degraded",
         "service": "efp-opencode-runtime",
         "engine": "opencode",
-        "opencode_version": settings.opencode_version,
+        "opencode_version": observed_opencode_version or settings.opencode_version,
         "opencode": {"healthy": opencode_healthy},
         "state": state_health,
         "event_bridge": event_bridge_status,
@@ -252,7 +253,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
 async def run_server(host: str, port: int, settings: Settings) -> None:
     print(f"adapter listening on {host}:{port}")
     print(f"opencode url {settings.opencode_url}")
-    print(f"opencode version {settings.opencode_version}")
+    print(f"configured opencode version {settings.opencode_version or 'not enforced'}")
     app = create_app(settings)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -271,7 +272,7 @@ def main() -> None:
     settings = Settings.from_env(opencode_url=args.opencode_url)
     print(f"adapter listening on {args.host}:{args.port}")
     print(f"opencode url {settings.opencode_url}")
-    print(f"opencode version {settings.opencode_version}")
+    print(f"configured opencode version {settings.opencode_version or 'not enforced'}")
     web.run_app(create_app(settings), host=args.host, port=args.port)
 
 

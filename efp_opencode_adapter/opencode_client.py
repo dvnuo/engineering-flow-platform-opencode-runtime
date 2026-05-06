@@ -268,9 +268,6 @@ class OpenCodeClient:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             result = await self.health()
-            version = result.get("version")
-            if version and version != self.settings.opencode_version:
-                raise RuntimeError(f"opencode version mismatch: expected {self.settings.opencode_version}, got {version}")
             if result.get("healthy"):
                 return
             await asyncio.sleep(0.5)
