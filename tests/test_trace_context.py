@@ -21,6 +21,21 @@ def test_trace_sanitization_and_add():
     out=add_trace_context(event,tc)
     assert out['request_id']=='keep'
     assert out['trace_context']['session_id']==out['data']['trace_context']['session_id']
+    event = {"type": "x", "request_id": "token-abc", "session_id": "secret-session", "data": {"request_id": "token-abc", "ok": "v"}}
+    out2 = add_trace_context(event, tc)
+    dumped = json.dumps(out2).lower()
+    assert "token-abc" not in dumped
+    assert "secret-session" not in dumped
+    assert out2["data"]["ok"] == "v"
+    assert out2["data"]["trace_context"]
+    assert out2["trace_context"]["trace_id"] in {"[redacted]", "***REDACTED***"}
+
+
+def test_trace_context_handles_non_string_inputs():
+    tc = build_trace_context(S(), request_id=123, session_id=True, task_id=None)
+    assert isinstance(tc["request_id"], str)
+    assert isinstance(tc["session_id"], str)
+    assert isinstance(tc["task_id"], str)
 
 def test_profile_priority():
     pv,rid=profile_version_from_metadata({'runtime_profile_revision':7,'runtime_profile_id':'rp-1'},{'revision':'1','id':'x'})

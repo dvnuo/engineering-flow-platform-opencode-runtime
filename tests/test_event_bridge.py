@@ -4,7 +4,7 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from efp_opencode_adapter.event_bridge import OpenCodeEventBridge
+from efp_opencode_adapter.event_bridge import OpenCodeEventBridge, normalize_opencode_event
 from efp_opencode_adapter.event_bus import EventBus
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.session_store import SessionRecord, SessionStore
@@ -200,6 +200,31 @@ async def test_tool_event_enriched_by_legacy_name(tmp_path, monkeypatch):
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({"type":"tool.start","sessionID":"oc-1","tool":"github_add_comment"})
     assert event["capability_id"] == "efp.tool.github.add_comment"
+
+
+@pytest.mark.asyncio
+async def test_tool_source_trace_context_tools_repo_builtin_unknown(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("PORTAL_AGENT_ID", "agent-bridge-1")
+    settings = Settings.from_env()
+    settings.adapter_state_dir.mkdir(parents=True, exist_ok=True)
+    (settings.adapter_state_dir / "tools-index.json").write_text(json.dumps({"tools": [{"name": "efp_context_echo", "opencode_name": "efp_context_echo", "legacy_name": "context_echo", "source_ref": "tools_repo", "risk_level": "low", "policy_tags": ["read_only"]}]}), encoding="utf-8")
+    session_store = SessionStore(ensure_state_dirs(settings).sessions_dir)
+    task_store = TaskStore(ensure_state_dirs(settings).tasks_dir)
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), session_store, task_store)
+    e1 = normalize_opencode_event({"type": "tool.start", "sessionID": "oc-1", "tool": "efp_context_echo", "input": "hello"}, session_store=session_store, task_store=task_store, settings=settings, tool_metadata={"efp_context_echo": {"source_ref": "tools_repo"}})
+    assert e1["tool_source"] == "tools_repo" and e1["tool_name"] == "efp_context_echo"
+    assert e1["trace_context"]["tool_source"] == "tools_repo"
+    assert e1["data"]["trace_context"]["tool_name"] == "efp_context_echo"
+    assert e1["trace_context"]["agent_id"] == "agent-bridge-1"
+
+    (settings.adapter_state_dir / "tools-index.json").write_text(json.dumps({"tools": []}), encoding="utf-8")
+    bridge.refresh_tool_metadata()
+    e2 = normalize_opencode_event({"type": "tool.start", "sessionID": "oc-1", "tool": "bash"}, session_store=session_store, task_store=task_store, settings=settings, tool_metadata={})
+    assert e2["tool_source"] == "opencode_builtin"
+    e3 = normalize_opencode_event({"type": "tool.start", "sessionID": "oc-1", "tool": "unknown_tool"}, session_store=session_store, task_store=task_store, settings=settings, tool_metadata={})
+    assert e3["tool_source"] == "unknown"
 
 
 @pytest.mark.asyncio

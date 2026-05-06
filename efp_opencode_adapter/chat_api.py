@@ -268,6 +268,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         updated = store.update_after_chat(portal_session_id, message, assistant_text, model, agent)
         provider = provider_for_trace
         usage_record = usage_tracker.record_chat(session_id=portal_session_id, request_id=request_id, model=model, provider=provider, response_payload=response_payload, input_text=message, output_text=assistant_text)
+        usage_record["request_id"] = trace_context.get("request_id", usage_record.get("request_id", ""))
         final_context = {**context_state, "summary": assistant_text[:500], "current_state": "completed", "next_step": ""}
 
         chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="success", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(response_payload, 2000), "trace_context": trace_context})
@@ -282,11 +283,11 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         failed = add_trace_context(chat_failed_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=opencode_session_id, error=str(exc)), trace_context)
         runtime_events.append(failed)
         await bus.publish(failed)
-        chatlog_store.fail_entry(portal_session_id, request_id=request_id, error=str(exc), runtime_events=runtime_events, context_state=context_state, llm_debug={"engine": "opencode"})
+        chatlog_store.fail_entry(portal_session_id, request_id=request_id, error=str(exc), runtime_events=runtime_events, context_state=context_state, llm_debug={"engine": "opencode", "opencode_session_id": opencode_session_id, "trace_context": trace_context})
         await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.failed", latest_event_state="error", request_id=request_id, summary=str(exc), runtime_events=runtime_events, metadata={"engine": "opencode", "trace_context": trace_context})
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
 
-    out = {"session_id": portal_session_id, "request_id": request_id, "response": assistant_text, "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context}}
+    out = {"session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context}}
     if partial_recovery or getattr(updated, "partial_recovery", False):
         out["_llm_debug"]["partial_recovery"] = True
     return out

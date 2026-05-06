@@ -11,12 +11,13 @@ from test_t06_helpers import FakeOpenCodeClient
 @pytest.mark.asyncio
 async def test_chat_and_stream(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("PORTAL_AGENT_ID", "agent-obs-1")
     fake = FakeOpenCodeClient()
     app = create_app(Settings.from_env(), opencode_client=fake)
     client = TestClient(TestServer(app))
     await client.start_server()
 
-    r1 = await client.post("/api/chat", json={"message": "hello"})
+    r1 = await client.post("/api/chat", json={"message": "hello", "session_id": "sess-obs-1", "request_id": "req-obs-1", "metadata": {"runtime_profile_id": "rp-1", "runtime_profile": {"revision": 7, "provider": "test-provider", "model": "test-model"}}})
     assert r1.status == 200
     p1 = await r1.json()
     assert p1["session_id"]
@@ -24,6 +25,20 @@ async def test_chat_and_stream(tmp_path, monkeypatch):
     assert p1["response"] == "echo: hello"
     assert p1["_llm_debug"]["engine"] == "opencode"
     assert p1["_llm_debug"]["opencode_session_id"]
+    tc = p1["_llm_debug"]["trace_context"]
+    assert tc["agent_id"] == "agent-obs-1"
+    assert tc["runtime_type"] == "opencode"
+    assert tc["session_id"] == "sess-obs-1"
+    assert tc["request_id"] == "req-obs-1"
+    assert tc["profile_version"] == "7"
+    assert tc["runtime_profile_id"] == "rp-1"
+    assert tc["trace_id"] == "req-obs-1"
+    for evt in p1["runtime_events"]:
+        assert evt["trace_context"]
+        assert evt["data"]["trace_context"]
+        assert evt["agent_id"] == "agent-obs-1"
+        assert evt["runtime_type"] == "opencode"
+        assert evt["trace_id"] == "req-obs-1"
 
     index = tmp_path / "state" / "sessions" / "index.json"
     assert index.exists()
@@ -74,4 +89,8 @@ async def test_chat_and_stream(tmp_path, monkeypatch):
     assert "event: final" in body
     assert "event: done" in body
     assert body.index("event: runtime_event") < body.index("event: final")
+    r_secret = await client.post("/api/chat", json={"message": "secret", "session_id": "sess-obs-2", "request_id": "token-should-not-leak"})
+    p_secret = await r_secret.json()
+    assert "token-should-not-leak" not in json.dumps(p_secret["runtime_events"]).lower()
+    assert "token-should-not-leak" not in json.dumps(p_secret["_llm_debug"]).lower()
     await client.close()

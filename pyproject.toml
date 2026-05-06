@@ -26,3 +26,8 @@ addopts = [
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["efp_opencode_adapter*"]
+exclude = ["tests*", "runtime_contract_tests*", "integration*", "scripts*", "docs*"]
+namespaces = false

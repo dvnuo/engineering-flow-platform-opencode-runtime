@@ -59,16 +59,21 @@ def build_trace_context(settings, *, request_id: str = "", session_id: str = "",
 def add_trace_context(event: dict[str, Any], trace_context: dict[str, Any]) -> dict[str, Any]:
     tc = {k: _s(trace_context.get(k, "")) for k in TRACE_KEYS}
     event["trace_context"] = tc
-    if not isinstance(event.get("data"), dict):
+    if isinstance(event.get("data"), dict):
+        event["data"] = safe_preview(sanitize_public_secrets(event["data"]), 500)
+        if not isinstance(event["data"], dict):
+            event["data"] = {}
+    else:
         event["data"] = {}
     event["data"]["trace_context"] = tc
     for key in ("agent_id", "group_id", "coordination_run_id", "runtime_type", "trace_id"):
-        event[key] = tc.get(key, "")
+        event[key] = _s(event.get(key, tc.get(key, ""))) if key in event else tc.get(key, "")
     for key in ("request_id", "session_id", "task_id"):
         existing = event.get(key)
         if isinstance(existing, str) and existing:
-            continue
-        event[key] = tc.get(key, "")
+            event[key] = _s(existing)
+        else:
+            event[key] = tc.get(key, "")
     return event
 
 
