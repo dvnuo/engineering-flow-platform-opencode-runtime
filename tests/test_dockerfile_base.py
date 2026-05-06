@@ -29,7 +29,8 @@ def test_dockerfile_preserves_global_opencode_plugin_resolution():
     assert "ENV NODE_PATH=/usr/local/lib/node_modules" in text
     assert 'test "$(npm root -g)" = "/usr/local/lib/node_modules"' in text
     assert 'npm install -g "opencode-ai@${OPENCODE_VERSION}" "@opencode-ai/plugin@${OPENCODE_VERSION}"' in text
-    assert 'opencode --version | grep -F "${OPENCODE_VERSION}"' in text
+    assert "opencode --version" in text
+    assert 'opencode --version | grep -F "${OPENCODE_VERSION}"' not in text
 
 
 def test_dockerfile_runs_as_root_with_root_state_dirs():

@@ -45,7 +45,7 @@ RUN set -eux; \
 
 RUN set -eux; \
   npm install -g "opencode-ai@${OPENCODE_VERSION}" "@opencode-ai/plugin@${OPENCODE_VERSION}"; \
-  opencode --version | grep -F "${OPENCODE_VERSION}"
+  opencode --version
 
 WORKDIR /app/runtime
 COPY pyproject.toml README.md package*.json ./

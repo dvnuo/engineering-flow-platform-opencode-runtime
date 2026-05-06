@@ -18,10 +18,11 @@ Portal -> adapter `0.0.0.0:8000` -> internal OpenCode `127.0.0.1:4096`.
 - `EFP_ADAPTER_STATE_DIR`
 - `OPENCODE_DATA_DIR`
 - `OPENCODE_CONFIG`
-- `OPENCODE_VERSION`
 - `OPENCODE_SERVER_USERNAME`
 - `OPENCODE_SERVER_PASSWORD`
 - `PORTAL_AGENT_ID`
+
+`OPENCODE_VERSION` may be used as Docker build/config metadata, but it is not required by Portal and must not block runtime startup.
 
 ## Required mounted directories
 - `/workspace`

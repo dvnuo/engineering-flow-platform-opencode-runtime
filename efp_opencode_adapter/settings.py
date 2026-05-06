@@ -20,7 +20,9 @@ class Settings:
     tools_dir: Path
     opencode_data_dir: Path
     opencode_config_path: Path
-    opencode_version: str
+    # Optional build/configured OpenCode package version for observability only.
+    # It must never be used as a startup compatibility gate.
+    opencode_version: str | None
     opencode_server_username: str
     opencode_server_password: str | None
     ready_timeout_seconds: int
@@ -43,7 +45,7 @@ class Settings:
             tools_dir=Path(os.getenv("EFP_TOOLS_DIR", "/app/tools")),
             opencode_data_dir=Path(os.getenv("OPENCODE_DATA_DIR", "/root/.local/share/opencode")),
             opencode_config_path=Path(os.getenv("OPENCODE_CONFIG", "/workspace/.opencode/opencode.json")),
-            opencode_version=os.getenv("OPENCODE_VERSION", "1.14.29"),
+            opencode_version=(os.getenv("OPENCODE_VERSION") or None),
             opencode_server_username=os.getenv("OPENCODE_SERVER_USERNAME", "opencode"),
             opencode_server_password=os.getenv("OPENCODE_SERVER_PASSWORD"),
             ready_timeout_seconds=int(os.getenv("EFP_OPENCODE_READY_TIMEOUT_SECONDS", "60")),

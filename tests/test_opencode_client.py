@@ -46,7 +46,7 @@ async def test_unreachable_degraded(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_version_mismatch(monkeypatch):
+async def test_wait_ready_ignores_version_mismatch(monkeypatch):
     app = web.Application()
 
     async def h(_):
@@ -60,8 +60,7 @@ async def test_version_mismatch(monkeypatch):
     monkeypatch.setenv("OPENCODE_VERSION", "1.14.29")
     settings = Settings.from_env()
     client = OpenCodeClient(settings)
-    with pytest.raises(RuntimeError, match="version mismatch"):
-        await client.wait_until_ready(timeout_seconds=1)
+    await client.wait_until_ready(timeout_seconds=1)
     await server.close()
 
 
