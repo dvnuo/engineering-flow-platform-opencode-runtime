@@ -41,9 +41,8 @@ async def test_sessions_endpoints(tmp_path, monkeypatch):
     ls2 = await client.get("/api/sessions")
     assert (await ls2.json())["sessions"][0]["name"] == "renamed"
 
-    u1 = await client.post(f"/api/sessions/{sid}/messages/m1/edit", json={})
-    u2 = await client.post(f"/api/sessions/{sid}/messages/m1/delete-from-here", json={})
-    assert u1.status == 501 and u2.status == 501
+    missing = await client.post(f"/api/sessions/{sid}/messages/missing/delete-from-here", json={})
+    assert missing.status == 404
 
     dl = await client.delete(f"/api/sessions/{sid}")
     assert (await dl.json())["success"] is True
@@ -103,4 +102,53 @@ async def test_rename_title_must_be_string(tmp_path, monkeypatch):
 
     assert res.status == 400
     assert payload["error"] == "title_required"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_from_here_and_edit_flow(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    first = await (await client.post("/api/chat", json={"message": "hello", "session_id": "s1"})).json()
+    second = await (await client.post("/api/chat", json={"message": "again", "session_id": "s1"})).json()
+    second_user_id = second["user_message_id"]
+    second_assistant_id = second["assistant_message_id"]
+    deleted = await client.post(f"/api/sessions/s1/messages/{second_user_id}/delete-from-here", json={})
+    deleted_body = await deleted.json()
+    assert deleted.status == 200
+    assert deleted_body["success"] is True
+    assert deleted_body["mutation"] == "delete_from_here"
+    assert deleted_body["metadata"]["strategy"] in {"fork_before_target", "new_empty_session"}
+    session_after = await (await client.get("/api/sessions/s1")).json()
+    assert session_after["session_id"] == "s1"
+    ids = [m["id"] for m in session_after["messages"]]
+    assert second_user_id not in ids
+    assert second_assistant_id not in ids
+
+    first_deleted = await client.post(f"/api/sessions/s1/messages/{first['user_message_id']}/delete-from-here", json={})
+    assert first_deleted.status == 200
+    first_deleted_payload = await first_deleted.json()
+    assert first_deleted_payload["metadata"]["strategy"] == "new_empty_session"
+    empty_session = await (await client.get("/api/sessions/s1")).json()
+    assert empty_session["messages"] == []
+
+    refill = await client.post("/api/chat", json={"message": "hello", "session_id": "s1"})
+    refill_body = await refill.json()
+    edit = await client.post(f"/api/sessions/s1/messages/{refill_body['user_message_id']}/edit", json={"content": "edited"})
+    edit_body = await edit.json()
+    assert edit.status == 200
+    assert edit_body["replacement_user_message_id"]
+    assert edit_body["response"] == "echo: edited"
+    updated = await (await client.get("/api/sessions/s1")).json()
+    contents = [m["content"] for m in updated["messages"]]
+    assert "edited" in contents
+    assert "hello" not in contents
+
+    reject = await client.post(f"/api/sessions/s1/messages/{edit_body['assistant_message_id']}/edit", json={"content": "bad"})
+    reject_body = await reject.json()
+    assert reject.status == 400
+    assert reject_body["error"] == "only_user_message_edit_supported"
     await client.close()

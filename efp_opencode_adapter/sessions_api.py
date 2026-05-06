@@ -93,6 +93,38 @@ def _to_efp_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _message_id(message: Any, fallback: str = "") -> str:
+    info = _message_info(message)
+    return str(info.get("id") or (message.get("id") if isinstance(message, dict) else "") or (message.get("message_id") if isinstance(message, dict) else "") or fallback)
+
+
+def _message_role(message: Any) -> str:
+    info = _message_info(message)
+    raw = info.get("role") or (message.get("role") if isinstance(message, dict) else "")
+    return str(raw or "").lower()
+
+
+def _find_message_index(messages: list[dict[str, Any]], message_id: str) -> int:
+    for idx, message in enumerate(messages):
+        if _message_id(message) == message_id:
+            return idx
+    return -1
+
+
+def _last_message_text(messages: list[dict[str, Any]]) -> str:
+    if not messages:
+        return ""
+    return message_to_text(messages[-1])
+
+
+def _extract_opencode_session_id(payload: dict[str, Any]) -> str:
+    for key in ("id", "session_id", "sessionID"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
 async def list_sessions_handler(request: web.Request) -> web.Response:
     store = request.app[SESSION_STORE_KEY]
     records = sorted(store.list_active(), key=lambda x: x.updated_at, reverse=True)
@@ -201,5 +233,106 @@ async def clear_sessions_handler(request: web.Request) -> web.Response:
     return web.json_response({"success": True, "cleared": len(cleared)})
 
 
-async def unsupported_message_mutation_handler(request: web.Request) -> web.Response:
-    return web.json_response({"success": False, "error": "unsupported_by_opencode_adapter_mvp"}, status=501)
+async def _delete_from_here(*, store, client, portal_session_id: str, message_id: str, allow_revert_fallback: bool = False):
+    record = store.get(portal_session_id)
+    if not record or record.deleted:
+        raise web.HTTPNotFound(text=json.dumps({"error": "session_not_found"}), content_type="application/json")
+    old_opencode_session_id = record.opencode_session_id
+    try:
+        messages = await client.list_messages(old_opencode_session_id)
+        idx = _find_message_index(messages, message_id)
+        if idx < 0:
+            raise web.HTTPNotFound(text=json.dumps({"error": "message_not_found"}), content_type="application/json")
+        previous_message_id = _message_id(messages[idx - 1]) if idx > 0 else ""
+        strategy = "fork_before_target"
+        new_opencode_session_id = ""
+        if previous_message_id:
+            try:
+                forked = await client.fork_session(old_opencode_session_id, previous_message_id)
+            except OpenCodeClientError as exc:
+                if exc.status in {409, 423}:
+                    await client.abort_session(old_opencode_session_id)
+                    forked = await client.fork_session(old_opencode_session_id, previous_message_id)
+                elif exc.status in {404, 405} and allow_revert_fallback:
+                    await client.revert_message(old_opencode_session_id, message_id)
+                    strategy = "revert_fallback"
+                    new_opencode_session_id = old_opencode_session_id
+                    forked = {}
+                else:
+                    raise
+            if not new_opencode_session_id:
+                new_opencode_session_id = _extract_opencode_session_id(forked)
+        else:
+            created = await client.create_session(title=record.title)
+            new_opencode_session_id = _extract_opencode_session_id(created)
+            strategy = "new_empty_session"
+        if not new_opencode_session_id:
+            raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_mutation_failed", "detail": "missing_fork_session_id"}), content_type="application/json")
+        new_messages = await client.list_messages(new_opencode_session_id)
+        updated_record = store.replace_opencode_session_after_mutation(portal_session_id, new_opencode_session_id, message_count=len(new_messages), last_message=_last_message_text(new_messages))
+        metadata = {"strategy": strategy, "deleted_from_message_id": message_id, "previous_message_id": previous_message_id or "", "old_opencode_session_id": old_opencode_session_id, "opencode_session_id": new_opencode_session_id}
+        return updated_record, new_messages, metadata
+    except OpenCodeClientError as exc:
+        if exc.status == 404:
+            error = "message_not_found" if str(exc).find("/message") >= 0 else "opencode_session_not_found"
+            raise web.HTTPNotFound(text=json.dumps({"error": error}), content_type="application/json")
+        raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_mutation_failed", "detail": str(exc)}), content_type="application/json")
+
+
+async def delete_message_from_here_handler(request: web.Request) -> web.Response:
+    sid = request.match_info["session_id"]
+    mid = request.match_info["message_id"]
+    allow_revert_fallback = False
+    if request.can_read_body:
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                allow_revert_fallback = bool(body.get("allow_revert_fallback"))
+        except Exception:
+            allow_revert_fallback = False
+    _, new_messages, metadata = await _delete_from_here(store=request.app[SESSION_STORE_KEY], client=request.app[OPENCODE_CLIENT_KEY], portal_session_id=sid, message_id=mid, allow_revert_fallback=allow_revert_fallback)
+    return web.json_response({"success": True, "session_id": sid, "message_id": mid, "engine": "opencode", "mutation": "delete_from_here", "messages": _to_efp_messages(new_messages), "metadata": metadata})
+
+
+async def edit_message_handler(request: web.Request) -> web.Response:
+    sid = request.match_info["session_id"]
+    mid = request.match_info["message_id"]
+    body = await _read_json_object(request)
+    content = ""
+    for key in ("content", "new_content", "message"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            content = value.strip()
+            break
+    if not content:
+        raise web.HTTPBadRequest(text=json.dumps({"error": "content_required"}), content_type="application/json")
+    store = request.app[SESSION_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
+    record = store.get(sid)
+    if not record or record.deleted:
+        raise web.HTTPNotFound(text=json.dumps({"error": "session_not_found"}), content_type="application/json")
+    old_messages = await client.list_messages(record.opencode_session_id)
+    idx = _find_message_index(old_messages, mid)
+    if idx < 0:
+        raise web.HTTPNotFound(text=json.dumps({"error": "message_not_found"}), content_type="application/json")
+    if _message_role(old_messages[idx]) != "user":
+        raise web.HTTPBadRequest(text=json.dumps({"error": "only_user_message_edit_supported"}), content_type="application/json")
+    updated_record, _, metadata = await _delete_from_here(store=store, client=client, portal_session_id=sid, message_id=mid, allow_revert_fallback=bool(body.get("allow_revert_fallback", False)))
+    before_messages = await client.list_messages(updated_record.opencode_session_id)
+    await client.send_message(updated_record.opencode_session_id, parts=[{"type": "text", "text": content}], model=body.get("model") or updated_record.model, agent=body.get("agent") or updated_record.agent, system=body.get("system"))
+    after_messages = await client.list_messages(updated_record.opencode_session_id)
+    before_ids = {_message_id(message) for message in before_messages}
+    replacement_user_message_id = ""
+    assistant_message_id = ""
+    for message in after_messages:
+        message_id = _message_id(message)
+        if not message_id or message_id in before_ids:
+            continue
+        role = _message_role(message)
+        if role == "user":
+            replacement_user_message_id = message_id
+        elif role == "assistant":
+            assistant_message_id = message_id
+    assistant_text = _last_message_text(after_messages)
+    store.update_after_chat(sid, content, assistant_text, body.get("model") or updated_record.model, body.get("agent") or updated_record.agent)
+    return web.json_response({"success": True, "session_id": sid, "message_id": mid, "replacement_user_message_id": replacement_user_message_id, "assistant_message_id": assistant_message_id, "response": assistant_text, "messages": _to_efp_messages(after_messages), "metadata": metadata})

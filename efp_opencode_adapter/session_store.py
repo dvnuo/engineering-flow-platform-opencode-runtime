@@ -176,3 +176,27 @@ class SessionStore:
             }
         )
         return self.upsert(updated)
+
+    def replace_opencode_session_after_mutation(
+        self,
+        portal_session_id: str,
+        opencode_session_id: str,
+        *,
+        message_count: int,
+        last_message: str = "",
+    ) -> SessionRecord:
+        record = self._sessions[portal_session_id]
+        updated = SessionRecord(
+            portal_session_id=record.portal_session_id,
+            opencode_session_id=opencode_session_id,
+            title=record.title,
+            agent=record.agent,
+            model=record.model,
+            created_at=record.created_at,
+            updated_at=_utc_now_iso(),
+            last_message=last_message,
+            message_count=max(0, int(message_count)),
+            deleted=False,
+            partial_recovery=record.partial_recovery,
+        )
+        return self.upsert(updated)
