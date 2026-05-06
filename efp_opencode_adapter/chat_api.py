@@ -311,6 +311,11 @@ class SSEClientDisconnected(Exception):
     pass
 
 
+def _is_closed_transport_runtime_error(exc: RuntimeError) -> bool:
+    lowered = str(exc).lower()
+    return "closing transport" in lowered or "closed" in lowered
+
+
 def _sse_encode(event_name: str, payload: dict[str, Any]) -> bytes:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
 
@@ -320,6 +325,10 @@ async def _write_sse(resp: web.StreamResponse, event_name: str, payload: dict[st
         await resp.write(_sse_encode(event_name, payload))
     except (ConnectionResetError, BrokenPipeError) as exc:
         raise SSEClientDisconnected() from exc
+    except RuntimeError as exc:
+        if _is_closed_transport_runtime_error(exc):
+            raise SSEClientDisconnected() from exc
+        raise
 
 
 async def _safe_write_eof(resp: web.StreamResponse) -> None:
@@ -328,8 +337,7 @@ async def _safe_write_eof(resp: web.StreamResponse) -> None:
     except (ConnectionResetError, BrokenPipeError):
         return
     except RuntimeError as exc:
-        lowered = str(exc).lower()
-        if "closing transport" in lowered or "closed" in lowered:
+        if _is_closed_transport_runtime_error(exc):
             return
         raise
 
@@ -389,8 +397,14 @@ def _event_delta_text(event: dict[str, Any]) -> str:
 async def _stream_error_response(request: web.Request, error: str, detail: str | None = None) -> web.StreamResponse:
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "keep-alive"})
     await resp.prepare(request)
-    await resp.write(f"event: error\ndata: {json.dumps({'error': error, 'detail': detail or error}, ensure_ascii=False)}\n\n".encode())
-    await _safe_write_eof(resp)
+    client_disconnected = False
+    try:
+        await _write_sse(resp, "error", {"error": error, "detail": detail or error})
+    except SSEClientDisconnected:
+        client_disconnected = True
+    finally:
+        if not client_disconnected:
+            await _safe_write_eof(resp)
     return resp
 
 

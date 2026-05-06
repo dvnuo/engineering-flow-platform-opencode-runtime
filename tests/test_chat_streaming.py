@@ -2,6 +2,7 @@ from efp_opencode_adapter.app_keys import EVENT_BUS_KEY, OPENCODE_CLIENT_KEY
 import asyncio
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from aiohttp import web
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
@@ -128,6 +129,16 @@ async def test_write_sse_raises_sse_disconnected_on_connection_reset():
 
 
 @pytest.mark.asyncio
+async def test_write_sse_raises_sse_disconnected_on_broken_pipe():
+    class Resp:
+        async def write(self, *_args, **_kwargs):
+            raise BrokenPipeError("broken pipe")
+
+    with pytest.raises(SSEClientDisconnected):
+        await _write_sse(Resp(), "runtime_event", {"ok": True})
+
+
+@pytest.mark.asyncio
 async def test_safe_write_eof_ignores_disconnect_errors():
     class ConnResetResp:
         async def write_eof(self):
@@ -139,6 +150,26 @@ async def test_safe_write_eof_ignores_disconnect_errors():
 
     await _safe_write_eof(ConnResetResp())
     await _safe_write_eof(BrokenPipeResp())
+
+
+@pytest.mark.asyncio
+async def test_safe_write_eof_ignores_closed_transport_runtime_error_and_raises_unrelated():
+    class ClosingResp:
+        async def write_eof(self):
+            raise RuntimeError("Cannot write to closing transport")
+
+    class ClosedResp:
+        async def write_eof(self):
+            raise RuntimeError("already closed")
+
+    class UnrelatedResp:
+        async def write_eof(self):
+            raise RuntimeError("boom")
+
+    await _safe_write_eof(ClosingResp())
+    await _safe_write_eof(ClosedResp())
+    with pytest.raises(RuntimeError, match="boom"):
+        await _safe_write_eof(UnrelatedResp())
 
 
 @pytest.mark.asyncio
@@ -173,4 +204,39 @@ async def test_chat_stream_client_disconnect_does_not_cancel_run_task_or_leak_su
         assert len(app[EVENT_BUS_KEY]._subs) == 0
     finally:
         monkeypatch.setattr(chat_api, "_write_sse", original_write_sse)
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_error_response_swallow_sse_client_disconnect(monkeypatch):
+    import efp_opencode_adapter.chat_api as chat_api
+    app = web.Application()
+
+    async def handler(request):
+        return await chat_api._stream_error_response(request, "invalid_json")
+
+    app.router.add_get("/error", handler)
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    original_write_sse = chat_api._write_sse
+    original_safe_write_eof = chat_api._safe_write_eof
+    eof_called = False
+
+    async def fake_write_sse(*_args, **_kwargs):
+        raise chat_api.SSEClientDisconnected()
+
+    async def fake_safe_write_eof(*_args, **_kwargs):
+        nonlocal eof_called
+        eof_called = True
+
+    monkeypatch.setattr(chat_api, "_write_sse", fake_write_sse)
+    monkeypatch.setattr(chat_api, "_safe_write_eof", fake_safe_write_eof)
+    try:
+        resp = await c.get("/error")
+        assert resp.status == 200
+        await resp.release()
+        assert eof_called is False
+    finally:
+        monkeypatch.setattr(chat_api, "_write_sse", original_write_sse)
+        monkeypatch.setattr(chat_api, "_safe_write_eof", original_safe_write_eof)
         await c.close()
