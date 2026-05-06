@@ -5,6 +5,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
+from efp_opencode_adapter.chat_api import SSEClientDisconnected, _safe_write_eof, _write_sse
 from test_t06_helpers import FakeOpenCodeClient
 
 class SlowFake(FakeOpenCodeClient):
@@ -79,6 +80,22 @@ class RaceFake(FakeOpenCodeClient):
         await self._bus.publish({'type':'tool.completed','session_id':'portal-race-1','request_id':'raw-opencode-tool-call-id','tool':'efp_race_tool','raw_type':'tool.complete'})
         return {'ok': True, 'session_id': payload.get('session_id'), 'request_id': payload.get('request_id')}
 
+
+class DisconnectingFake(SlowFake):
+    def __init__(self):
+        super().__init__(fail=False)
+        self.finished = asyncio.Event()
+        self.was_cancelled = False
+
+    async def send_message(self, session_id, **kwargs):
+        try:
+            result = await super().send_message(session_id, **kwargs)
+            self.finished.set()
+            return result
+        except asyncio.CancelledError:
+            self.was_cancelled = True
+            raise
+
 @pytest.mark.asyncio
 async def test_chat_stream_drains_event_published_at_completion_before_final(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
@@ -97,4 +114,63 @@ async def test_chat_stream_drains_event_published_at_completion_before_final(tmp
         assert boundary > 0
         assert body.index('tool.completed') < boundary
     finally:
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_write_sse_raises_sse_disconnected_on_connection_reset():
+    class Resp:
+        async def write(self, *_args, **_kwargs):
+            raise ConnectionResetError("Cannot write to closing transport")
+
+    with pytest.raises(SSEClientDisconnected):
+        await _write_sse(Resp(), "runtime_event", {"ok": True})
+
+
+@pytest.mark.asyncio
+async def test_safe_write_eof_ignores_disconnect_errors():
+    class ConnResetResp:
+        async def write_eof(self):
+            raise ConnectionResetError("closed")
+
+    class BrokenPipeResp:
+        async def write_eof(self):
+            raise BrokenPipeError("broken pipe")
+
+    await _safe_write_eof(ConnResetResp())
+    await _safe_write_eof(BrokenPipeResp())
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_client_disconnect_does_not_cancel_run_task_or_leak_subscriptions(tmp_path, monkeypatch):
+    import efp_opencode_adapter.chat_api as chat_api
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
+    fake = DisconnectingFake()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    original_write_sse = chat_api._write_sse
+    write_count = 0
+
+    async def flaky_write(resp, event_name, payload):
+        nonlocal write_count
+        write_count += 1
+        if write_count == 2:
+            raise chat_api.SSEClientDisconnected()
+        return await original_write_sse(resp, event_name, payload)
+
+    monkeypatch.setattr(chat_api, "_write_sse", flaky_write)
+    try:
+        t = asyncio.create_task(c.post('/api/chat/stream', json={'message': 'm', 'session_id': 'portal-disconnect-1', 'request_id': 'req-disconnect-1'}))
+        await fake.entered.wait()
+        await app[EVENT_BUS_KEY].publish({'type': 'assistant_delta', 'session_id': 'portal-disconnect-1', 'request_id': 'raw-message-part-id', 'data': {'delta': 'hello'}})
+        fake.release.set()
+        resp = await t
+        assert resp.status == 200
+        await resp.release()
+        await asyncio.wait_for(fake.finished.wait(), timeout=1.0)
+        assert fake.was_cancelled is False
+        assert len(app[EVENT_BUS_KEY]._subs) == 0
+    finally:
+        monkeypatch.setattr(chat_api, "_write_sse", original_write_sse)
         await c.close()

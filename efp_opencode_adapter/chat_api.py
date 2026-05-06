@@ -307,12 +307,31 @@ STREAM_HEARTBEAT_SECONDS = 15.0
 BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.completed", "session.updated"}
 
 
+class SSEClientDisconnected(Exception):
+    pass
+
+
 def _sse_encode(event_name: str, payload: dict[str, Any]) -> bytes:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
 
 
 async def _write_sse(resp: web.StreamResponse, event_name: str, payload: dict[str, Any]) -> None:
-    await resp.write(_sse_encode(event_name, payload))
+    try:
+        await resp.write(_sse_encode(event_name, payload))
+    except (ConnectionResetError, BrokenPipeError) as exc:
+        raise SSEClientDisconnected() from exc
+
+
+async def _safe_write_eof(resp: web.StreamResponse) -> None:
+    try:
+        await resp.write_eof()
+    except (ConnectionResetError, BrokenPipeError):
+        return
+    except RuntimeError as exc:
+        lowered = str(exc).lower()
+        if "closing transport" in lowered or "closed" in lowered:
+            return
+        raise
 
 
 async def _wait_for_event_or_completion(sub_queue: asyncio.Queue, run_task: asyncio.Task, timeout: float) -> tuple[str, dict[str, Any] | None]:
@@ -371,7 +390,7 @@ async def _stream_error_response(request: web.Request, error: str, detail: str |
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "keep-alive"})
     await resp.prepare(request)
     await resp.write(f"event: error\ndata: {json.dumps({'error': error, 'detail': detail or error}, ensure_ascii=False)}\n\n".encode())
-    await resp.write_eof()
+    await _safe_write_eof(resp)
     return resp
 
 
@@ -399,7 +418,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     seen: set[tuple] = set()
     settings = request.app[SETTINGS_KEY]
     stream_trace = build_trace_context(settings, request_id=req_id, session_id=session_id)
-    await _write_sse(resp, "runtime_event", add_trace_context({"type": "stream.started", "engine": "opencode", "session_id": session_id, "request_id": req_id, "created_at": utc_now_iso()}, stream_trace))
+    client_disconnected = False
 
     async def _forward(event: dict[str, Any]) -> None:
         if not _is_stream_relevant_event(event, session_id=session_id, request_id=req_id):
@@ -415,6 +434,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 await _write_sse(resp, "delta", {"delta": delta, "session_id": session_id, "request_id": req_id})
 
     try:
+        await _write_sse(resp, "runtime_event", add_trace_context({"type": "stream.started", "engine": "opencode", "session_id": session_id, "request_id": req_id, "created_at": utc_now_iso()}, stream_trace))
         while not run_task.done():
             kind, event = await _wait_for_event_or_completion(sub.queue, run_task, STREAM_HEARTBEAT_SECONDS)
             if kind == "event" and event is not None:
@@ -447,10 +467,16 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         else:
             await _write_sse(resp, "final", final_result or {})
             await _write_sse(resp, "done", {"ok": True})
+    except SSEClientDisconnected:
+        client_disconnected = True
     finally:
         bus.unsubscribe(sub)
         if not run_task.done():
-            run_task.cancel()
+            if not client_disconnected:
+                run_task.cancel()
             await asyncio.gather(run_task, return_exceptions=True)
-        await resp.write_eof()
+        elif client_disconnected:
+            await asyncio.gather(run_task, return_exceptions=True)
+        if not client_disconnected:
+            await _safe_write_eof(resp)
     return resp
