@@ -14,6 +14,7 @@ from .app_keys import (
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
     PORTAL_METADATA_CLIENT_KEY,
+    SETTINGS_KEY,
     SESSION_STORE_KEY,
     USAGE_TRACKER_KEY,
 )
@@ -30,6 +31,7 @@ from .thinking_events import (
     safe_preview,
     utc_now_iso,
 )
+from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
 
 
 def _bad_request(error: str) -> web.HTTPBadRequest:
@@ -225,59 +227,66 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
     chatlog_store = request.app[CHATLOG_STORE_KEY]
     usage_tracker = request.app[USAGE_TRACKER_KEY]
     portal_metadata_client = request.app[PORTAL_METADATA_CLIENT_KEY]
+    settings = request.app[SETTINGS_KEY]
 
     runtime_events: list[dict[str, Any]] = []
     context_state = {"objective": message[:300], "summary": "OpenCode request accepted", "current_state": "running", "next_step": "Waiting for OpenCode assistant response", "constraints": [], "decisions": [], "open_loops": [], "budget": {"usage_percent": 0}}
 
     existing_record = store.get(portal_session_id)
     opencode_session_id = existing_record.opencode_session_id if existing_record else ""
+    provider_for_trace = _optional_str(runtime_profile.get("provider")) or _optional_str(metadata.get("provider"))
+    profile_version, runtime_profile_id = profile_version_from_metadata(metadata, runtime_profile)
+    trace_context: dict[str, str] = {}
     try:
         record, partial_recovery = await _ensure_record_for_chat(client=client, store=store, portal_session_id=portal_session_id, title=title, agent=agent, model=model)
         opencode_session_id = record.opencode_session_id
+        trace_context = build_trace_context(settings, request_id=request_id, session_id=portal_session_id, opencode_session_id=record.opencode_session_id, profile_version=profile_version, runtime_profile_id=runtime_profile_id, model=model or "", provider=provider_for_trace or "")
 
-        start = chat_started_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id)
+        start = add_trace_context(chat_started_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id), trace_context)
         runtime_events.append(start)
         await bus.publish(start)
 
-        chatlog_store.start_entry(portal_session_id, request_id=request_id, message=message, runtime_events=runtime_events, context_state=context_state, llm_debug={"engine": "opencode", "opencode_session_id": record.opencode_session_id})
+        chatlog_store.start_entry(portal_session_id, request_id=request_id, message=message, runtime_events=runtime_events, context_state=context_state, llm_debug={"engine": "opencode", "opencode_session_id": record.opencode_session_id, "trace_context": trace_context})
 
-        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.started", latest_event_state="running", request_id=request_id, summary="Chat started", runtime_events=runtime_events, metadata={"opencode_session_id": record.opencode_session_id})
+        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.started", latest_event_state="running", request_id=request_id, summary="Chat started", runtime_events=runtime_events, metadata={"opencode_session_id": record.opencode_session_id, "trace_context": trace_context})
 
-        think = llm_thinking_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id)
+        think = add_trace_context(llm_thinking_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id), trace_context)
         runtime_events.append(think)
         await bus.publish(think)
 
         response_payload = await client.send_message(record.opencode_session_id, parts=[{"type": "text", "text": message}], model=model, agent=agent, system=system)
         assistant_text = extract_assistant_text(response_payload) or "[no assistant response]"
 
-        for event in [
+        for event in [add_trace_context(x, trace_context) for x in [
             assistant_delta_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
             chat_complete_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
             chat_completed_compat_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
-        ]:
+        ]]:
             runtime_events.append(event)
             await bus.publish(event)
 
         updated = store.update_after_chat(portal_session_id, message, assistant_text, model, agent)
-        provider = _optional_str(runtime_profile.get("provider")) or _optional_str(metadata.get("provider"))
+        provider = provider_for_trace
         usage_record = usage_tracker.record_chat(session_id=portal_session_id, request_id=request_id, model=model, provider=provider, response_payload=response_payload, input_text=message, output_text=assistant_text)
         final_context = {**context_state, "summary": assistant_text[:500], "current_state": "completed", "next_step": ""}
 
-        chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="success", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(response_payload, 2000)})
+        chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="success", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(response_payload, 2000), "trace_context": trace_context})
 
         metadata_model = usage_record.get("model") or model or "unknown"
         metadata_provider = usage_record.get("provider") or provider or "unknown"
-        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state="success", request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "model": metadata_model, "provider": metadata_provider, "context_state": final_context, "usage": usage_record})
+        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state="success", request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "model": metadata_model, "provider": metadata_provider, "context_state": final_context, "usage": usage_record, "trace_context": trace_context})
 
     except OpenCodeClientError as exc:
-        failed = chat_failed_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=opencode_session_id, error=str(exc))
+        if not trace_context:
+            trace_context = build_trace_context(settings, request_id=request_id, session_id=portal_session_id, opencode_session_id=opencode_session_id, profile_version=profile_version, runtime_profile_id=runtime_profile_id, model=model or "", provider=provider_for_trace or "")
+        failed = add_trace_context(chat_failed_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=opencode_session_id, error=str(exc)), trace_context)
         runtime_events.append(failed)
         await bus.publish(failed)
         chatlog_store.fail_entry(portal_session_id, request_id=request_id, error=str(exc), runtime_events=runtime_events, context_state=context_state, llm_debug={"engine": "opencode"})
-        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.failed", latest_event_state="error", request_id=request_id, summary=str(exc), runtime_events=runtime_events, metadata={"engine": "opencode"})
+        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.failed", latest_event_state="error", request_id=request_id, summary=str(exc), runtime_events=runtime_events, metadata={"engine": "opencode", "trace_context": trace_context})
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
 
-    out = {"session_id": portal_session_id, "request_id": request_id, "response": assistant_text, "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events}}
+    out = {"session_id": portal_session_id, "request_id": request_id, "response": assistant_text, "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context}}
     if partial_recovery or getattr(updated, "partial_recovery", False):
         out["_llm_debug"]["partial_recovery"] = True
     return out
@@ -387,7 +396,9 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     sub = bus.subscribe({"session_id": session_id})
     run_task = asyncio.create_task(handle_chat_payload(request, payload))
     seen: set[tuple] = set()
-    await _write_sse(resp, "runtime_event", {"type": "stream.started", "engine": "opencode", "session_id": session_id, "request_id": req_id, "created_at": utc_now_iso()})
+    settings = request.app[SETTINGS_KEY]
+    stream_trace = build_trace_context(settings, request_id=req_id, session_id=session_id)
+    await _write_sse(resp, "runtime_event", add_trace_context({"type": "stream.started", "engine": "opencode", "session_id": session_id, "request_id": req_id, "created_at": utc_now_iso()}, stream_trace))
 
     async def _forward(event: dict[str, Any]) -> None:
         if not _is_stream_relevant_event(event, session_id=session_id, request_id=req_id):

@@ -7,11 +7,13 @@ from .app_keys import (
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
     PORTAL_METADATA_CLIENT_KEY,
+    SETTINGS_KEY,
     SESSION_STORE_KEY,
 )
 
 from .opencode_client import OpenCodeClientError
 from .thinking_events import build_thinking_event
+from .trace_context import add_trace_context, build_trace_context
 
 
 async def permission_respond_handler(request: web.Request) -> web.Response:
@@ -37,7 +39,8 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
         await request.app[OPENCODE_CLIENT_KEY].respond_permission(opencode_session_id, permission_id, payload)
     except OpenCodeClientError as exc:
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
-    event = build_thinking_event("permission_resolved", session_id=str(sid or ""), request_id="", opencode_session_id=str(opencode_session_id), state="success", summary=f"Permission {decision}", data={"permission_id": permission_id, **payload})
+    trace_context = build_trace_context(request.app[SETTINGS_KEY], request_id=body.get("request_id", ""), session_id=sid, opencode_session_id=opencode_session_id, tool_name=body.get("tool", ""))
+    event = add_trace_context(build_thinking_event("permission_resolved", session_id=str(sid or ""), request_id="", opencode_session_id=str(opencode_session_id), state="success", summary=f"Permission {decision}", data={"permission_id": permission_id, **payload}), trace_context)
     await request.app[EVENT_BUS_KEY].publish(event)
 
     portal_metadata_client = request.app.get(PORTAL_METADATA_CLIENT_KEY)
@@ -55,6 +58,7 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
                     "opencode_session_id": str(opencode_session_id),
                     "permission_id": permission_id,
                     "decision": decision,
+                    "trace_context": trace_context,
                 },
             )
         except Exception:

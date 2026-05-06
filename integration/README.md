@@ -22,3 +22,6 @@ When `RUN_RUNTIME_CONTRACT_TESTS=1` is used, `scripts/smoke.sh` sets smoke-speci
 - `RUNTIME_CONTRACT_EXPECT_TOOL_MAPPING=smoke_tool:efp_smoke_tool`
 
 These checks validate the skill/tool asset bridge through `/api/skills` and `/api/capabilities`. Chat/task contract checks remain opt-in via `RUNTIME_CONTRACT_ENABLE_CHAT=1` and `RUNTIME_CONTRACT_ENABLE_TASKS=1`.
+
+
+This is runtime-only smoke, not full Portal E2E. It validates asset bridge, runtime contract, and state persistence. It does not validate real Portal K8s provisioning. Live chat/task checks are opt-in.
