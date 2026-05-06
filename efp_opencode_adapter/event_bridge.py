@@ -7,6 +7,7 @@ from typing import Any
 from .index_loader import load_tools_index
 from .profile_store import sanitize_public_secrets
 from .thinking_events import safe_preview, utc_now_iso
+from .trace_context import add_trace_context, build_trace_context
 
 
 def _sanitize_event_value(value: Any, max_chars: int) -> Any:
@@ -152,6 +153,9 @@ def _is_mutation_tool(meta: dict[str, Any]) -> bool:
     return bool(meta.get("mutation") is True or {"mutation", "write", "writeback", "external_write", "destructive"} & tags or risk in {"high", "critical"})
 
 
+_BUILTIN_TOOLS = {"bash", "read", "edit", "write", "grep", "glob", "webfetch", "websearch", "skill", "todowrite", "question"}
+
+
 def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_store, settings, tool_metadata: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
     if not isinstance(raw_event, dict):
         return None
@@ -277,6 +281,25 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
             extra = {"capability_id": None, "policy_tags": [], "risk_level": s_risk or "medium", "requires_identity_binding": False, "mutation": False, "audit_event": False, "tool_source_ref": None}
             evt.update(extra)
             evt["data"].update(extra)
+        meta = (tool_metadata or {}).get(str(tool)) or (tool_metadata or {}).get(str(s_tool))
+        if isinstance(meta, dict):
+            tool_source = meta.get("source_ref") or "tools_repo"
+        elif str(tool).lower() in _BUILTIN_TOOLS:
+            tool_source = "opencode_builtin"
+        else:
+            tool_source = "unknown"
+        evt["tool_name"] = s_tool
+    else:
+        meta = (tool_metadata or {}).get(str(tool)) or (tool_metadata or {}).get(str(s_tool))
+        if isinstance(meta, dict):
+            tool_source = meta.get("source_ref") or "tools_repo"
+        elif str(tool).lower() in _BUILTIN_TOOLS:
+            tool_source = "opencode_builtin"
+        else:
+            tool_source = "unknown"
+    trace_context = build_trace_context(settings, request_id=s_request_id, session_id=s_session_id, task_id=task_id or "", opencode_session_id=s_opencode_session_id, tool_name=s_tool if (normalized_type.startswith("tool.") or normalized_type.startswith("permission_")) else "", tool_source=tool_source)
+    add_trace_context(evt, trace_context)
+    evt["tool_source"] = _sanitize_event_text(tool_source, 200)
     return evt
 
 

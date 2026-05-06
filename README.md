@@ -38,3 +38,15 @@ RUNTIME_BASE_URL=http://localhost:8000 python -m pytest -q runtime_contract_test
 - `RUNTIME_CONTRACT_EXPECT_TOOL_MAPPING=legacy:opencode`
 
 Legacy aliases `RUNTIME_CONTRACT_EXPECT_TOOL` and `RUNTIME_CONTRACT_EXPECT_EFP_TOOL` remain supported for backward compatibility. Default contract runs do not enable live chat/task LLM checks.
+
+
+## Docs
+- [docs/RUNTIME_CONTRACT.md](docs/RUNTIME_CONTRACT.md)
+- [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)
+- [docs/TESTING.md](docs/TESTING.md)
+
+## P3 contract gates
+- observability trace fields
+- runtime contract tests
+- docker smoke asset mapping
+- wrapper/tools-index snapshot tests

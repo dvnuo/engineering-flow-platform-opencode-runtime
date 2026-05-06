@@ -11,6 +11,7 @@ from .app_keys import (
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
     SESSION_STORE_KEY,
+    SETTINGS_KEY,
     TASK_BACKGROUND_TASKS_KEY,
     TASK_STORE_KEY,
 )
@@ -21,6 +22,7 @@ from .session_store import SessionRecord
 from .task_completion_parser import parse_task_completion
 from .task_prompts import build_task_prompt
 from .task_store import TaskRecord, TaskStore, is_valid_task_id, utc_now_iso
+from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
 
 TERMINAL = {"success", "error", "blocked", "cancelled"}
 
@@ -306,12 +308,17 @@ def _to_public(record: TaskRecord) -> dict[str, Any]:
 async def _publish_task_event(app: web.Application, record: TaskRecord, event_type: str, state: str) -> None:
     event = {"type": event_type, "engine": "opencode", "task_id": record.task_id, "request_id": record.request_id, "state": state, "status": state, "session_id": record.portal_session_id, "opencode_session_id": record.opencode_session_id, "timestamp": utc_now_iso()}
     md = record.metadata or {}
+    runtime_profile = md.get("runtime_profile") if isinstance(md.get("runtime_profile"), dict) else {}
+    profile_version, runtime_profile_id = profile_version_from_metadata(md if isinstance(md, dict) else {}, runtime_profile)
     gid = md.get("group_id") or md.get("portal_group_id")
     cid = md.get("coordination_run_id") or md.get("portal_coordination_run_id")
     if gid:
         event["group_id"] = gid
     if cid:
         event["coordination_run_id"] = cid
+    settings = app[SETTINGS_KEY]
+    trace_context = build_trace_context(settings, request_id=record.request_id, session_id=record.portal_session_id, task_id=record.task_id, opencode_session_id=record.opencode_session_id, group_id=gid or "", coordination_run_id=cid or "", profile_version=profile_version, runtime_profile_id=runtime_profile_id)
+    add_trace_context(event, trace_context)
     store: TaskStore = app[TASK_STORE_KEY]
     store.append_event(record.task_id, event)
     await app[EVENT_BUS_KEY].publish(event)

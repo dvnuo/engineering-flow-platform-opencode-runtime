@@ -7,11 +7,13 @@ from .app_keys import (
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
     PORTAL_METADATA_CLIENT_KEY,
+    SETTINGS_KEY,
     SESSION_STORE_KEY,
 )
 
 from .opencode_client import OpenCodeClientError
 from .thinking_events import build_thinking_event
+from .trace_context import add_trace_context, build_trace_context
 
 
 async def permission_respond_handler(request: web.Request) -> web.Response:
@@ -25,8 +27,16 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
     decision = body.get("decision")
     if decision not in {"allow", "deny", "approve", "reject"}:
         raise web.HTTPBadRequest(text=json.dumps({"error": "invalid_decision"}), content_type="application/json")
+    request_id = body.get("request_id", "")
+    if not isinstance(request_id, str):
+        request_id = ""
     opencode_session_id = body.get("opencode_session_id")
     sid = body.get("session_id", "")
+    if not isinstance(sid, str):
+        sid = ""
+    tool_name = body.get("tool", "")
+    if not isinstance(tool_name, str):
+        tool_name = ""
     if not opencode_session_id:
         rec = request.app[SESSION_STORE_KEY].get(sid)
         if rec is None:
@@ -37,7 +47,8 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
         await request.app[OPENCODE_CLIENT_KEY].respond_permission(opencode_session_id, permission_id, payload)
     except OpenCodeClientError as exc:
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
-    event = build_thinking_event("permission_resolved", session_id=str(sid or ""), request_id="", opencode_session_id=str(opencode_session_id), state="success", summary=f"Permission {decision}", data={"permission_id": permission_id, **payload})
+    trace_context = build_trace_context(request.app[SETTINGS_KEY], request_id=request_id, session_id=sid, opencode_session_id=str(opencode_session_id or ""), tool_name=tool_name)
+    event = add_trace_context(build_thinking_event("permission_resolved", session_id=str(sid or ""), request_id=request_id, opencode_session_id=str(opencode_session_id), state="success", summary=f"Permission {decision}", data={"permission_id": permission_id, **payload}), trace_context)
     await request.app[EVENT_BUS_KEY].publish(event)
 
     portal_metadata_client = request.app.get(PORTAL_METADATA_CLIENT_KEY)
@@ -47,7 +58,7 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
                 session_id=str(sid or ""),
                 latest_event_type="permission.resolved",
                 latest_event_state="success",
-                request_id="",
+                request_id=request_id,
                 summary=f"Permission {decision}",
                 runtime_events=[event],
                 metadata={
@@ -55,6 +66,7 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
                     "opencode_session_id": str(opencode_session_id),
                     "permission_id": permission_id,
                     "decision": decision,
+                    "trace_context": trace_context,
                 },
             )
         except Exception:

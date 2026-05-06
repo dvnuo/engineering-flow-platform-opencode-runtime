@@ -79,6 +79,36 @@ async def _wait_terminal(client, task_id, tries=80):
 
 
 @pytest.mark.asyncio
+async def test_task_events_include_trace_context_and_group_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    monkeypatch.setenv('PORTAL_AGENT_ID', 'agent-task-1')
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    ws = await client.ws_connect('/api/events?task_id=t-obs-1')
+    await ws.receive_json()
+    r = await client.post('/api/tasks/execute', json={'task_id': 't-obs-1', 'task_type': 'generic_agent_task', 'request_id': 'req-task-1', 'session_id': 'sess-task-1', 'input_payload': {}, 'metadata': {'group_id': 'group-1', 'coordination_run_id': 'coord-1', 'runtime_profile_id': 'rp-task-1', 'runtime_profile': {'revision': 3}}})
+    assert r.status == 202
+    events = [await ws.receive_json(), await ws.receive_json(), await ws.receive_json()]
+    target = next(e for e in events if e['type'] in {'task.accepted', 'task.started', 'task.completed'})
+    tc = target['trace_context']
+    assert tc['agent_id'] == 'agent-task-1'
+    assert tc['runtime_type'] == 'opencode'
+    assert tc['task_id'] == 't-obs-1'
+    assert tc['request_id'] == 'req-task-1'
+    assert tc['group_id'] == 'group-1'
+    assert tc['coordination_run_id'] == 'coord-1'
+    assert tc['profile_version'] == '3'
+    assert tc['runtime_profile_id'] == 'rp-task-1'
+    assert target['data']['trace_context']
+    assert target['group_id'] == 'group-1'
+    assert target['coordination_run_id'] == 'coord-1'
+    await ws.close(); await client.close()
+
+
+@pytest.mark.asyncio
 async def test_tasks_execute_get_events_and_idempotent(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
     monkeypatch.setenv('EFP_TASK_COMPLETION_TIMEOUT_SECONDS', '2')
