@@ -64,6 +64,27 @@ class OpenCodeClient:
         async with aiohttp.ClientSession() as session:
             return await _run(session)
 
+    async def _request_json_with_status(self, method: str, path: str, *, json: dict | None = None, expected_statuses: tuple[int, ...] = (200,), timeout_seconds: int = 30) -> tuple[int, Any]:
+        async def _run(session: aiohttp.ClientSession) -> tuple[int, Any]:
+            async with session.request(method, self._url(path), auth=self._auth(), json=json, timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as resp:
+                if resp.status not in expected_statuses:
+                    try:
+                        err_payload = await resp.json()
+                    except Exception:
+                        err_payload = await resp.text()
+                    raise OpenCodeClientError(f"{method} {path} failed with status {resp.status}", status=resp.status, payload=err_payload)
+                if resp.status == 204:
+                    return resp.status, None
+                try:
+                    return resp.status, await resp.json()
+                except Exception:
+                    return resp.status, await resp.text()
+
+        if self._session is not None:
+            return await _run(self._session)
+        async with aiohttp.ClientSession() as session:
+            return await _run(session)
+
     async def _request(self, method: str, url: str, **kwargs):
         kwargs.setdefault("auth", self._auth())
         if self._session is not None:
@@ -206,19 +227,19 @@ class OpenCodeClient:
         return data if isinstance(data, dict) else {}
 
     async def abort_session(self, session_id: str) -> dict[str, Any]:
-        await self._request_json("POST", f"/session/{session_id}/abort", expected_statuses=(200, 202, 204))
-        return {"success": True, "supported": True, "status": 200}
+        status, _ = await self._request_json_with_status("POST", f"/session/{session_id}/abort", expected_statuses=(200, 202, 204))
+        return {"success": True, "supported": True, "status": status}
 
     async def revert_message(self, session_id: str, message_id: str, part_id: str | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {"messageID": message_id}
         if part_id:
             payload["partID"] = part_id
-        await self._request_json("POST", f"/session/{session_id}/revert", json=payload, expected_statuses=(200, 202, 204))
-        return {"success": True, "supported": True, "status": 200}
+        status, _ = await self._request_json_with_status("POST", f"/session/{session_id}/revert", json=payload, expected_statuses=(200, 202, 204))
+        return {"success": True, "supported": True, "status": status}
 
     async def unrevert_session(self, session_id: str) -> dict[str, Any]:
-        await self._request_json("POST", f"/session/{session_id}/unrevert", expected_statuses=(200, 202, 204))
-        return {"success": True, "supported": True, "status": 200}
+        status, _ = await self._request_json_with_status("POST", f"/session/{session_id}/unrevert", expected_statuses=(200, 202, 204))
+        return {"success": True, "supported": True, "status": status}
 
     async def prompt_async(self, session_id: str, payload: dict[str, Any]) -> dict | None:
         return await self._request_json("POST", f"/session/{session_id}/prompt_async", json=payload, expected_statuses=(200, 201, 202, 204))

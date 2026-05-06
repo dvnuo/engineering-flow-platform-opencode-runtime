@@ -300,3 +300,69 @@ async def test_request_does_not_close_injected_session_when_request_raises():
 
     assert session.calls == 1
     assert session.closed is False
+
+
+@pytest.mark.asyncio
+async def test_send_message_includes_message_id_no_reply_and_tools(monkeypatch):
+    app = web.Application()
+    captured = {}
+
+    async def message(request):
+        captured["body"] = await request.json()
+        return web.json_response({"ok": True}, status=201)
+
+    app.router.add_post("/session/ses-1/message", message)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+    await client.send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model="m", agent="a", message_id="m-1", no_reply=True, tools={"x": False})
+    assert captured["body"]["messageID"] == "m-1"
+    assert captured["body"]["noReply"] is True
+    assert captured["body"]["tools"] == {"x": False}
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_fork_session_posts_message_id(monkeypatch):
+    app = web.Application()
+    captured = {}
+
+    async def fork(request):
+        captured["body"] = await request.json()
+        return web.json_response({"id": "ses-2"})
+
+    app.router.add_post("/session/ses-1/fork", fork)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    out = await OpenCodeClient(Settings.from_env()).fork_session("ses-1", "m-prev")
+    assert captured["body"] == {"messageID": "m-prev"}
+    assert out == {"id": "ses-2"}
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_message_prefers_abort_session(monkeypatch):
+    app = web.Application()
+    calls: list[str] = []
+
+    async def abort(_):
+        calls.append("abort")
+        return web.Response(status=204)
+
+    async def cancel(_):
+        calls.append("cancel")
+        return web.json_response({}, status=200)
+
+    app.router.add_post("/session/ses-1/abort", abort)
+    app.router.add_post("/session/ses-1/cancel", cancel)
+    app.router.add_post("/session/ses-1/message/m-1/cancel", cancel)
+    app.router.add_post("/session/ses-1/message/m-1/abort", cancel)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    out = await OpenCodeClient(Settings.from_env()).cancel_message("ses-1")
+    assert out["success"] is True
+    assert calls == ["abort"]
+    await server.close()

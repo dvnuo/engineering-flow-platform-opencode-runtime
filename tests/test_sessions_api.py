@@ -2,6 +2,9 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from efp_opencode_adapter.server import create_app
+from efp_opencode_adapter.sessions_api import _extract_opencode_session_id
+from efp_opencode_adapter.opencode_client import OpenCodeClientError
+from efp_opencode_adapter.app_keys import SESSION_STORE_KEY
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
 
@@ -151,4 +154,82 @@ async def test_delete_from_here_and_edit_flow(tmp_path, monkeypatch):
     reject_body = await reject.json()
     assert reject.status == 400
     assert reject_body["error"] == "only_user_message_edit_supported"
+    await client.close()
+
+
+def test_extract_opencode_session_id_accepts_nested_shapes():
+    assert _extract_opencode_session_id({"id": "ses-1"}) == "ses-1"
+    assert _extract_opencode_session_id({"session": {"id": "ses-2"}}) == "ses-2"
+    assert _extract_opencode_session_id({"data": {"sessionID": "ses-3"}}) == "ses-3"
+    assert _extract_opencode_session_id({"message": {"id": "m-1"}}) == ""
+
+
+@pytest.mark.asyncio
+async def test_delete_from_here_missing_opencode_session_returns_opencode_session_not_found(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    chat = await (await client.post("/api/chat", json={"message": "hello", "session_id": "s1"})).json()
+    record = app[SESSION_STORE_KEY].get("s1")
+    missing_sid = record.opencode_session_id
+    fake.sessions.pop(missing_sid, None)
+    fake.messages.pop(missing_sid, None)
+    original_list_messages = fake.list_messages
+
+    async def _missing_404(session_id):
+        if session_id == missing_sid:
+            raise OpenCodeClientError("missing", status=404)
+        return await original_list_messages(session_id)
+
+    fake.list_messages = _missing_404
+    res = await client.post(f"/api/sessions/s1/messages/{chat['user_message_id']}/delete-from-here", json={})
+    body = await res.json()
+    assert res.status == 404
+    assert body["error"] == "opencode_session_not_found"
+    await client.close()
+
+
+class _List404Client(FakeOpenCodeClient):
+    async def list_messages(self, session_id):
+        raise OpenCodeClientError("missing", status=404)
+
+
+@pytest.mark.asyncio
+async def test_edit_list_messages_404_returns_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=_List404Client())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    await client.post("/api/chat", json={"message": "hello", "session_id": "s1"})
+    res = await client.post("/api/sessions/s1/messages/u-1/edit", json={"content": "x"})
+    body = await res.json()
+    assert res.status == 404
+    assert body["error"] == "opencode_session_not_found"
+    await client.close()
+
+
+class _ResendFailClient(FakeOpenCodeClient):
+    async def send_message(self, *args, **kwargs):
+        parts = kwargs.get("parts") or []
+        text = parts[0].get("text", "") if parts and isinstance(parts[0], dict) else ""
+        if text == "edited":
+            raise OpenCodeClientError("send failed", status=500)
+        return await super().send_message(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_edit_resend_failure_returns_502_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _ResendFailClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    chat = await (await client.post("/api/chat", json={"message": "hello", "session_id": "s1"})).json()
+    res = await client.post(f"/api/sessions/s1/messages/{chat['user_message_id']}/edit", json={"content": "edited"})
+    body = await res.json()
+    assert res.status == 502
+    assert body["error"] == "opencode_edit_resend_failed"
+    assert "application/json" in res.headers.get("Content-Type", "")
     await client.close()
