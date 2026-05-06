@@ -101,7 +101,7 @@ run_runtime_contract_tests() {
 }
 
 docker build -t efp-opencode-runtime:test .
-docker run -d --name "${NAME}" -p 8000:8000 -e OPENCODE_SERVER_PASSWORD=test-password -e OPENCODE_DATA_DIR=/home/opencode/.local/share/opencode -e EFP_ADAPTER_STATE_DIR=/home/opencode/.local/share/efp-compat -v "${WORKSPACE_DIR}:/workspace" -v "${ADAPTER_STATE_DIR}:/home/opencode/.local/share/efp-compat" -v "${OPENCODE_STATE_DIR}:/home/opencode/.local/share/opencode" -v "${SKILLS_DIR}:/app/skills:ro" -v "${TOOLS_DIR}:/app/tools:ro" efp-opencode-runtime:test >/dev/null
+docker run -d --name "${NAME}" -p 8000:8000 -e OPENCODE_SERVER_PASSWORD=test-password -e OPENCODE_DATA_DIR=/root/.local/share/opencode -e EFP_ADAPTER_STATE_DIR=/root/.local/share/efp-compat -v "${WORKSPACE_DIR}:/workspace" -v "${ADAPTER_STATE_DIR}:/root/.local/share/efp-compat" -v "${OPENCODE_STATE_DIR}:/root/.local/share/opencode" -v "${SKILLS_DIR}:/app/skills:ro" -v "${TOOLS_DIR}:/app/tools:ro" efp-opencode-runtime:test >/dev/null
 
 wait_health() {
   : > "${HEALTH_FILE}"
@@ -126,13 +126,16 @@ assert_health_state() {
 wait_health
 assert_health_state
 
+docker exec "${NAME}" sh -lc 'test "$(id -u)" = "0"'
+docker exec "${NAME}" sh -lc 'test "${HOME:-}" = "/root"'
+
 docker exec "${NAME}" test -f /workspace/.opencode/skills/smoke-skill/SKILL.md
 docker exec "${NAME}" test -f /workspace/.opencode/tools/efp_smoke_tool.ts
-docker exec "${NAME}" test -f /home/opencode/.local/share/efp-compat/skills-index.json
-docker exec "${NAME}" test -f /home/opencode/.local/share/efp-compat/tools-index.json
+docker exec "${NAME}" test -f /root/.local/share/efp-compat/skills-index.json
+docker exec "${NAME}" test -f /root/.local/share/efp-compat/tools-index.json
 docker exec "${NAME}" sh -lc "grep -q 'smoke_tool -> efp_smoke_tool' /workspace/.opencode/skills/smoke-skill/SKILL.md"
-docker exec "${NAME}" sh -lc "jq -e '.skills[] | select(.opencode_name == \"smoke-skill\") | .opencode_tools | index(\"efp_smoke_tool\")' /home/opencode/.local/share/efp-compat/skills-index.json >/dev/null"
-docker exec "${NAME}" sh -lc "jq -e '.skills[] | select(.opencode_name == \"smoke-skill\") | .tool_mappings[] | select(.efp_name == \"smoke_tool\" and .opencode_name == \"efp_smoke_tool\" and .available == true)' /home/opencode/.local/share/efp-compat/skills-index.json >/dev/null"
+docker exec "${NAME}" sh -lc "jq -e '.skills[] | select(.opencode_name == \"smoke-skill\") | .opencode_tools | index(\"efp_smoke_tool\")' /root/.local/share/efp-compat/skills-index.json >/dev/null"
+docker exec "${NAME}" sh -lc "jq -e '.skills[] | select(.opencode_name == \"smoke-skill\") | .tool_mappings[] | select(.efp_name == \"smoke_tool\" and .opencode_name == \"efp_smoke_tool\" and .available == true)' /root/.local/share/efp-compat/skills-index.json >/dev/null"
 curl -fsS http://localhost:8000/api/skills | jq -e '.count >= 1' >/dev/null
 curl -fsS http://localhost:8000/api/skills | jq -e '.skills[] | select(.name == "smoke-skill")' >/dev/null
 curl -fsS http://localhost:8000/api/skills | jq -e '.skills[] | select(.name == "smoke-skill") | .opencode_tools | index("efp_smoke_tool")' >/dev/null
@@ -141,17 +144,17 @@ curl -fsS http://localhost:8000/api/capabilities | jq -e '.capabilities[] | sele
 curl -fsS http://localhost:8000/api/capabilities | jq -e '.capabilities[] | select(.name == "efp_smoke_tool")' >/dev/null
 run_runtime_contract_tests
 
-docker exec "${NAME}" sh -lc 'echo adapter-persist > /home/opencode/.local/share/efp-compat/persistence-sentinel.txt'
-docker exec "${NAME}" sh -lc 'echo opencode-persist > /home/opencode/.local/share/opencode/persistence-sentinel.txt'
+docker exec "${NAME}" sh -lc 'echo adapter-persist > /root/.local/share/efp-compat/persistence-sentinel.txt'
+docker exec "${NAME}" sh -lc 'echo opencode-persist > /root/.local/share/opencode/persistence-sentinel.txt'
 docker restart "${NAME}" >/dev/null
 wait_health
 assert_health_state
-docker exec "${NAME}" test -f /home/opencode/.local/share/efp-compat/persistence-sentinel.txt
-docker exec "${NAME}" test -f /home/opencode/.local/share/opencode/persistence-sentinel.txt
+docker exec "${NAME}" test -f /root/.local/share/efp-compat/persistence-sentinel.txt
+docker exec "${NAME}" test -f /root/.local/share/opencode/persistence-sentinel.txt
 docker exec "${NAME}" test -f /workspace/.opencode/skills/smoke-skill/SKILL.md
 docker exec "${NAME}" test -f /workspace/.opencode/tools/efp_smoke_tool.ts
 docker exec "${NAME}" sh -lc "grep -q 'smoke_tool -> efp_smoke_tool' /workspace/.opencode/skills/smoke-skill/SKILL.md"
-docker exec "${NAME}" sh -lc "jq -e '.skills[] | select(.opencode_name == \"smoke-skill\") | .opencode_tools | index(\"efp_smoke_tool\")' /home/opencode/.local/share/efp-compat/skills-index.json >/dev/null"
+docker exec "${NAME}" sh -lc "jq -e '.skills[] | select(.opencode_name == \"smoke-skill\") | .opencode_tools | index(\"efp_smoke_tool\")' /root/.local/share/efp-compat/skills-index.json >/dev/null"
 run_runtime_contract_tests
 
 echo "smoke passed"

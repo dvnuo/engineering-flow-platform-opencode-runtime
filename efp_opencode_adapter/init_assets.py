@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from .opencode_config import build_opencode_config, write_main_agent_prompt, write_opencode_config
 from .settings import Settings
 from .skill_sync import sync_skills
@@ -10,7 +8,6 @@ from .tool_sync import sync_tools
 
 
 def init_assets(settings: Settings) -> None:
-    home = Path("/home/opencode")
     required_dirs = [
         settings.workspace_dir,
         settings.workspace_dir / ".opencode",

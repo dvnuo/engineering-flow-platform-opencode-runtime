@@ -30,3 +30,17 @@ def test_dockerfile_preserves_global_opencode_plugin_resolution():
     assert 'test "$(npm root -g)" = "/usr/local/lib/node_modules"' in text
     assert 'npm install -g "opencode-ai@${OPENCODE_VERSION}" "@opencode-ai/plugin@${OPENCODE_VERSION}"' in text
     assert 'opencode --version | grep -F "${OPENCODE_VERSION}"' in text
+
+
+def test_dockerfile_runs_as_root_with_root_state_dirs():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "USER root" in text
+    assert "USER opencode" not in text
+    assert "useradd --uid 10001" not in text
+    assert "groupadd --gid 10001" not in text
+    assert "opencode:opencode" not in text
+    assert "/root/.local/share/opencode" in text
+    assert "/root/.local/share/efp-compat" in text
+    assert "/home/opencode" not in text

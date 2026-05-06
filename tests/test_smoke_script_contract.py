@@ -52,3 +52,11 @@ def test_smoke_script_passes_runtime_contract_expected_asset_env_and_timeout():
     assert 'RUNTIME_CONTRACT_EXPECT_EFP_TOOL' in script
     assert '${RUNTIME_CONTRACT_EXPECT_LEGACY_TOOL}:${RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL}' in script
     assert 'timeout "${RUNTIME_CONTRACT_TIMEOUT_SECONDS}" env' in script
+
+
+def test_smoke_script_uses_root_state_and_asserts_root_user():
+    script = _script()
+    assert "/root/.local/share/opencode" in script
+    assert "/root/.local/share/efp-compat" in script
+    assert "/home/opencode" not in script
+    assert "id -u" in script
