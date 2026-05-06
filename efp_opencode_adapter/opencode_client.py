@@ -60,9 +60,42 @@ class OpenCodeClient:
                     return await resp.text()
 
         if self._session is not None:
-            return await _run(self._session)
+            try:
+                return await _run(self._session)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                raise OpenCodeClientError(f"{method} {path} transport error: {exc}", status=None, payload=None) from exc
         async with aiohttp.ClientSession() as session:
-            return await _run(session)
+            try:
+                return await _run(session)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                raise OpenCodeClientError(f"{method} {path} transport error: {exc}", status=None, payload=None) from exc
+
+    async def _request_json_with_status(self, method: str, path: str, *, json: dict | None = None, expected_statuses: tuple[int, ...] = (200,), timeout_seconds: int = 30) -> tuple[int, Any]:
+        async def _run(session: aiohttp.ClientSession) -> tuple[int, Any]:
+            async with session.request(method, self._url(path), auth=self._auth(), json=json, timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as resp:
+                if resp.status not in expected_statuses:
+                    try:
+                        err_payload = await resp.json()
+                    except Exception:
+                        err_payload = await resp.text()
+                    raise OpenCodeClientError(f"{method} {path} failed with status {resp.status}", status=resp.status, payload=err_payload)
+                if resp.status == 204:
+                    return resp.status, None
+                try:
+                    return resp.status, await resp.json()
+                except Exception:
+                    return resp.status, await resp.text()
+
+        if self._session is not None:
+            try:
+                return await _run(self._session)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                raise OpenCodeClientError(f"{method} {path} transport error: {exc}", status=None, payload=None) from exc
+        async with aiohttp.ClientSession() as session:
+            try:
+                return await _run(session)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                raise OpenCodeClientError(f"{method} {path} transport error: {exc}", status=None, payload=None) from exc
 
     async def _request(self, method: str, url: str, **kwargs):
         kwargs.setdefault("auth", self._auth())
@@ -173,8 +206,25 @@ class OpenCodeClient:
         data = await self._request_json("GET", f"/session/{session_id}/message/{message_id}")
         return data if isinstance(data, dict) else {}
 
-    async def send_message(self, session_id: str, *, parts: list[dict], model: str | None, agent: str | None, system: str | None = None) -> dict:
+    async def send_message(
+        self,
+        session_id: str,
+        *,
+        parts: list[dict],
+        model: str | None,
+        agent: str | None,
+        system: str | None = None,
+        message_id: str | None = None,
+        no_reply: bool | None = None,
+        tools: dict | None = None,
+    ) -> dict:
         payload: dict[str, Any] = {"parts": parts}
+        if message_id:
+            payload["messageID"] = message_id
+        if no_reply is not None:
+            payload["noReply"] = no_reply
+        if tools:
+            payload["tools"] = tools
         if model:
             payload["model"] = model
         if agent:
@@ -182,6 +232,26 @@ class OpenCodeClient:
         if system:
             payload["system"] = system
         return await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200, 201))
+
+    async def fork_session(self, session_id: str, message_id: str | None = None) -> dict:
+        payload = {"messageID": message_id} if message_id else {}
+        data = await self._request_json("POST", f"/session/{session_id}/fork", json=payload, expected_statuses=(200, 201))
+        return data if isinstance(data, dict) else {}
+
+    async def abort_session(self, session_id: str) -> dict[str, Any]:
+        status, _ = await self._request_json_with_status("POST", f"/session/{session_id}/abort", expected_statuses=(200, 202, 204))
+        return {"success": True, "supported": True, "status": status}
+
+    async def revert_message(self, session_id: str, message_id: str, part_id: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"messageID": message_id}
+        if part_id:
+            payload["partID"] = part_id
+        status, _ = await self._request_json_with_status("POST", f"/session/{session_id}/revert", json=payload, expected_statuses=(200, 202, 204))
+        return {"success": True, "supported": True, "status": status}
+
+    async def unrevert_session(self, session_id: str) -> dict[str, Any]:
+        status, _ = await self._request_json_with_status("POST", f"/session/{session_id}/unrevert", expected_statuses=(200, 202, 204))
+        return {"success": True, "supported": True, "status": status}
 
     async def prompt_async(self, session_id: str, payload: dict[str, Any]) -> dict | None:
         return await self._request_json("POST", f"/session/{session_id}/prompt_async", json=payload, expected_statuses=(200, 201, 202, 204))
@@ -195,13 +265,18 @@ class OpenCodeClient:
         ) or {"success": True}
 
     async def cancel_message(self, session_id: str, message_id: str | None = None) -> dict[str, Any]:
-        if not message_id:
-            return {"success": False, "supported": False, "reason": "message_id_missing"}
+        try:
+            return await self.abort_session(session_id)
+        except Exception:
+            pass
         attempts = [
-            ("POST", f"/session/{session_id}/message/{message_id}/cancel", None),
-            ("POST", f"/session/{session_id}/message/{message_id}/abort", None),
-            ("POST", f"/session/{session_id}/cancel", {"messageID": message_id}),
+            ("POST", f"/session/{session_id}/cancel", {"messageID": message_id} if message_id else {}),
         ]
+        if message_id:
+            attempts[0:0] = [
+                ("POST", f"/session/{session_id}/message/{message_id}/cancel", None),
+                ("POST", f"/session/{session_id}/message/{message_id}/abort", None),
+            ]
         for method, path, payload in attempts:
             try:
                 resp = await self._request(method, self._url(path), json=payload, timeout=aiohttp.ClientTimeout(total=10))

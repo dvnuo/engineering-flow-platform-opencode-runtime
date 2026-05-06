@@ -23,6 +23,8 @@ async def test_chat_and_stream(tmp_path, monkeypatch):
     assert p1["session_id"]
     assert p1["request_id"]
     assert p1["response"] == "echo: hello"
+    assert p1["user_message_id"].startswith("u-")
+    assert p1["assistant_message_id"].startswith("a-")
     assert p1["_llm_debug"]["engine"] == "opencode"
     assert p1["_llm_debug"]["opencode_session_id"]
     tc = p1["_llm_debug"]["trace_context"]

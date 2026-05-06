@@ -123,6 +123,37 @@ def _message_role(message: dict[str, Any]) -> str:
     return ""
 
 
+def _message_id(message: Any) -> str:
+    if not isinstance(message, dict):
+        return ""
+    info = message.get("info")
+    if isinstance(info, dict) and info.get("id"):
+        return str(info["id"])
+    for key in ("id", "message_id"):
+        if message.get(key):
+            return str(message[key])
+    nested = message.get("message")
+    if isinstance(nested, dict):
+        return _message_id(nested)
+    return ""
+
+
+def _detect_new_message_ids(before_messages: list[dict[str, Any]], after_messages: list[dict[str, Any]]) -> tuple[str, str]:
+    before_ids = {_message_id(message) for message in before_messages if _message_id(message)}
+    user_message_id = ""
+    assistant_message_id = ""
+    for message in after_messages:
+        message_id = _message_id(message)
+        if not message_id or message_id in before_ids:
+            continue
+        role = _message_role(message).lower()
+        if role == "user":
+            user_message_id = message_id
+        elif role == "assistant":
+            assistant_message_id = message_id
+    return user_message_id, assistant_message_id
+
+
 def _message_text(message: Any) -> str:
     if isinstance(message, str):
         return message
@@ -254,8 +285,26 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         runtime_events.append(think)
         await bus.publish(think)
 
+        before_messages: list[dict[str, Any]] = []
+        message_id_detection_error_before = ""
+        try:
+            before_messages = await client.list_messages(record.opencode_session_id)
+        except Exception as exc:
+            message_id_detection_error_before = str(exc)
         response_payload = await client.send_message(record.opencode_session_id, parts=[{"type": "text", "text": message}], model=model, agent=agent, system=system)
         assistant_text = extract_assistant_text(response_payload) or "[no assistant response]"
+        user_message_id = ""
+        assistant_message_id = ""
+        try:
+            after_messages = await client.list_messages(record.opencode_session_id)
+            user_message_id, assistant_message_id = _detect_new_message_ids(before_messages, after_messages)
+        except Exception:
+            pass
+        if not assistant_message_id and isinstance(response_payload, dict):
+            candidate = response_payload.get("info", {}).get("id") if isinstance(response_payload.get("info"), dict) else ""
+            if not candidate and isinstance(response_payload.get("message"), dict):
+                candidate = _message_id(response_payload["message"])
+            assistant_message_id = str(candidate or "")
 
         for event in [add_trace_context(x, trace_context) for x in [
             assistant_delta_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
@@ -271,7 +320,10 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         usage_record["request_id"] = trace_context.get("request_id", usage_record.get("request_id", ""))
         final_context = {**context_state, "summary": assistant_text[:500], "current_state": "completed", "next_step": ""}
 
-        chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="success", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(response_payload, 2000), "trace_context": trace_context})
+        llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(response_payload, 2000), "trace_context": trace_context, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or ""}}
+        if message_id_detection_error_before:
+            llm_debug["message_id_detection_error_before"] = message_id_detection_error_before
+        chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="success", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
 
         metadata_model = usage_record.get("model") or model or "unknown"
         metadata_provider = usage_record.get("provider") or provider or "unknown"
@@ -287,7 +339,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.failed", latest_event_state="error", request_id=request_id, summary=str(exc), runtime_events=runtime_events, metadata={"engine": "opencode", "trace_context": trace_context})
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
 
-    out = {"session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context}}
+    out = {"session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context}}
     if partial_recovery or getattr(updated, "partial_recovery", False):
         out["_llm_debug"]["partial_recovery"] = True
     return out

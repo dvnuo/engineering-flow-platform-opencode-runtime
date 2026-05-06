@@ -49,12 +49,13 @@ from .task_store import TaskStore
 from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_handler
 from .sessions_api import (
     clear_sessions_handler,
+    delete_message_from_here_handler,
     delete_session_handler,
+    edit_message_handler,
     get_session_handler,
     list_sessions_handler,
     rename_session_handler,
     session_chatlog_handler,
-    unsupported_message_mutation_handler,
 )
 from .settings import Settings
 from .state import build_state_health_snapshot, ensure_state_dirs
@@ -220,10 +221,8 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_post("/api/clear", clear_sessions_handler)
     app.router.add_get("/api/sessions/{session_id}/chatlog", session_chatlog_handler)
     app.router.add_post("/api/sessions/{session_id}/rename", rename_session_handler)
-    app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/edit", unsupported_message_mutation_handler)
-    app.router.add_post(
-        "/api/sessions/{session_id}/messages/{message_id}/delete-from-here", unsupported_message_mutation_handler
-    )
+    app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/edit", edit_message_handler)
+    app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/delete-from-here", delete_message_from_here_handler)
     app.router.add_get("/api/sessions/{session_id}", get_session_handler)
     app.router.add_delete("/api/sessions/{session_id}", delete_session_handler)
 

@@ -32,7 +32,9 @@ Portal -> adapter `0.0.0.0:8000` -> internal OpenCode `127.0.0.1:4096`.
 - `/root/.local/share/efp-compat`
 
 ## Portal-facing endpoints
-`/health`, `/actuator/health`, `/api/chat`, `/api/chat/stream`, `/api/events`, `/api/capabilities`, `/api/skills`, `/api/tasks/execute`, `/api/tasks/{task_id}`, `/api/tasks/{task_id}/cancel`, `/api/internal/runtime-profile/apply`, `/api/internal/runtime-profile/status`, `/api/sessions`, `/api/queue/status`, `/api/server-files`, `/api/permissions/{permission_id}/respond`.
+`/health`, `/actuator/health`, `/api/chat`, `/api/chat/stream`, `/api/events`, `/api/capabilities`, `/api/skills`, `/api/tasks/execute`, `/api/tasks/{task_id}`, `/api/tasks/{task_id}/cancel`, `/api/internal/runtime-profile/apply`, `/api/internal/runtime-profile/status`, `/api/sessions`, `/api/sessions/{session_id}/messages/{message_id}/delete-from-here`, `/api/sessions/{session_id}/messages/{message_id}/edit`, `/api/queue/status`, `/api/server-files`, `/api/permissions/{permission_id}/respond`.
+
+Message mutation keeps Portal `session_id` stable while the adapter may replace the internal OpenCode session id after fork/new-session mutation.
 
 ## Internal-only OpenCode server
 Portal only calls adapter `:8000`. OpenCode `:4096` must not be exposed.
