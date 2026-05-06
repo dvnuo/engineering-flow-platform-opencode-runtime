@@ -2,10 +2,12 @@ import asyncio
 import base64
 
 import pytest
+import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from efp_opencode_adapter.opencode_client import OpenCodeClient
+from efp_opencode_adapter.opencode_client import OpenCodeClientError
 from efp_opencode_adapter.settings import Settings
 
 
@@ -366,3 +368,28 @@ async def test_cancel_message_prefers_abort_session(monkeypatch):
     assert out["success"] is True
     assert calls == ["abort"]
     await server.close()
+
+
+@pytest.mark.asyncio
+async def test_request_json_wraps_transport_error_as_opencode_client_error():
+    class InjectedClientErrorSession:
+        def request(self, *args, **kwargs):
+            raise aiohttp.ClientError("connection refused")
+
+    client = OpenCodeClient(Settings.from_env(), session=InjectedClientErrorSession())  # type: ignore[arg-type]
+    with pytest.raises(OpenCodeClientError) as exc:
+        await client.list_messages("ses-1")
+    assert exc.value.status is None
+    assert "transport error" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_request_json_with_status_wraps_timeout_as_opencode_client_error():
+    class InjectedTimeoutSession:
+        def request(self, *args, **kwargs):
+            raise asyncio.TimeoutError()
+
+    client = OpenCodeClient(Settings.from_env(), session=InjectedTimeoutSession())  # type: ignore[arg-type]
+    with pytest.raises(OpenCodeClientError) as exc:
+        await client.abort_session("ses-1")
+    assert exc.value.status is None

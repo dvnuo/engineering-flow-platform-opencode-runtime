@@ -60,9 +60,15 @@ class OpenCodeClient:
                     return await resp.text()
 
         if self._session is not None:
-            return await _run(self._session)
+            try:
+                return await _run(self._session)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                raise OpenCodeClientError(f"{method} {path} transport error: {exc}", status=None, payload=None) from exc
         async with aiohttp.ClientSession() as session:
-            return await _run(session)
+            try:
+                return await _run(session)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                raise OpenCodeClientError(f"{method} {path} transport error: {exc}", status=None, payload=None) from exc
 
     async def _request_json_with_status(self, method: str, path: str, *, json: dict | None = None, expected_statuses: tuple[int, ...] = (200,), timeout_seconds: int = 30) -> tuple[int, Any]:
         async def _run(session: aiohttp.ClientSession) -> tuple[int, Any]:
@@ -81,9 +87,15 @@ class OpenCodeClient:
                     return resp.status, await resp.text()
 
         if self._session is not None:
-            return await _run(self._session)
+            try:
+                return await _run(self._session)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                raise OpenCodeClientError(f"{method} {path} transport error: {exc}", status=None, payload=None) from exc
         async with aiohttp.ClientSession() as session:
-            return await _run(session)
+            try:
+                return await _run(session)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                raise OpenCodeClientError(f"{method} {path} transport error: {exc}", status=None, payload=None) from exc
 
     async def _request(self, method: str, url: str, **kwargs):
         kwargs.setdefault("auth", self._auth())

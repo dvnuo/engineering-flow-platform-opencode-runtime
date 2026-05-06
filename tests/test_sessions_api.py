@@ -233,3 +233,55 @@ async def test_edit_resend_failure_returns_502_json(tmp_path, monkeypatch):
     assert body["error"] == "opencode_edit_resend_failed"
     assert "application/json" in res.headers.get("Content-Type", "")
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_from_here_raw_upstream_exception_returns_502_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    chat = await (await client.post("/api/chat", json={"message": "hello", "session_id": "s1"})).json()
+    record = app[SESSION_STORE_KEY].get("s1")
+    target_sid = record.opencode_session_id
+    original = fake.list_messages
+
+    async def boom(session_id):
+        if session_id == target_sid:
+            raise RuntimeError("network down")
+        return await original(session_id)
+
+    fake.list_messages = boom
+    res = await client.post(f"/api/sessions/s1/messages/{chat['user_message_id']}/delete-from-here", json={})
+    body = await res.json()
+    assert res.status == 502
+    assert "application/json" in res.headers.get("Content-Type", "")
+    assert body["error"] == "opencode_mutation_failed"
+    assert "network down" in body["detail"]
+    await client.close()
+
+
+class _RawResendFailClient(FakeOpenCodeClient):
+    async def send_message(self, *args, **kwargs):
+        parts = kwargs.get("parts") or []
+        text = parts[0].get("text", "") if parts and isinstance(parts[0], dict) else ""
+        if text == "edited":
+            raise RuntimeError("transport closed")
+        return await super().send_message(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_edit_raw_resend_exception_returns_502_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RawResendFailClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    chat = await (await client.post("/api/chat", json={"message": "hello", "session_id": "s1"})).json()
+    res = await client.post(f"/api/sessions/s1/messages/{chat['user_message_id']}/edit", json={"content": "edited"})
+    body = await res.json()
+    assert res.status == 502
+    assert body["error"] == "opencode_edit_resend_failed"
+    assert "transport closed" in body["detail"]
+    await client.close()

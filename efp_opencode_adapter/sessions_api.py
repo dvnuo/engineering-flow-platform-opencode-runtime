@@ -28,6 +28,10 @@ def _opencode_detail(exc: OpenCodeClientError) -> str:
     return str(exc)
 
 
+def _unexpected_upstream_detail(exc: Exception) -> str:
+    return str(exc) or exc.__class__.__name__
+
+
 async def _read_json_object(request: web.Request, *, error_prefix: str = "payload") -> dict[str, Any]:
     try:
         body = await request.json()
@@ -265,6 +269,8 @@ async def _delete_from_here(*, store, client, portal_session_id: str, message_id
         if exc.status == 404:
             raise _json_not_found("opencode_session_not_found", detail=_opencode_detail(exc))
         raise _json_bad_gateway("opencode_mutation_failed", detail=_opencode_detail(exc))
+    except Exception as exc:
+        raise _json_bad_gateway("opencode_mutation_failed", detail=_unexpected_upstream_detail(exc))
     idx = _find_message_index(messages, message_id)
     if idx < 0:
         raise _json_not_found("message_not_found")
@@ -281,16 +287,22 @@ async def _delete_from_here(*, store, client, portal_session_id: str, message_id
                     forked = await client.fork_session(old_opencode_session_id, previous_message_id)
                 except OpenCodeClientError as retry_exc:
                     raise _json_bad_gateway("opencode_mutation_failed", detail=_opencode_detail(retry_exc))
+                except Exception as retry_exc:
+                    raise _json_bad_gateway("opencode_mutation_failed", detail=_unexpected_upstream_detail(retry_exc))
             elif exc.status in {404, 405} and allow_revert_fallback:
                 try:
                     await client.revert_message(old_opencode_session_id, message_id)
                 except OpenCodeClientError as revert_exc:
                     raise _json_bad_gateway("opencode_mutation_failed", detail=_opencode_detail(revert_exc))
+                except Exception as revert_exc:
+                    raise _json_bad_gateway("opencode_mutation_failed", detail=_unexpected_upstream_detail(revert_exc))
                 strategy = "revert_fallback"
                 new_opencode_session_id = old_opencode_session_id
                 forked = {}
             else:
                 raise _json_bad_gateway("opencode_mutation_failed", detail=_opencode_detail(exc))
+        except Exception as exc:
+            raise _json_bad_gateway("opencode_mutation_failed", detail=_unexpected_upstream_detail(exc))
         if not new_opencode_session_id:
             new_opencode_session_id = _extract_opencode_session_id(forked)
     else:
@@ -298,6 +310,8 @@ async def _delete_from_here(*, store, client, portal_session_id: str, message_id
             created = await client.create_session(title=record.title)
         except OpenCodeClientError as exc:
             raise _json_bad_gateway("opencode_mutation_failed", detail=_opencode_detail(exc))
+        except Exception as exc:
+            raise _json_bad_gateway("opencode_mutation_failed", detail=_unexpected_upstream_detail(exc))
         new_opencode_session_id = _extract_opencode_session_id(created)
         strategy = "new_empty_session"
     if not new_opencode_session_id:
@@ -307,6 +321,8 @@ async def _delete_from_here(*, store, client, portal_session_id: str, message_id
     except OpenCodeClientError as exc:
         detail = f"mutated_session_unreadable: {_opencode_detail(exc)}" if exc.status == 404 else _opencode_detail(exc)
         raise _json_bad_gateway("opencode_mutation_failed", detail=detail)
+    except Exception as exc:
+        raise _json_bad_gateway("opencode_mutation_failed", detail=f"mutated_session_unreadable: {_unexpected_upstream_detail(exc)}")
     updated_record = store.replace_opencode_session_after_mutation(portal_session_id, new_opencode_session_id, message_count=len(new_messages), last_message=_last_message_text(new_messages))
     metadata = {"strategy": strategy, "deleted_from_message_id": message_id, "previous_message_id": previous_message_id or "", "old_opencode_session_id": old_opencode_session_id, "opencode_session_id": new_opencode_session_id}
     return updated_record, new_messages, metadata
@@ -350,6 +366,8 @@ async def edit_message_handler(request: web.Request) -> web.Response:
         if exc.status == 404:
             raise _json_not_found("opencode_session_not_found", detail=_opencode_detail(exc))
         raise _json_bad_gateway("opencode_edit_failed", detail=_opencode_detail(exc))
+    except Exception as exc:
+        raise _json_bad_gateway("opencode_edit_failed", detail=_unexpected_upstream_detail(exc))
     idx = _find_message_index(old_messages, mid)
     if idx < 0:
         raise _json_not_found("message_not_found")
@@ -360,14 +378,20 @@ async def edit_message_handler(request: web.Request) -> web.Response:
         before_messages = await client.list_messages(updated_record.opencode_session_id)
     except OpenCodeClientError as exc:
         raise _json_bad_gateway("opencode_edit_failed", detail=_opencode_detail(exc), metadata=metadata)
+    except Exception as exc:
+        raise _json_bad_gateway("opencode_edit_failed", detail=_unexpected_upstream_detail(exc), metadata=metadata)
     try:
         response_payload = await client.send_message(updated_record.opencode_session_id, parts=[{"type": "text", "text": content}], model=body.get("model") or updated_record.model, agent=body.get("agent") or updated_record.agent, system=body.get("system"))
     except OpenCodeClientError as exc:
         raise _json_bad_gateway("opencode_edit_resend_failed", detail=_opencode_detail(exc), metadata=metadata)
+    except Exception as exc:
+        raise _json_bad_gateway("opencode_edit_resend_failed", detail=_unexpected_upstream_detail(exc), metadata=metadata)
     try:
         after_messages = await client.list_messages(updated_record.opencode_session_id)
     except OpenCodeClientError as exc:
         raise _json_bad_gateway("opencode_edit_failed", detail=_opencode_detail(exc), metadata=metadata)
+    except Exception as exc:
+        raise _json_bad_gateway("opencode_edit_failed", detail=_unexpected_upstream_detail(exc), metadata=metadata)
     before_ids = {_message_id(message) for message in before_messages}
     replacement_user_message_id = ""
     assistant_message_id = ""
