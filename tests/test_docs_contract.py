@@ -15,7 +15,7 @@ def test_docs_contract_sections_and_keywords():
         '## Failure modes and expected status',
     ]:
         assert section in runtime
-    for token in [':8000', ':4096', 'Portal only calls adapter', 'must not be exposed', '/home/opencode/.local/share/opencode', '/home/opencode/.local/share/efp-compat', 'runtime-only', '/api/tasks/execute', '/api/capabilities']:
+    for token in [':8000', ':4096', 'Portal only calls adapter', 'must not be exposed', '/root/.local/share/opencode', '/root/.local/share/efp-compat', 'runtime-only', '/api/tasks/execute', '/api/capabilities']:
         assert token in runtime
 
     obs = _t('docs/OBSERVABILITY.md')

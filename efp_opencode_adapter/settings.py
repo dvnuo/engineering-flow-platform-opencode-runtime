@@ -37,11 +37,11 @@ class Settings:
     def from_env(cls, opencode_url: str | None = None) -> "Settings":
         return cls(
             opencode_url=opencode_url or os.getenv("EFP_OPENCODE_URL", "http://127.0.0.1:4096"),
-            adapter_state_dir=Path(os.getenv("EFP_ADAPTER_STATE_DIR", "/home/opencode/.local/share/efp-compat")),
+            adapter_state_dir=Path(os.getenv("EFP_ADAPTER_STATE_DIR", "/root/.local/share/efp-compat")),
             workspace_dir=Path(os.getenv("EFP_WORKSPACE_DIR", "/workspace")),
             skills_dir=Path(os.getenv("EFP_SKILLS_DIR", "/app/skills")),
             tools_dir=Path(os.getenv("EFP_TOOLS_DIR", "/app/tools")),
-            opencode_data_dir=Path(os.getenv("OPENCODE_DATA_DIR", "/home/opencode/.local/share/opencode")),
+            opencode_data_dir=Path(os.getenv("OPENCODE_DATA_DIR", "/root/.local/share/opencode")),
             opencode_config_path=Path(os.getenv("OPENCODE_CONFIG", "/workspace/.opencode/opencode.json")),
             opencode_version=os.getenv("OPENCODE_VERSION", "1.14.29"),
             opencode_server_username=os.getenv("OPENCODE_SERVER_USERNAME", "opencode"),

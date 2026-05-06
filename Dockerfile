@@ -11,6 +11,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PATH="/opt/venv/bin:/usr/local/bin:${PATH}"
 ENV NODE_PATH=/usr/local/lib/node_modules
 ENV NPM_CONFIG_PREFIX=/usr/local
+ENV HOME=/root
 
 RUN set -eux; \
   apt-get update; \
@@ -46,9 +47,6 @@ RUN set -eux; \
   npm install -g "opencode-ai@${OPENCODE_VERSION}" "@opencode-ai/plugin@${OPENCODE_VERSION}"; \
   opencode --version | grep -F "${OPENCODE_VERSION}"
 
-RUN groupadd --gid 10001 opencode \
-  && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash opencode
-
 WORKDIR /app/runtime
 COPY pyproject.toml README.md package*.json ./
 COPY efp_opencode_adapter ./efp_opencode_adapter
@@ -56,25 +54,23 @@ RUN python3 -m venv /opt/venv \
   && /opt/venv/bin/pip install --upgrade pip \
   && /opt/venv/bin/pip install -e .
 
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY entrypoint.sh /tmp/entrypoint.sh
 COPY scripts/smoke.sh /app/runtime/scripts/smoke.sh
 
-RUN chmod +x /usr/local/bin/entrypoint.sh /app/runtime/scripts/smoke.sh \
+RUN sed -i 's/\r$//' /tmp/entrypoint.sh /app/runtime/scripts/smoke.sh \
+  && install -o root -g root -m 0755 /tmp/entrypoint.sh /usr/local/bin/entrypoint.sh \
+  && chmod 0755 /app/runtime/scripts/smoke.sh \
+  && rm -f /tmp/entrypoint.sh \
   && mkdir -p \
     /workspace/.opencode/skills \
     /workspace/.opencode/tools \
     /workspace/.opencode/agents \
     /app/skills \
     /app/tools \
-    /home/opencode/.local/share/opencode \
-    /home/opencode/.local/share/efp-compat \
-  && chown -R opencode:opencode \
-    /workspace \
-    /app/skills \
-    /app/tools \
-    /home/opencode
+    /root/.local/share/opencode \
+    /root/.local/share/efp-compat
 
 WORKDIR /workspace
-USER opencode
+USER root
 EXPOSE 8000
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

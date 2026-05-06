@@ -27,8 +27,8 @@ Portal -> adapter `0.0.0.0:8000` -> internal OpenCode `127.0.0.1:4096`.
 - `/workspace`
 - `/workspace/.opencode/skills`
 - `/workspace/.opencode/tools`
-- `/home/opencode/.local/share/opencode`
-- `/home/opencode/.local/share/efp-compat`
+- `/root/.local/share/opencode`
+- `/root/.local/share/efp-compat`
 
 ## Portal-facing endpoints
 `/health`, `/actuator/health`, `/api/chat`, `/api/chat/stream`, `/api/events`, `/api/capabilities`, `/api/skills`, `/api/tasks/execute`, `/api/tasks/{task_id}`, `/api/tasks/{task_id}/cancel`, `/api/internal/runtime-profile/apply`, `/api/internal/runtime-profile/status`, `/api/sessions`, `/api/queue/status`, `/api/server-files`, `/api/permissions/{permission_id}/respond`.
@@ -43,7 +43,7 @@ EFP skill names are normalized for OpenCode and persisted in `skills-index.json`
 Legacy tool names map to `efp_*` OpenCode wrapper names and are persisted in `tools-index.json`.
 
 ## State persistence contract
-`/home/opencode/.local/share/opencode` and `/home/opencode/.local/share/efp-compat` should be persistent in production. Adapter state in `EFP_ADAPTER_STATE_DIR` must persist sessions/tasks/profile overlays.
+`/root/.local/share/opencode` and `/root/.local/share/efp-compat` should be persistent in production. Adapter state in `EFP_ADAPTER_STATE_DIR` must persist sessions/tasks/profile overlays.
 
 ## Runtime profile apply/status contract
 `/api/internal/runtime-profile/apply` and `/api/internal/runtime-profile/status` provide apply status, revision/runtime_profile_id propagation, and pending-restart visibility.
