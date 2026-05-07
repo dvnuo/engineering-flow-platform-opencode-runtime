@@ -18,8 +18,6 @@ Portal -> adapter `0.0.0.0:8000` -> internal OpenCode `127.0.0.1:4096`.
 - `EFP_ADAPTER_STATE_DIR`
 - `OPENCODE_DATA_DIR`
 - `OPENCODE_CONFIG`
-- `OPENCODE_SERVER_USERNAME`
-- `OPENCODE_SERVER_PASSWORD`
 - `PORTAL_AGENT_ID`
 
 `OPENCODE_VERSION` may be used as Docker build/config metadata, but it is not required by Portal and must not block runtime startup.
@@ -38,6 +36,7 @@ Message mutation keeps Portal `session_id` stable while the adapter may replace 
 
 ## Internal-only OpenCode server
 Portal only calls adapter `:8000`. OpenCode `:4096` must not be exposed.
+The internal OpenCode server is intentionally reachable only over loopback (`127.0.0.1`) inside the runtime container/pod; this localhost network binding is the security boundary.
 
 ## Skills asset mapping
 EFP skill names are normalized for OpenCode and persisted in `skills-index.json`.
