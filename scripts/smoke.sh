@@ -83,6 +83,50 @@ state=Path(a.state_dir); state.mkdir(parents=True, exist_ok=True)
 PY
 chmod +x "${TOOLS_DIR}/adapters/opencode/generate_tools.py"
 
+mkdir -p "${WORKSPACE_DIR}/.opencode"
+cat > "${WORKSPACE_DIR}/.opencode/package-lock.json" <<'LOCK'
+{
+  "name": "stale-opencode-workspace",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "dependencies": {}
+    }
+  }
+}
+LOCK
+
+assert_node_tool_dependency_resolution() {
+  docker exec "${NAME}" node - <<'NODE'
+const { createRequire } = require("module")
+const probe = "/workspace/.opencode/tools/efp_smoke_tool.ts"
+const req = createRequire(probe)
+const plugin = req.resolve("@opencode-ai/plugin")
+const pluginReq = createRequire(plugin)
+const zod = pluginReq.resolve("zod")
+const effect = pluginReq.resolve("effect")
+if (!plugin.startsWith("/workspace/.opencode/node_modules/")) {
+  throw new Error(`plugin resolved outside workspace .opencode node_modules: ${plugin}`)
+}
+console.log(JSON.stringify({ plugin, zod, effect }))
+NODE
+}
+
+assert_opencode_tool_registry() {
+  docker exec "${NAME}" sh -lc '
+    curl -fsS -u "${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}" \
+      http://127.0.0.1:4096/experimental/tool/ids \
+    | python -c "
+import json, sys
+payload=json.load(sys.stdin)
+ids = payload if isinstance(payload, list) else payload.get(\"ids\") or payload.get(\"tools\") or []
+if \"efp_smoke_tool\" not in ids:
+    raise SystemExit(f\"efp_smoke_tool not found in {ids!r}\")
+"
+  '
+}
+
 run_runtime_contract_tests() {
   if [[ "${RUN_RUNTIME_CONTRACT_TESTS}" != "1" ]]; then
     return 0
@@ -145,23 +189,13 @@ curl -fsS http://localhost:8000/api/capabilities | jq -e '.capabilities[] | sele
 curl -fsS http://localhost:8000/api/capabilities | jq -e '.capabilities[] | select(.name == "efp_smoke_tool")' >/dev/null
 run_runtime_contract_tests
 
-docker exec "${NAME}" sh -lc '
-  curl -fsS -u "${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}" \
-    http://127.0.0.1:4096/experimental/tool/ids \
-  | python -c "
-import json, sys
-payload=json.load(sys.stdin)
-ids = payload if isinstance(payload, list) else payload.get("ids") or payload.get("tools") or []
-if "efp_smoke_tool" not in ids:
-    raise SystemExit(f"efp_smoke_tool not found in {ids!r}")
-"
-'
-
 docker exec "${NAME}" sh -lc 'echo adapter-persist > /root/.local/share/efp-compat/persistence-sentinel.txt'
 docker exec "${NAME}" sh -lc 'echo opencode-persist > /root/.local/share/opencode/persistence-sentinel.txt'
 docker restart "${NAME}" >/dev/null
 wait_health
 assert_health_state
+assert_node_tool_dependency_resolution
+assert_opencode_tool_registry
 docker exec "${NAME}" test -f /root/.local/share/efp-compat/persistence-sentinel.txt
 docker exec "${NAME}" test -f /root/.local/share/opencode/persistence-sentinel.txt
 docker exec "${NAME}" test -f /workspace/.opencode/skills/smoke-skill/SKILL.md

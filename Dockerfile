@@ -2,7 +2,7 @@ FROM ubuntu:24.04
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ARG OPENCODE_VERSION=1.14.29
+ARG OPENCODE_VERSION=1.14.39
 ARG NODE_MAJOR=22
 ARG DEBIAN_FRONTEND=noninteractive
 

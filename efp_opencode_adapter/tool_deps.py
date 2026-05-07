@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,99 @@ def _read_json_object(path: Path) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _ensure_lock_declares_plugin(config_dir: Path, vendored_dir: Path, plugin_version: str) -> None:
+    src_lock = vendored_dir / "package-lock.json"
+    dst_lock = config_dir / "package-lock.json"
+
+    lock_payload: dict[str, Any] | None = None
+    if dst_lock.exists():
+        try:
+            loaded = json.loads(dst_lock.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                lock_payload = loaded
+        except json.JSONDecodeError:
+            lock_payload = None
+
+    if lock_payload is None:
+        if src_lock.exists():
+            shutil.copy2(src_lock, dst_lock)
+            lock_payload = _read_json_object(dst_lock)
+        else:
+            lock_payload = {
+                "name": "efp-opencode-workspace-tools",
+                "lockfileVersion": 3,
+                "requires": True,
+                "packages": {"": {"dependencies": {}}},
+            }
+
+    packages = lock_payload.get("packages")
+    if not isinstance(packages, dict):
+        packages = {}
+    root_pkg = packages.get("")
+    if not isinstance(root_pkg, dict):
+        root_pkg = {}
+    deps = root_pkg.get("dependencies")
+    if not isinstance(deps, dict):
+        deps = {}
+    deps[PLUGIN_NAME] = plugin_version
+    root_pkg["dependencies"] = deps
+    packages[""] = root_pkg
+    lock_payload["packages"] = packages
+
+    lock_payload.setdefault("name", "efp-opencode-workspace-tools")
+    lock_payload.setdefault("lockfileVersion", 3)
+    lock_payload.setdefault("requires", True)
+
+    _write_json(dst_lock, lock_payload)
+
+
+def verify_tool_dependency_resolution(config_dir: Path) -> dict[str, str]:
+    probe_file = config_dir / "tools" / "__resolve_probe.ts"
+    script = """
+const { createRequire } = require("module")
+const probeFile = process.env.EFP_OPENCODE_TOOL_RESOLVE_PROBE
+const req = createRequire(probeFile)
+const pluginPath = req.resolve("@opencode-ai/plugin")
+const pluginReq = createRequire(pluginPath)
+const zodPath = pluginReq.resolve("zod")
+const effectPath = pluginReq.resolve("effect")
+console.log(JSON.stringify({ plugin: pluginPath, zod: zodPath, effect: effectPath }))
+"""
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env={**os.environ, "EFP_OPENCODE_TOOL_RESOLVE_PROBE": str(probe_file)},
+        )
+    except Exception as exc:
+        raise RuntimeError("OpenCode custom tool dependency resolution failed") from exc
+
+    if result.returncode != 0:
+        raise RuntimeError("OpenCode custom tool dependency resolution failed")
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("OpenCode custom tool dependency resolution failed") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("OpenCode custom tool dependency resolution failed")
+
+    plugin_path = str(payload.get("plugin") or "")
+    expected_prefix = str(config_dir / "node_modules") + os.sep
+    if not plugin_path.startswith(expected_prefix):
+        raise RuntimeError("OpenCode custom tool dependency resolution failed")
+
+    return {
+        "resolved_plugin": plugin_path,
+        "resolved_zod": str(payload.get("zod") or ""),
+        "resolved_effect": str(payload.get("effect") or ""),
+    }
 
 
 def ensure_tool_deps(
@@ -70,17 +164,15 @@ def ensure_tool_deps(
     package_json["dependencies"] = deps
 
     _write_json(package_json_path, package_json)
-
-    src_lock = vendored_dir / "package-lock.json"
-    dst_lock = config_dir / "package-lock.json"
-    if src_lock.exists() and not dst_lock.exists():
-        shutil.copy2(src_lock, dst_lock)
+    _ensure_lock_declares_plugin(config_dir, vendored_dir, plugin_version)
+    resolution = verify_tool_dependency_resolution(config_dir)
 
     return {
         "status": "ok",
         "config_dir": str(config_dir),
         "local_plugin_package": str(local_plugin_package),
         "plugin_version": plugin_version,
+        **resolution,
     }
 
 

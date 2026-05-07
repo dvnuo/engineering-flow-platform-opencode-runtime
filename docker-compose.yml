@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        OPENCODE_VERSION: "1.14.29"
+        OPENCODE_VERSION: "1.14.39"
     image: efp-opencode-runtime:test
     ports:
       - "8000:8000"

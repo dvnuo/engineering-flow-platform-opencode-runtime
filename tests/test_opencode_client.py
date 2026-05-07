@@ -20,7 +20,7 @@ async def test_health_and_wait_ready(monkeypatch):
     app = web.Application()
 
     async def h(_):
-        return web.json_response({"healthy": True, "version": "1.14.29"})
+        return web.json_response({"healthy": True, "version": "1.14.39"})
 
     app.router.add_get("/global/health", h)
     server = TestServer(app)
@@ -31,7 +31,7 @@ async def test_health_and_wait_ready(monkeypatch):
     client = OpenCodeClient(settings)
     health = await client.health()
     assert health["healthy"] is True
-    assert health["version"] == "1.14.29"
+    assert health["version"] == "1.14.39"
     await client.wait_until_ready(timeout_seconds=1)
     await server.close()
 
@@ -59,7 +59,7 @@ async def test_wait_ready_ignores_version_mismatch(monkeypatch):
     await server.start_server()
 
     monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
-    monkeypatch.setenv("OPENCODE_VERSION", "1.14.29")
+    monkeypatch.setenv("OPENCODE_VERSION", "1.14.39")
     settings = Settings.from_env()
     client = OpenCodeClient(settings)
     await client.wait_until_ready(timeout_seconds=1)
@@ -74,7 +74,7 @@ async def test_health_uses_basic_auth_when_password_set(monkeypatch):
     async def h(request: web.Request):
         if request.headers.get("Authorization") != expected:
             return web.json_response({"healthy": False}, status=401)
-        return web.json_response({"healthy": True, "version": "1.14.29"})
+        return web.json_response({"healthy": True, "version": "1.14.39"})
 
     app.router.add_get("/global/health", h)
     server = TestServer(app)
@@ -87,7 +87,7 @@ async def test_health_uses_basic_auth_when_password_set(monkeypatch):
     client = OpenCodeClient(Settings.from_env())
     health = await client.health()
     assert health["healthy"] is True
-    assert health["version"] == "1.14.29"
+    assert health["version"] == "1.14.39"
     await server.close()
 
 
@@ -392,3 +392,48 @@ async def test_request_json_with_status_wraps_timeout_as_opencode_client_error()
     with pytest.raises(OpenCodeClientError) as exc:
         await client.abort_session("ses-1")
     assert exc.value.status is None
+
+
+@pytest.mark.asyncio
+async def test_list_tool_ids_handles_list_response(monkeypatch):
+    client = OpenCodeClient(Settings.from_env())
+
+    async def fake_request_json(*args, **kwargs):
+        return ["efp_smoke_tool"]
+
+    monkeypatch.setattr(client, "_request_json", fake_request_json)
+    assert await client.list_tool_ids() == ["efp_smoke_tool"]
+
+
+@pytest.mark.asyncio
+async def test_list_tool_ids_handles_ids_object_response(monkeypatch):
+    client = OpenCodeClient(Settings.from_env())
+
+    async def fake_request_json(*args, **kwargs):
+        return {"ids": ["efp_smoke_tool"]}
+
+    monkeypatch.setattr(client, "_request_json", fake_request_json)
+    assert await client.list_tool_ids() == ["efp_smoke_tool"]
+
+
+@pytest.mark.asyncio
+async def test_list_tool_ids_handles_tools_object_response(monkeypatch):
+    client = OpenCodeClient(Settings.from_env())
+
+    async def fake_request_json(*args, **kwargs):
+        return {"tools": ["efp_smoke_tool"]}
+
+    monkeypatch.setattr(client, "_request_json", fake_request_json)
+    assert await client.list_tool_ids() == ["efp_smoke_tool"]
+
+
+@pytest.mark.asyncio
+async def test_list_tool_ids_rejects_invalid_shape(monkeypatch):
+    client = OpenCodeClient(Settings.from_env())
+
+    async def fake_request_json(*args, **kwargs):
+        return {"oops": True}
+
+    monkeypatch.setattr(client, "_request_json", fake_request_json)
+    with pytest.raises(OpenCodeClientError, match="unexpected tool ids response shape"):
+        await client.list_tool_ids()

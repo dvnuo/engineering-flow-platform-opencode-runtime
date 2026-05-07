@@ -82,3 +82,21 @@ def test_smoke_script_uses_root_state_and_asserts_root_user():
     assert "/root/.local/share/efp-compat" in script
     assert "/home/opencode" not in script
     assert "id -u" in script
+
+
+def test_smoke_script_validates_node_resolution_helpers():
+    script = _script()
+    assert "assert_node_tool_dependency_resolution" in script
+    assert "createRequire" in script
+    assert 'req.resolve("@opencode-ai/plugin")' in script
+    assert 'pluginReq.resolve("zod")' in script
+    assert 'pluginReq.resolve("effect")' in script
+
+
+def test_smoke_script_registry_helper_is_reused_and_stale_lock_checked():
+    script = _script()
+    assert "assert_opencode_tool_registry" in script
+    assert script.count("assert_opencode_tool_registry") >= 2
+    assert "stale-opencode-workspace" in script
+    assert "@opencode-ai/plugin" in script
+    assert "package-lock.json" in script

@@ -55,6 +55,10 @@ trap cleanup SIGTERM SIGINT EXIT
 
 python -m efp_opencode_adapter.health --wait --timeout "${EFP_OPENCODE_READY_TIMEOUT_SECONDS:-60}"
 
+echo "Checking OpenCode ToolRegistry readiness..."
+python -m efp_opencode_adapter.tool_registry_check \
+  --timeout "${EFP_OPENCODE_TOOL_REGISTRY_TIMEOUT_SECONDS:-30}"
+
 echo "Starting efp-opencode-adapter on 0.0.0.0:8000..."
 python -m efp_opencode_adapter.server --host 0.0.0.0 --port 8000 --opencode-url "${EFP_OPENCODE_URL}" &
 ADAPTER_PID=$!

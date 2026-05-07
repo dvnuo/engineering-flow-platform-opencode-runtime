@@ -173,6 +173,24 @@ class OpenCodeClient:
         except Exception:
             return {"success": False, "tools": []}
 
+    async def list_tool_ids(self, timeout_seconds: int = 30) -> list[str]:
+        data = await self._request_json(
+            "GET",
+            "/experimental/tool/ids",
+            expected_statuses=(200,),
+            timeout_seconds=timeout_seconds,
+        )
+        if isinstance(data, list) and all(isinstance(item, str) for item in data):
+            return data
+        if isinstance(data, dict):
+            ids = data.get("ids")
+            if isinstance(ids, list) and all(isinstance(item, str) for item in ids):
+                return ids
+            tools = data.get("tools")
+            if isinstance(tools, list) and all(isinstance(item, str) for item in tools):
+                return tools
+        raise OpenCodeClientError("unexpected tool ids response shape", payload=data)
+
     async def create_session(self, title: str | None = None) -> dict:
         return await self._request_json("POST", "/session", json={"title": title} if title else {}, expected_statuses=(200, 201))
 

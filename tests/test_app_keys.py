@@ -72,7 +72,7 @@ def test_adapter_does_not_wildcard_import_app_keys():
 
 class IdleEventStreamClient:
     async def health(self):
-        return {'healthy': True, 'version': '1.14.29'}
+        return {'healthy': True, 'version': '1.14.39'}
 
     async def event_stream(self, global_events=True, timeout_seconds=None):
         while True:

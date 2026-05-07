@@ -5,6 +5,7 @@ def test_dockerfile_uses_ubuntu_base_not_node_base():
     root = Path(__file__).resolve().parents[1]
     text = (root / "Dockerfile").read_text(encoding="utf-8")
     assert text.startswith("FROM ubuntu:24.04")
+    assert "ARG OPENCODE_VERSION=1.14.39" in text
     assert "FROM node:" not in text
     assert "FROM node@" not in text
 
@@ -51,3 +52,13 @@ def test_dockerfile_runs_as_root_with_root_state_dirs():
     assert "/root/.local/share/opencode" in text
     assert "/root/.local/share/efp-compat" in text
     assert "/home/opencode" not in text
+
+
+def test_entrypoint_checks_tool_registry_after_health_before_server():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "entrypoint.sh").read_text(encoding="utf-8")
+    assert "python -m efp_opencode_adapter.health --wait" in text
+    assert "python -m efp_opencode_adapter.tool_registry_check" in text
+    assert "python -m efp_opencode_adapter.server" in text
+    assert text.index("python -m efp_opencode_adapter.health --wait") < text.index("python -m efp_opencode_adapter.tool_registry_check")
+    assert text.index("python -m efp_opencode_adapter.tool_registry_check") < text.index("python -m efp_opencode_adapter.server")
