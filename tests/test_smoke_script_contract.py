@@ -123,3 +123,13 @@ def test_smoke_script_asserts_stale_lock_repaired():
     assert "stale-opencode-workspace" in script
     assert "assert_workspace_package_lock_declares_plugin" in script
     assert '.packages[""].dependencies["@opencode-ai/plugin"]' in script or "@opencode-ai/plugin" in script
+
+
+def test_smoke_script_asserts_plugin_zod_effect_realpaths_are_workspace_local():
+    script = _script()
+    assert 'fs.realpathSync' in script
+    assert 'assertLocal("plugin", plugin)' in script
+    assert 'assertLocal("zod", zod)' in script
+    assert 'assertLocal("effect", effect)' in script
+    assert '/workspace/.opencode/node_modules/' in script
+    assert 'resolved outside workspace .opencode node_modules' in script

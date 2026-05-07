@@ -99,17 +99,38 @@ LOCK
 
 assert_node_tool_dependency_resolution() {
   docker exec "${NAME}" node - <<'NODE'
+const fs = require("fs")
 const { createRequire } = require("module")
+
+const localPrefix = "/workspace/.opencode/node_modules/"
 const probe = "/workspace/.opencode/tools/efp_smoke_tool.ts"
 const req = createRequire(probe)
+
 const plugin = req.resolve("@opencode-ai/plugin")
 const pluginReq = createRequire(plugin)
 const zod = pluginReq.resolve("zod")
 const effect = pluginReq.resolve("effect")
-if (!plugin.startsWith("/workspace/.opencode/node_modules/")) {
-  throw new Error(`plugin resolved outside workspace .opencode node_modules: ${plugin}`)
+
+function assertLocal(label, value) {
+  const real = fs.realpathSync(value)
+  if (!real.startsWith(localPrefix)) {
+    throw new Error(`${label} resolved outside workspace .opencode node_modules: ${value} -> ${real}`)
+  }
+  return real
 }
-console.log(JSON.stringify({ plugin, zod, effect }))
+
+const realPlugin = assertLocal("plugin", plugin)
+const realZod = assertLocal("zod", zod)
+const realEffect = assertLocal("effect", effect)
+
+console.log(JSON.stringify({
+  plugin,
+  zod,
+  effect,
+  realPlugin,
+  realZod,
+  realEffect
+}))
 NODE
 }
 

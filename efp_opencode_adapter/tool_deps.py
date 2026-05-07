@@ -169,6 +169,12 @@ def ensure_tool_deps(
     config_dir.mkdir(parents=True, exist_ok=True)
     dst_node_modules = config_dir / "node_modules"
     dst_node_modules.mkdir(parents=True, exist_ok=True)
+
+    opencode_scope = dst_node_modules / "@opencode-ai"
+    if opencode_scope.is_symlink() or opencode_scope.is_file():
+        opencode_scope.unlink(missing_ok=True)
+    opencode_scope.mkdir(parents=True, exist_ok=True)
+
     for managed_path in _managed_dependency_paths(dst_node_modules):
         _remove_managed_dependency_path(managed_path)
 

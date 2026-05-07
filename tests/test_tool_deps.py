@@ -225,3 +225,29 @@ def test_ensure_tool_deps_replaces_previous_plugin_symlink(tmp_path):
     assert ".opencode/node_modules/@opencode-ai/plugin" in result["resolved_plugin"]
     global_payload = json.loads((global_plugin / "package.json").read_text(encoding="utf-8"))
     assert global_payload["version"] == "old"
+
+
+def test_ensure_tool_deps_replaces_previous_opencode_scope_symlink(tmp_path):
+    workspace = tmp_path / "workspace"
+    vendored = tmp_path / "vendored"
+    _write_vendored_plugin(vendored)
+
+    global_scope = tmp_path / "global-scope" / "@opencode-ai"
+    (global_scope / "plugin").mkdir(parents=True, exist_ok=True)
+    (global_scope / "plugin/package.json").write_text(
+        json.dumps({"name": "@opencode-ai/plugin", "version": "old"}),
+        encoding="utf-8",
+    )
+
+    workspace_scope = workspace / ".opencode/node_modules/@opencode-ai"
+    workspace_scope.parent.mkdir(parents=True, exist_ok=True)
+    workspace_scope.symlink_to(global_scope, target_is_directory=True)
+
+    result = ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
+
+    assert not workspace_scope.is_symlink()
+    assert (workspace_scope / "plugin/package.json").exists()
+    assert ".opencode/node_modules/@opencode-ai/plugin" in result["resolved_plugin"]
+
+    global_payload = json.loads((global_scope / "plugin/package.json").read_text(encoding="utf-8"))
+    assert global_payload["version"] == "old"
