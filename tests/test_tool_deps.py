@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from efp_opencode_adapter.tool_deps import ensure_tool_deps
+from efp_opencode_adapter.tool_deps import ensure_tool_deps, verify_tool_dependency_resolution
 
 
 def _write_vendored_plugin(vendored_dir, version="1.14.39"):
@@ -318,3 +318,52 @@ def test_ensure_tool_deps_preserves_unrelated_existing_bin_entry(tmp_path):
 
     assert custom_bin.exists()
     assert (workspace / ".opencode/node_modules/.bin/node-which").is_symlink()
+
+
+def test_ensure_tool_deps_replaces_previous_node_modules_root_symlink(tmp_path):
+    workspace = tmp_path / "workspace"
+    vendored = tmp_path / "vendored"
+    _write_vendored_plugin(vendored)
+    _write_vendored_bin_symlink(vendored)
+
+    global_node_modules = tmp_path / "global" / "node_modules"
+    global_node_modules.mkdir(parents=True, exist_ok=True)
+
+    old_plugin_pkg = global_node_modules / "@opencode-ai" / "plugin" / "package.json"
+    old_plugin_pkg.parent.mkdir(parents=True, exist_ok=True)
+    old_plugin_pkg.write_text(json.dumps({"name": "@opencode-ai/plugin", "version": "old"}), encoding="utf-8")
+
+    workspace_node_modules = workspace / ".opencode" / "node_modules"
+    workspace_node_modules.parent.mkdir(parents=True, exist_ok=True)
+    workspace_node_modules.symlink_to(global_node_modules, target_is_directory=True)
+
+    result = ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
+
+    assert not workspace_node_modules.is_symlink()
+    assert workspace_node_modules.is_dir()
+    assert (workspace_node_modules / "@opencode-ai/plugin/package.json").exists()
+    assert (workspace_node_modules / "zod/package.json").exists()
+    assert (workspace_node_modules / "effect/package.json").exists()
+
+    assert ".opencode/node_modules/@opencode-ai/plugin" in result["resolved_plugin"]
+    assert ".opencode/node_modules/zod" in result["resolved_zod"]
+    assert ".opencode/node_modules/effect" in result["resolved_effect"]
+
+    global_payload = json.loads(old_plugin_pkg.read_text(encoding="utf-8"))
+    assert global_payload["version"] == "old"
+
+    local_bin = workspace_node_modules / ".bin" / "node-which"
+    assert local_bin.is_symlink()
+    assert os.readlink(local_bin) == "../which/bin/node-which"
+
+
+def test_verify_tool_dependency_resolution_rejects_node_modules_root_symlink(tmp_path):
+    config_dir = tmp_path / "workspace" / ".opencode"
+    external = tmp_path / "global" / "node_modules"
+    _write_vendored_plugin(external.parent)
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "node_modules").symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="OpenCode custom tool dependency resolution failed"):
+        verify_tool_dependency_resolution(config_dir)

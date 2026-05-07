@@ -174,8 +174,22 @@ console.log(JSON.stringify({ plugin: pluginPath, zod: zodPath, effect: effectPat
     if not isinstance(payload, dict):
         raise RuntimeError("OpenCode custom tool dependency resolution failed")
 
-    local_node_modules = (config_dir / "node_modules").resolve()
-    expected_prefix = str(local_node_modules) + os.sep
+    configured_node_modules = config_dir / "node_modules"
+    if configured_node_modules.is_symlink() or configured_node_modules.is_file():
+        raise RuntimeError(
+            "OpenCode custom tool dependency resolution failed: "
+            f"{configured_node_modules} is not a local directory"
+        )
+
+    configured_node_modules_resolved = configured_node_modules.resolve()
+    config_dir_resolved = config_dir.resolve()
+    if not str(configured_node_modules_resolved).startswith(str(config_dir_resolved) + os.sep):
+        raise RuntimeError(
+            "OpenCode custom tool dependency resolution failed: "
+            f"{configured_node_modules} resolves outside {config_dir}"
+        )
+
+    expected_prefix = str(configured_node_modules_resolved) + os.sep
     resolved_paths: dict[str, str] = {}
     for label, value in {
         "plugin": payload.get("plugin"),
@@ -188,7 +202,7 @@ console.log(JSON.stringify({ plugin: pluginPath, zod: zodPath, effect: effectPat
         if not resolved.startswith(expected_prefix):
             raise RuntimeError(
                 "OpenCode custom tool dependency resolution failed: "
-                f"{label} resolved outside {local_node_modules}"
+                f"{label} resolved outside {configured_node_modules_resolved}"
             )
         resolved_paths[label] = resolved
 
@@ -220,6 +234,8 @@ def ensure_tool_deps(
 
     config_dir.mkdir(parents=True, exist_ok=True)
     dst_node_modules = config_dir / "node_modules"
+    if dst_node_modules.is_symlink() or dst_node_modules.is_file():
+        dst_node_modules.unlink(missing_ok=True)
     dst_node_modules.mkdir(parents=True, exist_ok=True)
 
     opencode_scope = dst_node_modules / "@opencode-ai"

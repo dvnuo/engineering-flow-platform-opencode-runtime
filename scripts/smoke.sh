@@ -97,6 +97,13 @@ cat > "${WORKSPACE_DIR}/.opencode/package-lock.json" <<'LOCK'
 }
 LOCK
 
+mkdir -p "${WORKSPACE_DIR}/global-node-modules/@opencode-ai/plugin"
+cat > "${WORKSPACE_DIR}/global-node-modules/@opencode-ai/plugin/package.json" <<'JSON'
+{"name":"@opencode-ai/plugin","version":"old"}
+JSON
+
+ln -sfn "../global-node-modules" "${WORKSPACE_DIR}/.opencode/node_modules"
+
 assert_node_tool_dependency_resolution() {
   docker exec "${NAME}" node - <<'NODE'
 const fs = require("fs")
@@ -155,6 +162,13 @@ assert_workspace_package_lock_declares_plugin() {
   '
 }
 
+assert_workspace_node_modules_is_local_directory() {
+  docker exec "${NAME}" sh -lc '
+    test -d /workspace/.opencode/node_modules
+    test ! -L /workspace/.opencode/node_modules
+  '
+}
+
 run_runtime_contract_tests() {
   if [[ "${RUN_RUNTIME_CONTRACT_TESTS}" != "1" ]]; then
     return 0
@@ -200,6 +214,7 @@ assert_health_state
 assert_node_tool_dependency_resolution
 assert_opencode_tool_registry
 assert_workspace_package_lock_declares_plugin
+assert_workspace_node_modules_is_local_directory
 
 docker exec "${NAME}" sh -lc 'test "$(id -u)" = "0"'
 docker exec "${NAME}" sh -lc 'test "${HOME:-}" = "/root"'
@@ -228,6 +243,7 @@ assert_health_state
 assert_node_tool_dependency_resolution
 assert_opencode_tool_registry
 assert_workspace_package_lock_declares_plugin
+assert_workspace_node_modules_is_local_directory
 docker exec "${NAME}" test -f /root/.local/share/efp-compat/persistence-sentinel.txt
 docker exec "${NAME}" test -f /root/.local/share/opencode/persistence-sentinel.txt
 docker exec "${NAME}" test -f /workspace/.opencode/skills/smoke-skill/SKILL.md

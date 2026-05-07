@@ -133,3 +133,12 @@ def test_smoke_script_asserts_plugin_zod_effect_realpaths_are_workspace_local():
     assert 'assertLocal("effect", effect)' in script
     assert '/workspace/.opencode/node_modules/' in script
     assert 'resolved outside workspace .opencode node_modules' in script
+
+
+def test_smoke_script_preseeds_and_repairs_node_modules_root_symlink():
+    script = _script()
+    assert "global-node-modules" in script
+    assert "../global-node-modules" in script
+    assert "assert_workspace_node_modules_is_local_directory" in script
+    assert _call_count(script, "assert_workspace_node_modules_is_local_directory") >= 2
+    assert "test ! -L /workspace/.opencode/node_modules" in script
