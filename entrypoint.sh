@@ -81,8 +81,8 @@ python -m efp_opencode_adapter.health --wait --timeout "${EFP_OPENCODE_READY_TIM
 
 echo "Checking OpenCode ToolRegistry readiness..."
 if ! python -m efp_opencode_adapter.tool_registry_check \
-  --timeout "${EFP_OPENCODE_TOOL_REGISTRY_TIMEOUT_SECONDS:-60}" \
-  --request-timeout "${EFP_OPENCODE_TOOL_REGISTRY_REQUEST_TIMEOUT_SECONDS:-15}"
+  --timeout "${EFP_OPENCODE_TOOL_REGISTRY_TIMEOUT_SECONDS:-600}" \
+  --request-timeout "${EFP_OPENCODE_TOOL_REGISTRY_REQUEST_TIMEOUT_SECONDS:-600}"
 then
   dump_startup_diagnostics
   exit 1
