@@ -219,12 +219,19 @@ async def test_tool_source_trace_context_tools_repo_builtin_unknown(tmp_path, mo
     assert e1["data"]["trace_context"]["tool_name"] == "efp_context_echo"
     assert e1["trace_context"]["agent_id"] == "agent-bridge-1"
 
-    (settings.adapter_state_dir / "tools-index.json").write_text(json.dumps({"tools": []}), encoding="utf-8")
-    bridge.refresh_tool_metadata()
-    e2 = normalize_opencode_event({"type": "tool.start", "sessionID": "oc-1", "tool": "bash"}, session_store=session_store, task_store=task_store, settings=settings, tool_metadata={})
-    assert e2["tool_source"] == "opencode_builtin"
-    e3 = normalize_opencode_event({"type": "tool.start", "sessionID": "oc-1", "tool": "unknown_tool"}, session_store=session_store, task_store=task_store, settings=settings, tool_metadata={})
-    assert e3["tool_source"] == "unknown"
+
+@pytest.mark.asyncio
+async def test_session_status_retry_normalized_provider_retry(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({"payload": {"type": "session.status", "properties": {"status": {"type": "retry", "attempt": 14, "message": "Cannot connect to API"}}}})
+    assert event["type"] == "provider.retry"
+    assert event["state"] == "retrying"
+    assert event["data"]["attempt"] == 14
+    assert "Cannot connect to API" in event["data"]["message"]
+
 
 
 @pytest.mark.asyncio

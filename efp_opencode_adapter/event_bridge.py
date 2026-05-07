@@ -203,6 +203,9 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         normalized_type = "message.completed"
     elif raw_type.startswith("session."):
         normalized_type = "session.updated"
+    retry_status = canonical.get("status") if isinstance(canonical.get("status"), dict) else {}
+    if raw_type == "session.status" and isinstance(retry_status, dict) and str(retry_status.get("type", "")).lower() == "retry":
+        normalized_type = "provider.retry"
 
     task_id = _map_task_id(task_store, opencode_session_id, message_ids)
     s_permission_id = _sanitize_event_value(permission_id, 300)
@@ -245,6 +248,14 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         "created_at": utc_now_iso(),
         "ts": time.time(),
     }
+    if normalized_type == "provider.retry":
+        evt["state"] = "retrying"
+        evt["summary"] = "Provider API retry"
+        evt["data"]["message"] = _sanitize_event_value(retry_status.get("message"), max_chars)
+        evt["data"]["attempt"] = retry_status.get("attempt")
+        evt["data"]["next"] = retry_status.get("next")
+        evt["data"]["raw_type"] = s_raw_type
+        evt["data"]["diagnostic_hint"] = "OpenCode provider API retrying. Check runtime profile LLM provider/model/api_key/base_url/proxy."
     if task_id:
         evt["task_id"] = task_id
     if normalized_type.startswith("permission_"):
