@@ -41,6 +41,58 @@ def _remove_managed_dependency_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+        return
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def _replace_from_vendored(src: Path, dst: Path) -> None:
+    _remove_path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    if src.is_symlink():
+        os.symlink(os.readlink(src), dst)
+        try:
+            shutil.copystat(src, dst, follow_symlinks=False)
+        except OSError:
+            pass
+        return
+
+    if src.is_dir():
+        shutil.copytree(src, dst, symlinks=True)
+        return
+
+    shutil.copy2(src, dst, follow_symlinks=False)
+
+
+def _sync_vendored_node_modules(src_node_modules: Path, dst_node_modules: Path) -> None:
+    dst_node_modules.mkdir(parents=True, exist_ok=True)
+
+    for src_entry in src_node_modules.iterdir():
+        dst_entry = dst_node_modules / src_entry.name
+
+        if src_entry.name == ".bin" and src_entry.is_dir() and not src_entry.is_symlink():
+            if dst_entry.is_symlink() or dst_entry.is_file():
+                dst_entry.unlink(missing_ok=True)
+            dst_entry.mkdir(parents=True, exist_ok=True)
+            for bin_entry in src_entry.iterdir():
+                _replace_from_vendored(bin_entry, dst_entry / bin_entry.name)
+            continue
+
+        if src_entry.name.startswith("@") and src_entry.is_dir() and not src_entry.is_symlink():
+            if dst_entry.is_symlink() or dst_entry.is_file():
+                dst_entry.unlink(missing_ok=True)
+            dst_entry.mkdir(parents=True, exist_ok=True)
+            for scoped_entry in src_entry.iterdir():
+                _replace_from_vendored(scoped_entry, dst_entry / scoped_entry.name)
+            continue
+
+        _replace_from_vendored(src_entry, dst_entry)
+
+
 def _ensure_lock_declares_plugin(config_dir: Path, vendored_dir: Path, plugin_version: str) -> None:
     src_lock = vendored_dir / "package-lock.json"
     dst_lock = config_dir / "package-lock.json"
@@ -178,7 +230,10 @@ def ensure_tool_deps(
     for managed_path in _managed_dependency_paths(dst_node_modules):
         _remove_managed_dependency_path(managed_path)
 
-    shutil.copytree(src_node_modules, dst_node_modules, dirs_exist_ok=True, symlinks=True)
+    try:
+        _sync_vendored_node_modules(src_node_modules, dst_node_modules)
+    except Exception as exc:
+        raise RuntimeError("OpenCode custom tool dependency materialization failed") from exc
 
     local_plugin_package = dst_node_modules / "@opencode-ai" / "plugin" / "package.json"
     if not local_plugin_package.exists():

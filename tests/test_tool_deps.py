@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -30,6 +31,22 @@ def _write_vendored_plugin(vendored_dir, version="1.14.39"):
     eff_pkg.parent.mkdir(parents=True, exist_ok=True)
     eff_pkg.write_text(json.dumps({"name": "effect", "version": "3.0.0", "main": "index.js"}), encoding="utf-8")
     (eff_pkg.parent / "index.js").write_text("module.exports = {};\n", encoding="utf-8")
+
+
+def _write_vendored_bin_symlink(vendored_dir):
+    which_bin = vendored_dir / "node_modules" / "which" / "bin" / "node-which"
+    which_bin.parent.mkdir(parents=True, exist_ok=True)
+
+    which_pkg = vendored_dir / "node_modules" / "which" / "package.json"
+    which_pkg.write_text(
+        json.dumps({"name": "which", "version": "5.0.0", "bin": {"node-which": "bin/node-which"}}),
+        encoding="utf-8",
+    )
+    which_bin.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+
+    bin_dir = vendored_dir / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    os.symlink("../which/bin/node-which", bin_dir / "node-which")
 
 
 def test_ensure_tool_deps_copies_plugin_and_writes_package_json(tmp_path):
@@ -251,3 +268,53 @@ def test_ensure_tool_deps_replaces_previous_opencode_scope_symlink(tmp_path):
 
     global_payload = json.loads((global_scope / "plugin/package.json").read_text(encoding="utf-8"))
     assert global_payload["version"] == "old"
+
+
+def test_ensure_tool_deps_is_idempotent_with_vendored_bin_symlink(tmp_path):
+    workspace = tmp_path / "workspace"
+    vendored = tmp_path / "vendored"
+    _write_vendored_plugin(vendored)
+    _write_vendored_bin_symlink(vendored)
+
+    first = ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
+    second = ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
+
+    assert first["status"] == "ok"
+    assert second["status"] == "ok"
+
+    local_bin = workspace / ".opencode" / "node_modules" / ".bin" / "node-which"
+    assert local_bin.is_symlink()
+    assert os.readlink(local_bin) == "../which/bin/node-which"
+
+
+def test_ensure_tool_deps_replaces_existing_vendored_bin_symlink(tmp_path):
+    workspace = tmp_path / "workspace"
+    vendored = tmp_path / "vendored"
+    _write_vendored_plugin(vendored)
+    _write_vendored_bin_symlink(vendored)
+
+    existing_bin = workspace / ".opencode" / "node_modules" / ".bin" / "node-which"
+    existing_bin.parent.mkdir(parents=True, exist_ok=True)
+    existing_bin.symlink_to("../old/bin/node-which")
+
+    result = ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
+
+    assert result["status"] == "ok"
+    assert existing_bin.is_symlink()
+    assert os.readlink(existing_bin) == "../which/bin/node-which"
+
+
+def test_ensure_tool_deps_preserves_unrelated_existing_bin_entry(tmp_path):
+    workspace = tmp_path / "workspace"
+    vendored = tmp_path / "vendored"
+    _write_vendored_plugin(vendored)
+    _write_vendored_bin_symlink(vendored)
+
+    custom_bin = workspace / ".opencode" / "node_modules" / ".bin" / "custom-existing"
+    custom_bin.parent.mkdir(parents=True, exist_ok=True)
+    custom_bin.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+
+    ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
+
+    assert custom_bin.exists()
+    assert (workspace / ".opencode/node_modules/.bin/node-which").is_symlink()
