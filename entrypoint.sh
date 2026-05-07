@@ -2,18 +2,6 @@
 set -euo pipefail
 
 export HOME="${HOME:-/root}"
-export OPENCODE_SERVER_USERNAME="${OPENCODE_SERVER_USERNAME:-opencode}"
-
-if [[ -z "${OPENCODE_SERVER_PASSWORD:-}" ]]; then
-  OPENCODE_SERVER_PASSWORD="$(python3 - <<'PY'
-import secrets
-print(secrets.token_urlsafe(32))
-PY
-)"
-  export OPENCODE_SERVER_PASSWORD
-  echo "OPENCODE_SERVER_PASSWORD was not set; generated an internal password for adapter-to-opencode communication."
-fi
-
 export OPENCODE_CONFIG="${OPENCODE_CONFIG:-/workspace/.opencode/opencode.json}"
 export EFP_RUNTIME_TYPE="${EFP_RUNTIME_TYPE:-opencode}"
 export EFP_SKILLS_DIR="${EFP_SKILLS_DIR:-/app/skills}"

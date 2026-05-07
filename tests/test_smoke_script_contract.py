@@ -60,3 +60,11 @@ def test_smoke_script_uses_root_state_and_asserts_root_user():
     assert "/root/.local/share/efp-compat" in script
     assert "/home/opencode" not in script
     assert "id -u" in script
+
+
+def test_smoke_script_does_not_reference_removed_internal_server_credential_names():
+    script = _script()
+    prefix = "OPENCODE_" + "SERVER_"
+    forbidden = [prefix + "USERNAME", prefix + "PASSWORD"]
+    for token in forbidden:
+        assert token not in script
