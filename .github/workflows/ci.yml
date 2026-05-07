@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t efp-opencode-runtime:1.14.29 .
+      - run: docker build -t efp-opencode-runtime:1.14.39 .
 
   docker-smoke:
     needs: docker-build

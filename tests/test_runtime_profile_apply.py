@@ -14,7 +14,7 @@ class FakeOpenCodeClient:
         self.patch_calls = []
 
     async def health(self):
-        return {"healthy": True, "version": "1.14.29"}
+        return {"healthy": True, "version": "1.14.39"}
 
     async def put_auth(self, provider, api_key):
         self.auth_calls.append((provider, api_key))
@@ -79,7 +79,7 @@ async def test_apply_auth_failure_warning(tmp_path, monkeypatch):
 
 class RaisingOpenCodeClient:
     async def health(self):
-        return {"healthy": True, "version": "1.14.29"}
+        return {"healthy": True, "version": "1.14.39"}
 
     async def put_auth(self, provider, api_key):
         raise RuntimeError("boom SECRET-KEY-SHOULD-NOT-LEAK")
@@ -116,7 +116,7 @@ class FakeAuthOnlyClient:
         self.auth_calls = []
 
     async def health(self):
-        return {"healthy": True, "version": "1.14.29"}
+        return {"healthy": True, "version": "1.14.39"}
 
     async def put_auth(self, provider, api_key):
         self.auth_calls.append((provider, api_key))

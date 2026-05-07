@@ -9,15 +9,64 @@ from .permission_generator import build_permission
 from .settings import Settings
 
 
+def normalize_opencode_provider_id(provider: str | None) -> str:
+    raw = str(provider or "").strip().lower()
+    aliases = {
+        "github": "github-copilot",
+        "copilot": "github-copilot",
+        "github_copilot": "github-copilot",
+        "github-copilot": "github-copilot",
+        "claude": "anthropic",
+        "anthropic": "anthropic",
+        "openai": "openai",
+    }
+    return aliases.get(raw, raw)
+
+
 def model_from_runtime_profile(config: dict) -> str | None:
     llm = config.get("llm") if isinstance(config, dict) else None
     if not isinstance(llm, dict):
         return None
     provider = llm.get("provider")
     model = llm.get("model")
+    if isinstance(model, str) and "/" in model:
+        prefix, suffix = model.split("/", 1)
+        return f"{normalize_opencode_provider_id(prefix)}/{suffix}"
     if provider and model:
-        return f"{provider}/{model}"
+        return f"{normalize_opencode_provider_id(provider)}/{model}"
     return None
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        parsed = int(str(value))
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def provider_config_from_runtime_profile(runtime_config: dict) -> dict:
+    llm = runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
+    provider = normalize_opencode_provider_id(llm.get("provider"))
+    if not provider:
+        model = llm.get("model")
+        if isinstance(model, str) and "/" in model:
+            provider = normalize_opencode_provider_id(model.split("/", 1)[0])
+    if not provider:
+        return {}
+    options: dict[str, object] = {}
+    base_url = llm.get("base_url") or llm.get("api_base") or llm.get("baseURL") or llm.get("endpoint")
+    if isinstance(base_url, str) and base_url.strip():
+        options["baseURL"] = base_url.strip().rstrip("/")
+    timeout_ms = _int_or_none(llm.get("timeout_ms") or llm.get("timeout"))
+    if timeout_ms:
+        options["timeout"] = timeout_ms
+    chunk_timeout_ms = _int_or_none(llm.get("chunk_timeout_ms") or llm.get("chunkTimeout"))
+    if chunk_timeout_ms:
+        options["chunkTimeout"] = chunk_timeout_ms
+    if not options:
+        return {}
+    return {"provider": {provider: {"options": options}}}
 
 
 def write_main_agent_prompt(settings: Settings) -> Path:
@@ -64,6 +113,10 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
     if model:
         generated["agent"]["efp-main"]["model"] = model
         updated.append("llm")
+    provider_patch = provider_config_from_runtime_profile(runtime_config)
+    if provider_patch:
+        generated.setdefault("provider", {}).update(provider_patch["provider"])
+        updated.append("provider")
     digest_src = json.dumps(generated, sort_keys=True, separators=(",", ":"))
     return generated, hashlib.sha256(digest_src.encode("utf-8")).hexdigest(), updated
 

@@ -10,7 +10,7 @@ from efp_opencode_adapter.settings import Settings
 
 class FakeClient:
     async def health(self):
-        return {"healthy": True, "version": "1.14.29"}
+        return {"healthy": True, "version": "1.14.39"}
 
     async def mcp(self):
         return {

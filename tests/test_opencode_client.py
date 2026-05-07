@@ -20,7 +20,7 @@ async def test_health_and_wait_ready(monkeypatch):
     app = web.Application()
 
     async def h(_):
-        return web.json_response({"healthy": True, "version": "1.14.29"})
+        return web.json_response({"healthy": True, "version": "1.14.39"})
 
     app.router.add_get("/global/health", h)
     server = TestServer(app)
@@ -31,7 +31,7 @@ async def test_health_and_wait_ready(monkeypatch):
     client = OpenCodeClient(settings)
     health = await client.health()
     assert health["healthy"] is True
-    assert health["version"] == "1.14.29"
+    assert health["version"] == "1.14.39"
     await client.wait_until_ready(timeout_seconds=1)
     await server.close()
 
@@ -59,7 +59,7 @@ async def test_wait_ready_ignores_version_mismatch(monkeypatch):
     await server.start_server()
 
     monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
-    monkeypatch.setenv("OPENCODE_VERSION", "1.14.29")
+    monkeypatch.setenv("OPENCODE_VERSION", "1.14.39")
     settings = Settings.from_env()
     client = OpenCodeClient(settings)
     await client.wait_until_ready(timeout_seconds=1)
@@ -74,7 +74,7 @@ async def test_health_uses_basic_auth_when_password_set(monkeypatch):
     async def h(request: web.Request):
         if request.headers.get("Authorization") != expected:
             return web.json_response({"healthy": False}, status=401)
-        return web.json_response({"healthy": True, "version": "1.14.29"})
+        return web.json_response({"healthy": True, "version": "1.14.39"})
 
     app.router.add_get("/global/health", h)
     server = TestServer(app)
@@ -87,7 +87,7 @@ async def test_health_uses_basic_auth_when_password_set(monkeypatch):
     client = OpenCodeClient(Settings.from_env())
     health = await client.health()
     assert health["healthy"] is True
-    assert health["version"] == "1.14.29"
+    assert health["version"] == "1.14.39"
     await server.close()
 
 
@@ -99,6 +99,28 @@ async def test_put_auth_uses_basic_auth(monkeypatch):
     async def put_auth(request: web.Request):
         if request.headers.get("Authorization") != expected:
             return web.json_response({}, status=401)
+        return web.json_response({}, status=200)
+
+    app.router.add_put("/auth/anthropic", put_auth)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("OPENCODE_SERVER_USERNAME", "opencode")
+    monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "test-password")
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    result = await OpenCodeClient(Settings.from_env()).put_auth("anthropic", "secret-value")
+    assert result["success"] is True
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_put_auth_sends_opencode_api_auth_payload(monkeypatch):
+    app = web.Application()
+    expected = "Basic " + base64.b64encode(b"opencode:test-password").decode()
+
+    async def put_auth(request: web.Request):
+        assert request.headers.get("Authorization") == expected
+        body = await request.json()
+        assert body == {"type": "api", "key": "secret-value"}
         return web.json_response({}, status=200)
 
     app.router.add_put("/auth/anthropic", put_auth)
@@ -392,3 +414,78 @@ async def test_request_json_with_status_wraps_timeout_as_opencode_client_error()
     with pytest.raises(OpenCodeClientError) as exc:
         await client.abort_session("ses-1")
     assert exc.value.status is None
+
+
+@pytest.mark.asyncio
+async def test_request_json_transport_error_includes_exception_type_for_timeout():
+    class InjectedTimeoutSession:
+        def request(self, *args, **kwargs):
+            raise asyncio.TimeoutError()
+
+    client = OpenCodeClient(Settings.from_env(), session=InjectedTimeoutSession())  # type: ignore[arg-type]
+    with pytest.raises(OpenCodeClientError) as exc:
+        await client.list_tool_ids()
+    message = str(exc.value)
+    assert "transport error" in message
+    assert "TimeoutError" in message
+    assert "TimeoutError()" in message
+
+
+@pytest.mark.asyncio
+async def test_request_json_with_status_transport_error_includes_exception_type_for_timeout():
+    class InjectedTimeoutSession:
+        def request(self, *args, **kwargs):
+            raise asyncio.TimeoutError()
+
+    client = OpenCodeClient(Settings.from_env(), session=InjectedTimeoutSession())  # type: ignore[arg-type]
+    with pytest.raises(OpenCodeClientError) as exc:
+        await client.abort_session("ses-1")
+    message = str(exc.value)
+    assert "transport error" in message
+    assert "TimeoutError" in message
+    assert "TimeoutError()" in message
+
+
+@pytest.mark.asyncio
+async def test_list_tool_ids_handles_list_response(monkeypatch):
+    client = OpenCodeClient(Settings.from_env())
+
+    async def fake_request_json(*args, **kwargs):
+        return ["efp_smoke_tool"]
+
+    monkeypatch.setattr(client, "_request_json", fake_request_json)
+    assert await client.list_tool_ids() == ["efp_smoke_tool"]
+
+
+@pytest.mark.asyncio
+async def test_list_tool_ids_handles_ids_object_response(monkeypatch):
+    client = OpenCodeClient(Settings.from_env())
+
+    async def fake_request_json(*args, **kwargs):
+        return {"ids": ["efp_smoke_tool"]}
+
+    monkeypatch.setattr(client, "_request_json", fake_request_json)
+    assert await client.list_tool_ids() == ["efp_smoke_tool"]
+
+
+@pytest.mark.asyncio
+async def test_list_tool_ids_handles_tools_object_response(monkeypatch):
+    client = OpenCodeClient(Settings.from_env())
+
+    async def fake_request_json(*args, **kwargs):
+        return {"tools": ["efp_smoke_tool"]}
+
+    monkeypatch.setattr(client, "_request_json", fake_request_json)
+    assert await client.list_tool_ids() == ["efp_smoke_tool"]
+
+
+@pytest.mark.asyncio
+async def test_list_tool_ids_rejects_invalid_shape(monkeypatch):
+    client = OpenCodeClient(Settings.from_env())
+
+    async def fake_request_json(*args, **kwargs):
+        return {"oops": True}
+
+    monkeypatch.setattr(client, "_request_json", fake_request_json)
+    with pytest.raises(OpenCodeClientError, match="unexpected tool ids response shape"):
+        await client.list_tool_ids()
