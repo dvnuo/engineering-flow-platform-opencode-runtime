@@ -205,12 +205,8 @@ run_runtime_contract_tests() {
     python -m pytest -q runtime_contract_tests
 }
 
-BUILD_FLAGS=()
-if [[ "${EFP_SMOKE_NO_CACHE:-0}" == "1" ]]; then
-  BUILD_FLAGS+=(--no-cache --pull)
-fi
-docker build "${BUILD_FLAGS[@]}" --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" -t efp-opencode-runtime:test .
-docker run -d --name "${NAME}" -p 8000:8000 -e OPENCODE_SERVER_PASSWORD=test-password -e OPENCODE_DATA_DIR=/root/.local/share/opencode -e EFP_ADAPTER_STATE_DIR=/root/.local/share/efp-compat -v "${WORKSPACE_DIR}:/workspace" -v "${ADAPTER_STATE_DIR}:/root/.local/share/efp-compat" -v "${OPENCODE_STATE_DIR}:/root/.local/share/opencode" -v "${SKILLS_DIR}:/app/skills:ro" -v "${TOOLS_DIR}:/app/tools:ro" efp-opencode-runtime:test >/dev/null
+docker build -t efp-opencode-runtime:test .
+docker run -d --name "${NAME}" -p 8000:8000 -e OPENCODE_DATA_DIR=/root/.local/share/opencode -e EFP_ADAPTER_STATE_DIR=/root/.local/share/efp-compat -v "${WORKSPACE_DIR}:/workspace" -v "${ADAPTER_STATE_DIR}:/root/.local/share/efp-compat" -v "${OPENCODE_STATE_DIR}:/root/.local/share/opencode" -v "${SKILLS_DIR}:/app/skills:ro" -v "${TOOLS_DIR}:/app/tools:ro" efp-opencode-runtime:test >/dev/null
 
 wait_health() {
   : > "${HEALTH_FILE}"

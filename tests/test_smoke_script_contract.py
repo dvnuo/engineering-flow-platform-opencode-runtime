@@ -155,3 +155,10 @@ def test_smoke_script_builds_with_explicit_opencode_version_build_arg_and_checks
     assert "assert_opencode_binary_version" in script
     assert "opencode --version" in script
     assert "/app/runtime/package.json" in script
+    
+def test_smoke_script_does_not_reference_removed_internal_server_credential_names():
+    script = _script()
+    prefix = "OPENCODE_" + "SERVER_"
+    forbidden = [prefix + "USERNAME", prefix + "PASSWORD"]
+    for token in forbidden:
+        assert token not in script

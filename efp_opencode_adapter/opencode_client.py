@@ -38,17 +38,12 @@ class OpenCodeClient:
         self.settings = settings
         self._session = session
 
-    def _auth(self) -> aiohttp.BasicAuth | None:
-        if self.settings.opencode_server_password:
-            return aiohttp.BasicAuth(self.settings.opencode_server_username, self.settings.opencode_server_password)
-        return None
-
     def _url(self, path: str) -> str:
         return f"{self.settings.opencode_url.rstrip('/')}{path}"
 
     async def _request_json(self, method: str, path: str, *, json: dict | None = None, expected_statuses: tuple[int, ...] = (200,), timeout_seconds: int = 30) -> Any:
         async def _run(session: aiohttp.ClientSession) -> Any:
-            async with session.request(method, self._url(path), auth=self._auth(), json=json, timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as resp:
+            async with session.request(method, self._url(path), json=json, timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as resp:
                 if resp.status not in expected_statuses:
                     try:
                         err_payload = await resp.json()
@@ -83,7 +78,7 @@ class OpenCodeClient:
 
     async def _request_json_with_status(self, method: str, path: str, *, json: dict | None = None, expected_statuses: tuple[int, ...] = (200,), timeout_seconds: int = 30) -> tuple[int, Any]:
         async def _run(session: aiohttp.ClientSession) -> tuple[int, Any]:
-            async with session.request(method, self._url(path), auth=self._auth(), json=json, timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as resp:
+            async with session.request(method, self._url(path), json=json, timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as resp:
                 if resp.status not in expected_statuses:
                     try:
                         err_payload = await resp.json()
@@ -117,7 +112,6 @@ class OpenCodeClient:
                 ) from exc
 
     async def _request(self, method: str, url: str, **kwargs):
-        kwargs.setdefault("auth", self._auth())
         if self._session is not None:
             return await self._session.request(method, url, **kwargs)
         session = aiohttp.ClientSession()
@@ -132,13 +126,13 @@ class OpenCodeClient:
     async def health(self) -> dict[str, Any]:
         url = self._url("/global/health")
         if self._session is not None:
-            return await self._do_health(self._session, url, self._auth())
+            return await self._do_health(self._session, url)
         async with aiohttp.ClientSession() as session:
-            return await self._do_health(session, url, self._auth())
+            return await self._do_health(session, url)
 
-    async def _do_health(self, session: aiohttp.ClientSession, url: str, auth: aiohttp.BasicAuth | None) -> dict[str, Any]:
+    async def _do_health(self, session: aiohttp.ClientSession, url: str) -> dict[str, Any]:
         try:
-            async with session.get(url, auth=auth, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 status = resp.status
                 if status != 200:
                     return {"healthy": False, "error": f"unexpected status {status}", "status": status}
@@ -340,7 +334,7 @@ class OpenCodeClient:
         session = self._session or aiohttp.ClientSession()
         timeout = aiohttp.ClientTimeout(total=timeout_seconds) if timeout_seconds is not None else aiohttp.ClientTimeout(total=None)
         try:
-            async with session.get(self._url(path), auth=self._auth(), timeout=timeout) as resp:
+            async with session.get(self._url(path), timeout=timeout) as resp:
                 if resp.status != 200:
                     try:
                         payload = await resp.json()
