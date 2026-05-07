@@ -104,6 +104,28 @@ async def test_wait_ready_ignores_version_mismatch(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_put_auth_sends_opencode_api_auth_payload(monkeypatch):
+    app = web.Application()
+    expected = "Basic " + base64.b64encode(b"opencode:test-password").decode()
+
+    async def put_auth(request: web.Request):
+        assert request.headers.get("Authorization") == expected
+        body = await request.json()
+        assert body == {"type": "api", "key": "secret-value"}
+        return web.json_response({}, status=200)
+
+    app.router.add_put("/auth/anthropic", put_auth)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("OPENCODE_SERVER_USERNAME", "opencode")
+    monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "test-password")
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    result = await OpenCodeClient(Settings.from_env()).put_auth("anthropic", "secret-value")
+    assert result["success"] is True
+    await server.close()
+
+
+@pytest.mark.asyncio
 async def test_prompt_async_accepts_204(monkeypatch):
     app = web.Application()
 

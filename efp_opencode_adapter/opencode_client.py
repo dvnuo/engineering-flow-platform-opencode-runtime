@@ -149,7 +149,7 @@ class OpenCodeClient:
             return {"success": False, "skipped": True}
         url = f"{self.settings.opencode_url.rstrip('/')}/auth/{provider}"
         try:
-            resp = await self._request("PUT", url, json={"provider": provider, "api_key": api_key}, timeout=aiohttp.ClientTimeout(total=10))
+            resp = await self._request("PUT", url, json={"type": "api", "key": api_key}, timeout=aiohttp.ClientTimeout(total=10))
             try:
                 if 200 <= resp.status < 300:
                     return {"success": True, "status": resp.status}

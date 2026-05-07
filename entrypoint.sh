@@ -23,6 +23,10 @@ python -m efp_opencode_adapter.tool_deps \
   --vendored-dir "${EFP_OPENCODE_TOOL_DEPS_DIR:-/opt/opencode-tool-deps}" \
   --opencode-version "${OPENCODE_VERSION:-}"
 
+echo "Bootstrapping OpenCode runtime profile from Portal context..."
+python -m efp_opencode_adapter.portal_runtime_context_bootstrap \
+  --workspace-dir "${EFP_WORKSPACE_DIR}"
+
 echo "Runtime package versions:"
 python3 - <<'PY'
 import json, pathlib

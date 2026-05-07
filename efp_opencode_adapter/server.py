@@ -42,7 +42,7 @@ from .portal_metadata_client import PortalMetadataClient
 from .recovery import RecoveryManager
 from .usage_api import usage_handler
 from .usage_tracker import UsageTracker
-from .opencode_config import build_opencode_config, write_main_agent_prompt, write_opencode_config
+from .opencode_config import build_opencode_config, normalize_opencode_provider_id, write_main_agent_prompt, write_opencode_config
 from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_status_payload, sanitize_profile_config_for_storage, sanitize_public_secrets
 from .session_store import SessionStore
 from .task_store import TaskStore
@@ -126,7 +126,9 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     llm = runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
     if llm and any(key in llm for key in ("provider", "model", "api_key", "temperature", "max_tokens")) and "llm" not in updated_sections:
         updated_sections.append("llm")
-    provider, api_key = llm.get("provider"), llm.get("api_key")
+    provider, api_key = normalize_opencode_provider_id(llm.get("provider")), llm.get("api_key")
+    if not provider and isinstance(llm.get("model"), str) and "/" in llm.get("model"):
+        provider = normalize_opencode_provider_id(str(llm.get("model")).split("/", 1)[0])
     auth_update_status = "skipped"
     if provider and api_key:
         if hasattr(client, "put_auth"):
@@ -167,6 +169,39 @@ async def runtime_profile_status_handler(request: web.Request) -> web.Response:
     return web.json_response(build_profile_status_payload(request.app[SETTINGS_KEY]))
 
 
+async def effective_config_handler(request: web.Request) -> web.Response:
+    settings: Settings = request.app[SETTINGS_KEY]
+    cfg = {}
+    if settings.opencode_config_path.exists():
+        try:
+            import json as _json
+            cfg = _json.loads(settings.opencode_config_path.read_text(encoding="utf-8"))
+        except Exception:
+            cfg = {}
+    model = ((cfg.get("agent") or {}).get("efp-main") or {}).get("model")
+    provider = normalize_opencode_provider_id(model.split("/", 1)[0] if isinstance(model, str) and "/" in model else "")
+    auth_path = settings.opencode_data_dir / "auth.json"
+    auth = {}
+    if auth_path.exists():
+        try:
+            import json as _json
+            auth = _json.loads(auth_path.read_text(encoding="utf-8"))
+        except Exception:
+            auth = {}
+    auth_obj = auth.get(provider) if isinstance(auth, dict) else None
+    return web.json_response(
+        {
+            "engine": "opencode",
+            "opencode_version": settings.opencode_version,
+            "model": model,
+            "provider": provider or None,
+            "auth": {"provider": provider or None, "present": isinstance(auth_obj, dict), "type": auth_obj.get("type") if isinstance(auth_obj, dict) else None},
+            "provider_options": (((cfg.get("provider") or {}).get(provider) or {}).get("options") if provider else {}) or {},
+            "config_path": str(settings.opencode_config_path),
+        }
+    )
+
+
 async def capabilities_handler(request: web.Request) -> web.Response:
     try:
         payload = await build_capability_catalog(request.app[SETTINGS_KEY], request.app[OPENCODE_CLIENT_KEY])
@@ -200,6 +235,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/actuator/health", health_handler)
     app.router.add_post("/api/internal/runtime-profile/apply", runtime_profile_apply_handler)
     app.router.add_get("/api/internal/runtime-profile/status", runtime_profile_status_handler)
+    app.router.add_get("/api/internal/opencode-effective-config", effective_config_handler)
     app.router.add_get("/api/capabilities", capabilities_handler)
     app.router.add_get("/api/queue/status", queue_status_handler)
     app.router.add_get("/api/skills", skills_handler)

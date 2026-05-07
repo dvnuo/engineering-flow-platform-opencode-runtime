@@ -32,6 +32,7 @@ from .thinking_events import (
     utc_now_iso,
 )
 from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
+from .opencode_config import normalize_opencode_provider_id
 
 
 def _bad_request(error: str) -> web.HTTPBadRequest:
@@ -62,6 +63,23 @@ def _optional_str(value: Any) -> str | None:
 
 def _normalize_title(raw: Any) -> str:
     return re.sub(r"\s+", " ", raw if isinstance(raw, str) else "").strip() or "Chat"
+
+
+def _model_from_chat_payload(payload: dict[str, Any], metadata: dict[str, Any], runtime_profile: dict[str, Any]) -> str | None:
+    rp_cfg = ((metadata.get("runtime_profile") or {}).get("config") if isinstance(metadata.get("runtime_profile"), dict) else {}) or {}
+    llm_cfg = rp_cfg.get("llm") if isinstance(rp_cfg, dict) and isinstance(rp_cfg.get("llm"), dict) else {}
+    model_candidates = [payload.get("model"), payload.get("model_override"), metadata.get("model"), runtime_profile.get("model"), llm_cfg.get("model")]
+    provider_candidates = [metadata.get("provider"), runtime_profile.get("provider"), llm_cfg.get("provider")]
+    model = next((m for m in model_candidates if isinstance(m, str) and m.strip()), None)
+    provider = next((p for p in provider_candidates if isinstance(p, str) and p.strip()), None)
+    if not model:
+        return None
+    if "/" in model:
+        prefix, suffix = model.split("/", 1)
+        return f"{normalize_opencode_provider_id(prefix)}/{suffix}"
+    if provider:
+        return f"{normalize_opencode_provider_id(provider)}/{model}"
+    return model
 
 
 def _extract_session_id(payload: Any) -> str:
@@ -248,7 +266,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
     portal_session_id = _portal_session_id_from_payload(payload)
     request_id = _request_id_from_payload(payload)
     title = _normalize_title(_optional_str(metadata.get("title")) or message[:60])
-    model = _optional_str(metadata.get("model")) or _optional_str(runtime_profile.get("model"))
+    model = _model_from_chat_payload(payload, metadata, runtime_profile)
     agent = _optional_str(metadata.get("agent"))
     system = _optional_str(metadata.get("system"))
 
@@ -265,7 +283,8 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
 
     existing_record = store.get(portal_session_id)
     opencode_session_id = existing_record.opencode_session_id if existing_record else ""
-    provider_for_trace = _optional_str(runtime_profile.get("provider")) or _optional_str(metadata.get("provider"))
+    provider_for_trace_raw = _optional_str(runtime_profile.get("provider")) or _optional_str(metadata.get("provider"))
+    provider_for_trace = normalize_opencode_provider_id(provider_for_trace_raw)
     profile_version, runtime_profile_id = profile_version_from_metadata(metadata, runtime_profile)
     trace_context: dict[str, str] = {}
     try:
