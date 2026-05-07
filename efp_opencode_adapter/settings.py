@@ -23,8 +23,6 @@ class Settings:
     # Optional build/configured OpenCode package version for observability only.
     # It must never be used as a startup compatibility gate.
     opencode_version: str | None
-    opencode_server_username: str
-    opencode_server_password: str | None
     ready_timeout_seconds: int
     event_bridge_enabled: bool = True
     event_bridge_initial_backoff_seconds: float = 1.0
@@ -46,8 +44,6 @@ class Settings:
             opencode_data_dir=Path(os.getenv("OPENCODE_DATA_DIR", "/root/.local/share/opencode")),
             opencode_config_path=Path(os.getenv("OPENCODE_CONFIG", "/workspace/.opencode/opencode.json")),
             opencode_version=(os.getenv("OPENCODE_VERSION") or None),
-            opencode_server_username=os.getenv("OPENCODE_SERVER_USERNAME", "opencode"),
-            opencode_server_password=os.getenv("OPENCODE_SERVER_PASSWORD"),
             ready_timeout_seconds=int(os.getenv("EFP_OPENCODE_READY_TIMEOUT_SECONDS", "60")),
             event_bridge_enabled=_env_bool("EFP_OPENCODE_EVENT_BRIDGE_ENABLED", True),
             event_bridge_initial_backoff_seconds=float(os.getenv("EFP_OPENCODE_EVENT_BRIDGE_INITIAL_BACKOFF_SECONDS", "1.0")),

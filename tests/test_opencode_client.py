@@ -1,5 +1,4 @@
 import asyncio
-import base64
 
 import pytest
 import aiohttp
@@ -37,6 +36,42 @@ async def test_health_and_wait_ready(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_health_does_not_send_authorization_header(monkeypatch):
+    app = web.Application()
+
+    async def h(request: web.Request):
+        assert request.headers.get("Authorization") is None
+        return web.json_response({"healthy": True, "version": "1.14.29"})
+
+    app.router.add_get("/global/health", h)
+    server = TestServer(app)
+    await server.start_server()
+
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+    health = await client.health()
+    assert health["healthy"] is True
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_put_auth_does_not_send_authorization_header(monkeypatch):
+    app = web.Application()
+
+    async def put_auth(request: web.Request):
+        assert request.headers.get("Authorization") is None
+        return web.json_response({}, status=200)
+
+    app.router.add_put("/auth/anthropic", put_auth)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    result = await OpenCodeClient(Settings.from_env()).put_auth("anthropic", "secret-value")
+    assert result["success"] is True
+    await server.close()
+
+
+@pytest.mark.asyncio
 async def test_unreachable_degraded(monkeypatch):
     monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
     settings = Settings.from_env()
@@ -63,52 +98,6 @@ async def test_wait_ready_ignores_version_mismatch(monkeypatch):
     settings = Settings.from_env()
     client = OpenCodeClient(settings)
     await client.wait_until_ready(timeout_seconds=1)
-    await server.close()
-
-
-@pytest.mark.asyncio
-async def test_health_uses_basic_auth_when_password_set(monkeypatch):
-    app = web.Application()
-    expected = "Basic " + base64.b64encode(b"opencode:test-password").decode()
-
-    async def h(request: web.Request):
-        if request.headers.get("Authorization") != expected:
-            return web.json_response({"healthy": False}, status=401)
-        return web.json_response({"healthy": True, "version": "1.14.29"})
-
-    app.router.add_get("/global/health", h)
-    server = TestServer(app)
-    await server.start_server()
-
-    monkeypatch.setenv("OPENCODE_SERVER_USERNAME", "opencode")
-    monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "test-password")
-    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
-
-    client = OpenCodeClient(Settings.from_env())
-    health = await client.health()
-    assert health["healthy"] is True
-    assert health["version"] == "1.14.29"
-    await server.close()
-
-
-@pytest.mark.asyncio
-async def test_put_auth_uses_basic_auth(monkeypatch):
-    app = web.Application()
-    expected = "Basic " + base64.b64encode(b"opencode:test-password").decode()
-
-    async def put_auth(request: web.Request):
-        if request.headers.get("Authorization") != expected:
-            return web.json_response({}, status=401)
-        return web.json_response({}, status=200)
-
-    app.router.add_put("/auth/anthropic", put_auth)
-    server = TestServer(app)
-    await server.start_server()
-    monkeypatch.setenv("OPENCODE_SERVER_USERNAME", "opencode")
-    monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "test-password")
-    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
-    result = await OpenCodeClient(Settings.from_env()).put_auth("anthropic", "secret-value")
-    assert result["success"] is True
     await server.close()
 
 

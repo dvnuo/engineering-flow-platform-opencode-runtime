@@ -21,8 +21,6 @@ def make_settings(tmp_path: Path) -> Settings:
         opencode_data_dir=tmp_path / "opencode-state",
         opencode_config_path=tmp_path / "workspace/.opencode/opencode.json",
         opencode_version="1.14.29",
-        opencode_server_username="opencode",
-        opencode_server_password=None,
         ready_timeout_seconds=60,
     )
 
