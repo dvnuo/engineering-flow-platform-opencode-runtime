@@ -165,3 +165,63 @@ def test_ensure_tool_deps_rejects_invalid_existing_package_json(tmp_path):
 
     with pytest.raises(RuntimeError, match="Invalid JSON"):
         ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
+
+
+def test_ensure_tool_deps_rejects_transitive_resolution_from_node_path(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    vendored = tmp_path / "vendored"
+    plugin_package = vendored / "node_modules" / "@opencode-ai" / "plugin" / "package.json"
+    plugin_package.parent.mkdir(parents=True, exist_ok=True)
+    plugin_package.write_text(json.dumps({"name": "@opencode-ai/plugin", "version": "1.14.39", "type": "module", "main": "index.js"}), encoding="utf-8")
+    (plugin_package.parent / "index.js").write_text('export { z } from "zod"; export * as Effect from "effect";\n', encoding="utf-8")
+
+    fake_global = tmp_path / "fake-global" / "node_modules"
+    for name in ("zod", "effect"):
+        pkg = fake_global / name / "package.json"
+        pkg.parent.mkdir(parents=True, exist_ok=True)
+        pkg.write_text(json.dumps({"name": name, "version": "9.9.9", "main": "index.js"}), encoding="utf-8")
+        (pkg.parent / "index.js").write_text("module.exports = {};\n", encoding="utf-8")
+
+    monkeypatch.setenv("NODE_PATH", str(fake_global))
+    with pytest.raises(RuntimeError, match="OpenCode custom tool dependency resolution failed"):
+        ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
+
+
+def test_ensure_tool_deps_prefers_local_transitive_deps_when_node_path_is_set(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    vendored = tmp_path / "vendored"
+    _write_vendored_plugin(vendored)
+
+    fake_global = tmp_path / "fake-global" / "node_modules"
+    for name in ("zod", "effect"):
+        pkg = fake_global / name / "package.json"
+        pkg.parent.mkdir(parents=True, exist_ok=True)
+        pkg.write_text(json.dumps({"name": name, "version": "9.9.9", "main": "index.js"}), encoding="utf-8")
+        (pkg.parent / "index.js").write_text("module.exports = {};\n", encoding="utf-8")
+
+    monkeypatch.setenv("NODE_PATH", str(fake_global))
+    result = ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
+    assert ".opencode/node_modules/zod" in result["resolved_zod"]
+    assert ".opencode/node_modules/effect" in result["resolved_effect"]
+
+
+def test_ensure_tool_deps_replaces_previous_plugin_symlink(tmp_path):
+    workspace = tmp_path / "workspace"
+    vendored = tmp_path / "vendored"
+    _write_vendored_plugin(vendored)
+
+    global_plugin = tmp_path / "global-plugin"
+    global_plugin.mkdir(parents=True, exist_ok=True)
+    (global_plugin / "package.json").write_text(json.dumps({"name": "@opencode-ai/plugin", "version": "old"}), encoding="utf-8")
+
+    workspace_plugin = workspace / ".opencode" / "node_modules" / "@opencode-ai" / "plugin"
+    workspace_plugin.parent.mkdir(parents=True, exist_ok=True)
+    workspace_plugin.symlink_to(global_plugin, target_is_directory=True)
+
+    result = ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
+
+    assert not workspace_plugin.is_symlink()
+    assert (workspace_plugin / "package.json").exists()
+    assert ".opencode/node_modules/@opencode-ai/plugin" in result["resolved_plugin"]
+    global_payload = json.loads((global_plugin / "package.json").read_text(encoding="utf-8"))
+    assert global_payload["version"] == "old"

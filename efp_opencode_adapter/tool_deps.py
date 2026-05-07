@@ -25,6 +25,22 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _managed_dependency_paths(dst_node_modules: Path) -> list[Path]:
+    return [
+        dst_node_modules / "@opencode-ai" / "plugin",
+        dst_node_modules / "zod",
+        dst_node_modules / "effect",
+    ]
+
+
+def _remove_managed_dependency_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+        return
+    if path.exists():
+        shutil.rmtree(path)
+
+
 def _ensure_lock_declares_plugin(config_dir: Path, vendored_dir: Path, plugin_version: str) -> None:
     src_lock = vendored_dir / "package-lock.json"
     dst_lock = config_dir / "package-lock.json"
@@ -106,15 +122,28 @@ console.log(JSON.stringify({ plugin: pluginPath, zod: zodPath, effect: effectPat
     if not isinstance(payload, dict):
         raise RuntimeError("OpenCode custom tool dependency resolution failed")
 
-    plugin_path = str(payload.get("plugin") or "")
-    expected_prefix = str(config_dir / "node_modules") + os.sep
-    if not plugin_path.startswith(expected_prefix):
-        raise RuntimeError("OpenCode custom tool dependency resolution failed")
+    local_node_modules = (config_dir / "node_modules").resolve()
+    expected_prefix = str(local_node_modules) + os.sep
+    resolved_paths: dict[str, str] = {}
+    for label, value in {
+        "plugin": payload.get("plugin"),
+        "zod": payload.get("zod"),
+        "effect": payload.get("effect"),
+    }.items():
+        if not isinstance(value, str) or not value:
+            raise RuntimeError("OpenCode custom tool dependency resolution failed")
+        resolved = str(Path(value).resolve())
+        if not resolved.startswith(expected_prefix):
+            raise RuntimeError(
+                "OpenCode custom tool dependency resolution failed: "
+                f"{label} resolved outside {local_node_modules}"
+            )
+        resolved_paths[label] = resolved
 
     return {
-        "resolved_plugin": plugin_path,
-        "resolved_zod": str(payload.get("zod") or ""),
-        "resolved_effect": str(payload.get("effect") or ""),
+        "resolved_plugin": resolved_paths["plugin"],
+        "resolved_zod": resolved_paths["zod"],
+        "resolved_effect": resolved_paths["effect"],
     }
 
 
@@ -140,6 +169,8 @@ def ensure_tool_deps(
     config_dir.mkdir(parents=True, exist_ok=True)
     dst_node_modules = config_dir / "node_modules"
     dst_node_modules.mkdir(parents=True, exist_ok=True)
+    for managed_path in _managed_dependency_paths(dst_node_modules):
+        _remove_managed_dependency_path(managed_path)
 
     shutil.copytree(src_node_modules, dst_node_modules, dirs_exist_ok=True, symlinks=True)
 

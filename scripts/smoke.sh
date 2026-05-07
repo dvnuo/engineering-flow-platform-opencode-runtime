@@ -127,6 +127,13 @@ if \"efp_smoke_tool\" not in ids:
   '
 }
 
+assert_workspace_package_lock_declares_plugin() {
+  docker exec "${NAME}" sh -lc '
+    jq -e ".packages[\"\"].dependencies[\"@opencode-ai/plugin\"]" \
+      /workspace/.opencode/package-lock.json >/dev/null
+  '
+}
+
 run_runtime_contract_tests() {
   if [[ "${RUN_RUNTIME_CONTRACT_TESTS}" != "1" ]]; then
     return 0
@@ -169,6 +176,9 @@ assert_health_state() {
 
 wait_health
 assert_health_state
+assert_node_tool_dependency_resolution
+assert_opencode_tool_registry
+assert_workspace_package_lock_declares_plugin
 
 docker exec "${NAME}" sh -lc 'test "$(id -u)" = "0"'
 docker exec "${NAME}" sh -lc 'test "${HOME:-}" = "/root"'
@@ -196,6 +206,7 @@ wait_health
 assert_health_state
 assert_node_tool_dependency_resolution
 assert_opencode_tool_registry
+assert_workspace_package_lock_declares_plugin
 docker exec "${NAME}" test -f /root/.local/share/efp-compat/persistence-sentinel.txt
 docker exec "${NAME}" test -f /root/.local/share/opencode/persistence-sentinel.txt
 docker exec "${NAME}" test -f /workspace/.opencode/skills/smoke-skill/SKILL.md

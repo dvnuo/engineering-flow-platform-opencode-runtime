@@ -5,6 +5,10 @@ def _script() -> str:
     return (Path(__file__).resolve().parents[1] / 'scripts' / 'smoke.sh').read_text(encoding='utf-8')
 
 
+def _call_count(script: str, name: str) -> int:
+    return sum(1 for line in script.splitlines() if line.strip() == name)
+
+
 def test_smoke_script_asserts_skill_tool_mapping_contract():
     script = _script()
     assert 'legacy_name' in script
@@ -93,10 +97,29 @@ def test_smoke_script_validates_node_resolution_helpers():
     assert 'pluginReq.resolve("effect")' in script
 
 
-def test_smoke_script_registry_helper_is_reused_and_stale_lock_checked():
+def test_smoke_script_checks_registry_on_first_start_and_restart():
     script = _script()
-    assert "assert_opencode_tool_registry" in script
-    assert script.count("assert_opencode_tool_registry") >= 2
+
+    assert _call_count(script, "assert_node_tool_dependency_resolution") >= 2
+    assert _call_count(script, "assert_opencode_tool_registry") >= 2
+    assert _call_count(script, "assert_workspace_package_lock_declares_plugin") >= 2
+
+    first_segment = script[
+        script.index("wait_health"):
+        script.index("docker exec \"${NAME}\" sh -lc 'echo adapter-persist")
+    ]
+    assert "assert_node_tool_dependency_resolution" in first_segment
+    assert "assert_opencode_tool_registry" in first_segment
+    assert "assert_workspace_package_lock_declares_plugin" in first_segment
+
+    restart_segment = script[script.index("docker restart"):]
+    assert "assert_node_tool_dependency_resolution" in restart_segment
+    assert "assert_opencode_tool_registry" in restart_segment
+    assert "assert_workspace_package_lock_declares_plugin" in restart_segment
+
+
+def test_smoke_script_asserts_stale_lock_repaired():
+    script = _script()
     assert "stale-opencode-workspace" in script
-    assert "@opencode-ai/plugin" in script
-    assert "package-lock.json" in script
+    assert "assert_workspace_package_lock_declares_plugin" in script
+    assert '.packages[""].dependencies["@opencode-ai/plugin"]' in script or "@opencode-ai/plugin" in script
