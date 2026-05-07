@@ -1,25 +1,34 @@
 from __future__ import annotations
-import argparse, asyncio, hashlib, json, os
+import argparse, asyncio, json, os
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 import aiohttp
 from .opencode_config import build_opencode_config, normalize_opencode_provider_id, write_opencode_config
+from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_profile_config_for_storage
 from .settings import Settings
 
 
-def _sanitize(text: str) -> str:
-    for key in (os.getenv("PORTAL_INTERNAL_TOKEN", ""), os.getenv("OPENCODE_SERVER_PASSWORD", "")):
-        if key:
-            text = text.replace(key, "***REDACTED***")
+def _sanitize(text: str, api_key: str | None = None) -> str:
+    secrets = [os.getenv("PORTAL_INTERNAL_TOKEN", ""), api_key or ""]
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***REDACTED***")
     return text
 
 
 async def _run(workspace_dir: Path) -> int:
-    settings = Settings.from_env()
+    base_settings = Settings.from_env()
+    settings = replace(base_settings, workspace_dir=workspace_dir, opencode_config_path=workspace_dir / '.opencode' / 'opencode.json')
+
     base = os.getenv("PORTAL_INTERNAL_BASE_URL")
     agent_id = os.getenv("PORTAL_AGENT_ID")
+    require_context = os.getenv("EFP_REQUIRE_PORTAL_RUNTIME_CONTEXT", "false").lower() == "true"
     if not base or not agent_id:
-        print(json.dumps({"status": "skipped", "reason": "portal context env missing"}))
-        return 0
+        payload = {"status": "error" if require_context else "skipped", "reason": "portal context env missing"}
+        print(json.dumps(payload))
+        return 1 if require_context else 0
+
     token = os.getenv("PORTAL_INTERNAL_TOKEN", "")
     headers = {}
     if token:
@@ -32,24 +41,27 @@ async def _run(workspace_dir: Path) -> int:
                 r.raise_for_status()
                 data = await r.json()
     except Exception as exc:
-        if os.getenv("EFP_REQUIRE_PORTAL_RUNTIME_CONTEXT", "false").lower() == "true":
-            print(json.dumps({"status": "error", "reason": "portal context fetch failed", "error": _sanitize(repr(exc))}))
-            return 1
-        print(json.dumps({"status": "skipped", "reason": "portal context fetch failed", "error": _sanitize(repr(exc))}))
-        return 0
+        status = "error" if require_context else "skipped"
+        print(json.dumps({"status": status, "reason": "portal context fetch failed", "error": _sanitize(repr(exc))}))
+        return 1 if require_context else 0
+
     profile = data.get("runtime_profile_context") if isinstance(data, dict) else {}
     runtime_config = (profile or {}).get("config") if isinstance(profile, dict) else {}
     runtime_profile_id = (profile or {}).get("runtime_profile_id") if isinstance(profile, dict) else None
     revision = (profile or {}).get("revision") if isinstance(profile, dict) else None
-    generated, config_hash, _ = build_opencode_config(settings, runtime_config if isinstance(runtime_config, dict) else {})
-    settings.opencode_config_path = workspace_dir / ".opencode" / "opencode.json"
+
+    generated, config_hash, updated_sections = build_opencode_config(settings, runtime_config if isinstance(runtime_config, dict) else {})
     write_opencode_config(settings, generated)
 
     llm = runtime_config.get("llm") if isinstance(runtime_config, dict) and isinstance(runtime_config.get("llm"), dict) else {}
     provider = normalize_opencode_provider_id(llm.get("provider"))
-    model = generated.get("agent", {}).get("efp-main", {}).get("model")
+    model = llm.get("model")
+    if not provider and isinstance(model, str) and "/" in model:
+        provider = normalize_opencode_provider_id(model.split("/", 1)[0])
+
+    api_key = llm.get("api_key") if isinstance(llm.get("api_key"), str) else None
     auth_written = False
-    if provider and isinstance(llm.get("api_key"), str) and llm.get("api_key"):
+    if provider and api_key:
         auth_path = settings.opencode_data_dir / "auth.json"
         auth_path.parent.mkdir(parents=True, exist_ok=True)
         existing = {}
@@ -60,11 +72,26 @@ async def _run(workspace_dir: Path) -> int:
                 existing = {}
         if not isinstance(existing, dict):
             existing = {}
-        existing[provider] = {"type": "api", "key": llm.get("api_key")}
+        existing[provider] = {"type": "api", "key": api_key}
         auth_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
         auth_path.chmod(0o600)
         auth_written = True
-    print(json.dumps({"status": "ok", "runtime_profile_id": runtime_profile_id, "revision": revision, "provider": provider or None, "model": model, "auth_written": auth_written, "config_written": True, "config_hash": config_hash}))
+
+    ProfileOverlayStore(settings).save(ProfileOverlay(
+        runtime_profile_id=runtime_profile_id,
+        revision=revision,
+        config=sanitize_profile_config_for_storage(runtime_config if isinstance(runtime_config, dict) else {}),
+        applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        generated_config_hash=config_hash,
+        status="applied",
+        pending_restart=False,
+        warnings=[],
+        updated_sections=updated_sections,
+        last_apply_error=None,
+        applied=True,
+    ))
+
+    print(json.dumps({"status": "ok", "runtime_profile_id": runtime_profile_id, "revision": revision, "provider": provider or None, "model": generated.get("agent", {}).get("efp-main", {}).get("model"), "auth_written": auth_written, "config_written": True, "config_hash": config_hash}))
     return 0
 
 
