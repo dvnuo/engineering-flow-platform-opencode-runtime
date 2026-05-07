@@ -45,7 +45,7 @@ async def test_bootstrap_fetches_portal_context_and_writes_config_and_auth(tmp_p
                     "llm": {
                         "provider": "github_copilot",
                         "model": "gpt-x",
-                        "api_key": "SECRET",
+                        "api_key": "gho_TEST",
                         "base_url": "http://litellm.local/v1",
                     }
                 },
@@ -69,12 +69,35 @@ async def test_bootstrap_fetches_portal_context_and_writes_config_and_auth(tmp_p
     assert cfg["provider"]["github-copilot"]["options"]["baseURL"] == "http://litellm.local/v1"
 
     auth = json.loads((data / "auth.json").read_text())
-    assert auth == {"github-copilot": {"type": "api", "key": "SECRET"}}
+    assert auth == {"github-copilot": {"type": "oauth", "refresh": "gho_TEST", "access": "gho_TEST", "expires": 0}}
 
     emitted = capsys.readouterr()
-    assert "SECRET" not in emitted.out
-    assert "SECRET" not in emitted.err
+    assert "gho_TEST" not in emitted.out
+    assert "gho_TEST" not in emitted.err
 
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_copilot_ghu_token_skips_auth(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "opdata"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(data))
+
+    async def runtime_context(_):
+        return web.json_response({"runtime_profile_context": {"config": {"llm": {"provider": "github_copilot", "api_key": "ghu_TEST"}}}})
+
+    app = web.Application(); app.router.add_get("/api/internal/agents/agent-1/runtime-context", runtime_context)
+    server = TestServer(app); await server.start_server()
+    monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", str(server.make_url("/")).rstrip("/")); monkeypatch.setenv("PORTAL_AGENT_ID", "agent-1")
+    assert await mod._run(workspace) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["auth_written"] is False
+    assert "auth_warning" in out and "ghu_TEST" not in out["auth_warning"]
+    if (data / "auth.json").exists():
+        auth = json.loads((data / "auth.json").read_text())
+        assert auth.get("github-copilot", {}).get("type") != "api"
     await server.close()
 
 
@@ -90,7 +113,7 @@ async def test_bootstrap_infers_auth_provider_from_model_prefix(tmp_path, monkey
             "runtime_profile_context": {
                 "runtime_profile_id": "rp-1",
                 "revision": 3,
-                "config": {"llm": {"model": "github_copilot/gpt-x", "api_key": "SECRET"}},
+                "config": {"llm": {"model": "github_copilot/gpt-x", "api_key": "gho_TEST"}},
             }
         })
 

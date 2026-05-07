@@ -4,11 +4,12 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Mapping
 
 import aiohttp
 
 from .settings import Settings
+from .opencode_config import normalize_opencode_provider_id
 
 
 class OpenCodeClientError(Exception):
@@ -21,6 +22,49 @@ class OpenCodeClientError(Exception):
 def _format_transport_error(method: str, path: str, exc: BaseException) -> str:
     return f"{method} {path} transport error ({type(exc).__name__}): {exc!r}"
 
+
+
+_REDACT_KEYS = {"key", "api_key", "access", "refresh", "access_token", "refresh_token", "token", "authorization", "password", "secret"}
+
+
+def _redact_sensitive(value: Any) -> Any:
+    import re
+
+    if isinstance(value, dict):
+        return {k: ("***REDACTED***" if str(k).lower() in _REDACT_KEYS else _redact_sensitive(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_sensitive(v) for v in value]
+    if isinstance(value, str):
+        out = value
+        patterns = [r"gho_[A-Za-z0-9_\-]+", r"ghu_[A-Za-z0-9_\-]+", r"ghp_[A-Za-z0-9_\-]+", r"github_pat_[A-Za-z0-9_\-]+", r"sk-[A-Za-z0-9_\-]+"]
+        for pat in patterns:
+            out = re.sub(pat, "***REDACTED***", out)
+        return out
+    return value
+
+
+def _safe_error_preview(value: Any, max_chars: int = 1000) -> str:
+    redacted = _redact_sensitive(value)
+    text = redacted if isinstance(redacted, str) else json.dumps(redacted, ensure_ascii=False)
+    return text[:max_chars]
+
+
+def _model_ref_from_value(model: Any) -> dict[str, str] | None:
+    if isinstance(model, dict):
+        provider_id = model.get("providerID")
+        model_id = model.get("modelID")
+        if isinstance(provider_id, str) and provider_id.strip() and isinstance(model_id, str) and model_id.strip():
+            return {"providerID": normalize_opencode_provider_id(provider_id.strip()), "modelID": model_id.strip()}
+        return None
+    if isinstance(model, str):
+        if "/" not in model:
+            return None
+        provider, model_id = model.split("/", 1)
+        provider = normalize_opencode_provider_id(provider.strip())
+        model_id = model_id.strip()
+        if provider and model_id:
+            return {"providerID": provider, "modelID": model_id}
+    return None
 
 
 async def _close_owned_response(resp: aiohttp.ClientResponse) -> None:
@@ -49,7 +93,7 @@ class OpenCodeClient:
                         err_payload = await resp.json()
                     except Exception:
                         err_payload = await resp.text()
-                    raise OpenCodeClientError(f"{method} {path} failed with status {resp.status}", status=resp.status, payload=err_payload)
+                    raise OpenCodeClientError(f"{method} {path} failed with status {resp.status}: {_safe_error_preview(err_payload)}", status=resp.status, payload=_redact_sensitive(err_payload))
                 if resp.status == 204:
                     return None
                 try:
@@ -84,7 +128,7 @@ class OpenCodeClient:
                         err_payload = await resp.json()
                     except Exception:
                         err_payload = await resp.text()
-                    raise OpenCodeClientError(f"{method} {path} failed with status {resp.status}", status=resp.status, payload=err_payload)
+                    raise OpenCodeClientError(f"{method} {path} failed with status {resp.status}: {_safe_error_preview(err_payload)}", status=resp.status, payload=_redact_sensitive(err_payload))
                 if resp.status == 204:
                     return resp.status, None
                 try:
@@ -144,20 +188,23 @@ class OpenCodeClient:
         except Exception as exc:
             return {"healthy": False, "error": str(exc)}
 
-    async def put_auth(self, provider: str, api_key: str) -> dict[str, Any]:
-        if not provider or not api_key:
+    async def put_auth_info(self, provider: str, auth_info: Mapping[str, Any]) -> dict[str, Any]:
+        if not provider or not auth_info:
             return {"success": False, "skipped": True}
         url = f"{self.settings.opencode_url.rstrip('/')}/auth/{provider}"
         try:
-            resp = await self._request("PUT", url, json={"type": "api", "key": api_key}, timeout=aiohttp.ClientTimeout(total=10))
+            resp = await self._request("PUT", url, json=dict(auth_info), timeout=aiohttp.ClientTimeout(total=10))
             try:
                 if 200 <= resp.status < 300:
-                    return {"success": True, "status": resp.status}
+                    return {"success": True, "status": resp.status, "auth_type": auth_info.get("type")}
                 return {"success": False, "status": resp.status, "error": "auth update failed"}
             finally:
                 await _close_owned_response(resp)
         except Exception as exc:
-            return {"success": False, "error": str(exc).replace(api_key, "***REDACTED***")}
+            return {"success": False, "error": _safe_error_preview(str(exc))}
+
+    async def put_auth(self, provider: str, api_key: str) -> dict[str, Any]:
+        return await self.put_auth_info(provider, {"type": "api", "key": api_key})
 
     async def patch_config(self, config: dict[str, Any]) -> dict[str, Any]:
         url = f"{self.settings.opencode_url.rstrip('/')}/config"
@@ -256,8 +303,9 @@ class OpenCodeClient:
             payload["noReply"] = no_reply
         if tools:
             payload["tools"] = tools
-        if model:
-            payload["model"] = model
+        model_ref = _model_ref_from_value(model)
+        if model_ref:
+            payload["model"] = model_ref
         if agent:
             payload["agent"] = agent
         if system:

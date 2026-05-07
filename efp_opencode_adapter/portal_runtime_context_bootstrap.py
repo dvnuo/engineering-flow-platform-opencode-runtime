@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import aiohttp
 from .opencode_config import build_opencode_config, normalize_opencode_provider_id, write_opencode_config
+from .opencode_auth import build_opencode_auth_from_runtime_config
 from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_profile_config_for_storage
 from .settings import Settings
 
@@ -59,9 +60,9 @@ async def _run(workspace_dir: Path) -> int:
     if not provider and isinstance(model, str) and "/" in model:
         provider = normalize_opencode_provider_id(model.split("/", 1)[0])
 
-    api_key = llm.get("api_key") if isinstance(llm.get("api_key"), str) else None
+    auth_build = build_opencode_auth_from_runtime_config(runtime_config if isinstance(runtime_config, dict) else {})
     auth_written = False
-    if provider and api_key:
+    if auth_build.provider and auth_build.auth_info:
         auth_path = settings.opencode_data_dir / "auth.json"
         auth_path.parent.mkdir(parents=True, exist_ok=True)
         existing = {}
@@ -72,10 +73,14 @@ async def _run(workspace_dir: Path) -> int:
                 existing = {}
         if not isinstance(existing, dict):
             existing = {}
-        existing[provider] = {"type": "api", "key": api_key}
+        existing[auth_build.provider] = auth_build.auth_info
         auth_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
         auth_path.chmod(0o600)
         auth_written = True
+
+    warnings: list[str] = []
+    if auth_build.warning:
+        warnings.append(auth_build.warning)
 
     ProfileOverlayStore(settings).save(ProfileOverlay(
         runtime_profile_id=runtime_profile_id,
@@ -85,13 +90,16 @@ async def _run(workspace_dir: Path) -> int:
         generated_config_hash=config_hash,
         status="applied",
         pending_restart=False,
-        warnings=[],
+        warnings=warnings,
         updated_sections=updated_sections,
         last_apply_error=None,
         applied=True,
     ))
 
-    print(json.dumps({"status": "ok", "runtime_profile_id": runtime_profile_id, "revision": revision, "provider": provider or None, "model": generated.get("agent", {}).get("efp-main", {}).get("model"), "auth_written": auth_written, "config_written": True, "config_hash": config_hash}))
+    out = {"status": "ok", "runtime_profile_id": runtime_profile_id, "revision": revision, "provider": provider or None, "model": generated.get("agent", {}).get("efp-main", {}).get("model"), "auth_written": auth_written, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "config_written": True, "config_hash": config_hash}
+    if auth_build.warning:
+        out["auth_warning"] = auth_build.warning
+    print(json.dumps(out))
     return 0
 
 

@@ -458,3 +458,47 @@ async def test_list_tool_ids_rejects_invalid_shape(monkeypatch):
     monkeypatch.setattr(client, "_request_json", fake_request_json)
     with pytest.raises(OpenCodeClientError, match="unexpected tool ids response shape"):
         await client.list_tool_ids()
+
+@pytest.mark.asyncio
+async def test_put_auth_info_sends_oauth(monkeypatch):
+    app = web.Application()
+    async def put_auth(request: web.Request):
+        assert request.headers.get("Authorization") is None
+        body = await request.json()
+        assert body == {"type": "oauth", "refresh": "gho_R", "access": "gho_A", "expires": 0}
+        return web.json_response({}, status=200)
+    app.router.add_put("/auth/github-copilot", put_auth)
+    server = TestServer(app); await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    result = await OpenCodeClient(Settings.from_env()).put_auth_info("github-copilot", {"type": "oauth", "refresh": "gho_R", "access": "gho_A", "expires": 0})
+    assert result["success"] is True
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_send_message_model_ref_and_error_redaction(monkeypatch):
+    captured = {}
+    app = web.Application()
+    async def post_msg(request: web.Request):
+        captured["body"] = await request.json()
+        return web.json_response({"ok": True}, status=200)
+    app.router.add_post("/session/ses-1/message", post_msg)
+    server = TestServer(app); await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+    await client.send_message("ses-1", parts=[{"type":"text","text":"hi"}], model="github_copilot/gpt-5.4-mini", agent="efp-main")
+    assert captured["body"]["model"] == {"providerID": "github-copilot", "modelID": "gpt-5.4-mini"}
+    await server.close()
+
+    app2 = web.Application()
+    async def bad(_request: web.Request):
+        return web.json_response({"error": "bad", "access": "gho_SECRET", "refresh": "gho_SECRET", "detail": "token=ghu_SECRET"}, status=400)
+    app2.router.add_post("/session/ses-2/message", bad)
+    server2 = TestServer(app2); await server2.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server2))
+    with pytest.raises(OpenCodeClientError) as exc:
+        await OpenCodeClient(Settings.from_env()).send_message("ses-2", parts=[{"type":"text","text":"hi"}], model="gpt-5.4-mini", agent="efp-main")
+    msg = str(exc.value)
+    assert "status 400" in msg
+    assert "gho_SECRET" not in msg and "ghu_SECRET" not in msg
+    await server2.close()
