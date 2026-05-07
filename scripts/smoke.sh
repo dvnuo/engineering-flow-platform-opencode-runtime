@@ -105,18 +105,23 @@ JSON
 ln -sfn "../global-node-modules" "${WORKSPACE_DIR}/.opencode/node_modules"
 
 assert_node_tool_dependency_resolution() {
-  docker exec "${NAME}" node - <<'NODE'
-const fs = require("fs")
-const { createRequire } = require("module")
+  docker exec "${NAME}" sh -lc 'cd /workspace/.opencode/tools && node --input-type=module -' <<'NODE'
+import fs from "node:fs"
+import { fileURLToPath } from "node:url"
 
-const localPrefix = "/workspace/.opencode/node_modules/"
-const probe = "/workspace/.opencode/tools/efp_smoke_tool.ts"
-const req = createRequire(probe)
+const localPrefix = fs.realpathSync("/workspace/.opencode/node_modules") + "/"
 
-const plugin = req.resolve("@opencode-ai/plugin")
-const pluginReq = createRequire(plugin)
-const zod = pluginReq.resolve("zod")
-const effect = pluginReq.resolve("effect")
+const plugin = fileURLToPath(import.meta.resolve("@opencode-ai/plugin"))
+const zod = fileURLToPath(import.meta.resolve("zod"))
+const effect = fileURLToPath(import.meta.resolve("effect"))
+
+const pluginModule = await import("@opencode-ai/plugin")
+if (typeof pluginModule.tool !== "function") {
+  throw new Error("@opencode-ai/plugin did not export a tool function")
+}
+if (!pluginModule.tool.schema) {
+  throw new Error("@opencode-ai/plugin tool helper did not expose schema")
+}
 
 function assertLocal(label, value) {
   const real = fs.realpathSync(value)

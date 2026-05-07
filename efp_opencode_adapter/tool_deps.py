@@ -139,41 +139,14 @@ def _ensure_lock_declares_plugin(config_dir: Path, vendored_dir: Path, plugin_ve
     _write_json(dst_lock, lock_payload)
 
 
+def _summarize_process_output(value: str, *, limit: int = 4000) -> str:
+    value = value.strip()
+    if len(value) <= limit:
+        return value
+    return value[-limit:]
+
+
 def verify_tool_dependency_resolution(config_dir: Path) -> dict[str, str]:
-    probe_file = config_dir / "tools" / "__resolve_probe.ts"
-    script = """
-const { createRequire } = require("module")
-const probeFile = process.env.EFP_OPENCODE_TOOL_RESOLVE_PROBE
-const req = createRequire(probeFile)
-const pluginPath = req.resolve("@opencode-ai/plugin")
-const pluginReq = createRequire(pluginPath)
-const zodPath = pluginReq.resolve("zod")
-const effectPath = pluginReq.resolve("effect")
-console.log(JSON.stringify({ plugin: pluginPath, zod: zodPath, effect: effectPath }))
-"""
-    try:
-        result = subprocess.run(
-            ["node", "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-            env={**os.environ, "EFP_OPENCODE_TOOL_RESOLVE_PROBE": str(probe_file)},
-        )
-    except Exception as exc:
-        raise RuntimeError("OpenCode custom tool dependency resolution failed") from exc
-
-    if result.returncode != 0:
-        raise RuntimeError("OpenCode custom tool dependency resolution failed")
-
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("OpenCode custom tool dependency resolution failed") from exc
-
-    if not isinstance(payload, dict):
-        raise RuntimeError("OpenCode custom tool dependency resolution failed")
-
     configured_node_modules = config_dir / "node_modules"
     if configured_node_modules.is_symlink() or configured_node_modules.is_file():
         raise RuntimeError(
@@ -188,6 +161,67 @@ console.log(JSON.stringify({ plugin: pluginPath, zod: zodPath, effect: effectPat
             "OpenCode custom tool dependency resolution failed: "
             f"{configured_node_modules} resolves outside {config_dir}"
         )
+
+    probe_dir = config_dir / ".efp-tool-deps-probe"
+    probe_file = probe_dir / "resolve.mjs"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    probe_file.write_text(
+        'import { fileURLToPath } from "node:url"\n'
+        '\n'
+        'const pluginUrl = import.meta.resolve("@opencode-ai/plugin")\n'
+        'const zodUrl = import.meta.resolve("zod")\n'
+        'const effectUrl = import.meta.resolve("effect")\n'
+        '\n'
+        'const pluginModule = await import("@opencode-ai/plugin")\n'
+        'if (typeof pluginModule.tool !== "function") {\n'
+        '  throw new Error("@opencode-ai/plugin did not export a tool function")\n'
+        '}\n'
+        'if (!pluginModule.tool.schema) {\n'
+        '  throw new Error("@opencode-ai/plugin tool helper did not expose schema")\n'
+        '}\n'
+        '\n'
+        'console.log(JSON.stringify({\n'
+        '  plugin: fileURLToPath(pluginUrl),\n'
+        '  zod: fileURLToPath(zodUrl),\n'
+        '  effect: fileURLToPath(effectUrl)\n'
+        '}))\n',
+        encoding="utf-8",
+    )
+
+    try:
+        try:
+            result = subprocess.run(
+                ["node", str(probe_file)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+                env=os.environ.copy(),
+            )
+        except Exception as exc:
+            raise RuntimeError("OpenCode custom tool dependency resolution failed") from exc
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                "OpenCode custom tool dependency resolution failed: "
+                f"node exited {result.returncode}; "
+                f"stdout={_summarize_process_output(result.stdout)!r}; "
+                f"stderr={_summarize_process_output(result.stderr)!r}"
+            )
+
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("OpenCode custom tool dependency resolution failed") from exc
+
+        if not isinstance(payload, dict):
+            raise RuntimeError("OpenCode custom tool dependency resolution failed")
+    finally:
+        probe_file.unlink(missing_ok=True)
+        try:
+            probe_dir.rmdir()
+        except OSError:
+            pass
 
     expected_prefix = str(configured_node_modules_resolved) + os.sep
     resolved_paths: dict[str, str] = {}

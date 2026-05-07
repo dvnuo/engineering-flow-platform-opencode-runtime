@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 
 import pytest
 
@@ -15,22 +16,113 @@ def _write_vendored_plugin(vendored_dir, version="1.14.39"):
                 "name": "@opencode-ai/plugin",
                 "version": version,
                 "type": "module",
-                "main": "index.js",
+                "exports": {
+                    ".": {
+                        "import": "./index.js",
+                        "types": "./index.d.ts",
+                    }
+                },
             }
         ),
         encoding="utf-8",
     )
-    (plugin_package.parent / "index.js").write_text('export { z } from "zod"; export * as Effect from "effect";\n', encoding="utf-8")
+    (plugin_package.parent / "index.js").write_text(
+        'import { z } from "zod";\n'
+        "export function tool(input) { return input }\n"
+        "tool.schema = z\n",
+        encoding="utf-8",
+    )
+    (plugin_package.parent / "index.d.ts").write_text("export declare const tool: any;\n", encoding="utf-8")
 
     zod_pkg = vendored_dir / "node_modules" / "zod" / "package.json"
     zod_pkg.parent.mkdir(parents=True, exist_ok=True)
-    zod_pkg.write_text(json.dumps({"name": "zod", "version": "3.0.0", "main": "index.js"}), encoding="utf-8")
-    (zod_pkg.parent / "index.js").write_text("module.exports = {};\n", encoding="utf-8")
+    zod_pkg.write_text(
+        json.dumps(
+            {
+                "name": "zod",
+                "version": "3.0.0",
+                "type": "module",
+                "exports": {".": {"import": "./index.js", "types": "./index.d.ts"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (zod_pkg.parent / "index.js").write_text("export const z = {}; export default z;\n", encoding="utf-8")
+    (zod_pkg.parent / "index.d.ts").write_text("export declare const z: any;\n", encoding="utf-8")
 
     eff_pkg = vendored_dir / "node_modules" / "effect" / "package.json"
     eff_pkg.parent.mkdir(parents=True, exist_ok=True)
-    eff_pkg.write_text(json.dumps({"name": "effect", "version": "3.0.0", "main": "index.js"}), encoding="utf-8")
-    (eff_pkg.parent / "index.js").write_text("module.exports = {};\n", encoding="utf-8")
+    eff_pkg.write_text(
+        json.dumps(
+            {
+                "name": "effect",
+                "version": "3.0.0",
+                "type": "module",
+                "exports": {".": {"import": "./index.js", "types": "./index.d.ts"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (eff_pkg.parent / "index.js").write_text("export const Effect = {};\n", encoding="utf-8")
+    (eff_pkg.parent / "index.d.ts").write_text("export declare const Effect: any;\n", encoding="utf-8")
+
+
+def _write_vendored_plugin_import_only_exports(vendored_dir, version="1.14.39"):
+    plugin_dir = vendored_dir / "node_modules" / "@opencode-ai" / "plugin"
+    dist_dir = plugin_dir / "dist"
+    dist_dir.mkdir(parents=True, exist_ok=True)
+
+    (plugin_dir / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "@opencode-ai/plugin",
+                "version": version,
+                "type": "module",
+                "exports": {
+                    ".": {
+                        "import": "./dist/index.js",
+                        "types": "./dist/index.d.ts",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    (dist_dir / "index.js").write_text(
+        'import { z } from "zod";\n'
+        'import { Effect } from "effect";\n'
+        'export function tool(input) { return input }\n'
+        'tool.schema = z\n'
+        'export { Effect }\n',
+        encoding="utf-8",
+    )
+    (dist_dir / "index.d.ts").write_text("export declare const tool: any;\n", encoding="utf-8")
+
+    for name, export_code in {
+        "zod": "export const z = { string: () => ({ describe() { return this } }) }; export default z;\n",
+        "effect": "export const Effect = {};\n",
+    }.items():
+        pkg_dir = vendored_dir / "node_modules" / name
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        (pkg_dir / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": name,
+                    "version": "3.0.0",
+                    "type": "module",
+                    "exports": {
+                        ".": {
+                            "import": "./index.js",
+                            "types": "./index.d.ts",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (pkg_dir / "index.js").write_text(export_code, encoding="utf-8")
+        (pkg_dir / "index.d.ts").write_text("export declare const x: any;\n", encoding="utf-8")
 
 
 def _write_vendored_bin_symlink(vendored_dir):
@@ -69,6 +161,34 @@ def test_ensure_tool_deps_verifies_node_resolution(tmp_path):
 
     result = ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
     assert ".opencode/node_modules/@opencode-ai/plugin" in result["resolved_plugin"]
+
+
+def test_ensure_tool_deps_supports_import_only_package_exports(tmp_path):
+    workspace = tmp_path / "workspace"
+    vendored = tmp_path / "vendored"
+    _write_vendored_plugin_import_only_exports(vendored)
+
+    result = ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
+
+    assert result["status"] == "ok"
+    assert ".opencode/node_modules/@opencode-ai/plugin" in result["resolved_plugin"]
+    assert ".opencode/node_modules/zod" in result["resolved_zod"]
+    assert ".opencode/node_modules/effect" in result["resolved_effect"]
+
+
+def test_verify_tool_dependency_resolution_includes_node_stderr_on_failure(tmp_path):
+    workspace = tmp_path / "workspace"
+    vendored = tmp_path / "vendored"
+    _write_vendored_plugin_import_only_exports(vendored)
+
+    shutil.rmtree(vendored / "node_modules" / "zod")
+
+    with pytest.raises(RuntimeError) as exc:
+        ensure_tool_deps(workspace_dir=workspace, vendored_dir=vendored)
+
+    message = str(exc.value)
+    assert "OpenCode custom tool dependency resolution failed" in message
+    assert "stderr=" in message or "stdout=" in message
 
 
 def test_ensure_tool_deps_fails_when_transitive_dep_missing(tmp_path):

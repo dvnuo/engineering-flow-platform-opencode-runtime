@@ -91,10 +91,12 @@ def test_smoke_script_uses_root_state_and_asserts_root_user():
 def test_smoke_script_validates_node_resolution_helpers():
     script = _script()
     assert "assert_node_tool_dependency_resolution" in script
-    assert "createRequire" in script
-    assert 'req.resolve("@opencode-ai/plugin")' in script
-    assert 'pluginReq.resolve("zod")' in script
-    assert 'pluginReq.resolve("effect")' in script
+    assert 'import.meta.resolve("@opencode-ai/plugin")' in script
+    assert 'import.meta.resolve("zod")' in script
+    assert 'import.meta.resolve("effect")' in script
+    assert 'await import("@opencode-ai/plugin")' in script
+    assert "createRequire" not in script
+    assert 'req.resolve("@opencode-ai/plugin")' not in script
 
 
 def test_smoke_script_checks_registry_on_first_start_and_restart():
@@ -131,7 +133,7 @@ def test_smoke_script_asserts_plugin_zod_effect_realpaths_are_workspace_local():
     assert 'assertLocal("plugin", plugin)' in script
     assert 'assertLocal("zod", zod)' in script
     assert 'assertLocal("effect", effect)' in script
-    assert '/workspace/.opencode/node_modules/' in script
+    assert '/workspace/.opencode/node_modules' in script
     assert 'resolved outside workspace .opencode node_modules' in script
 
 
