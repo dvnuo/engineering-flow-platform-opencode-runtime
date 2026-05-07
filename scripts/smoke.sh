@@ -18,6 +18,7 @@ RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL="${RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL:-
 RUNTIME_CONTRACT_EXPECT_TOOL_MAPPING="${RUNTIME_CONTRACT_EXPECT_TOOL_MAPPING:-${RUNTIME_CONTRACT_EXPECT_LEGACY_TOOL}:${RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL}}"
 RUNTIME_CONTRACT_EXPECT_TOOL="${RUNTIME_CONTRACT_EXPECT_TOOL:-${RUNTIME_CONTRACT_EXPECT_LEGACY_TOOL}}"
 RUNTIME_CONTRACT_EXPECT_EFP_TOOL="${RUNTIME_CONTRACT_EXPECT_EFP_TOOL:-${RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL}}"
+OPENCODE_VERSION="${OPENCODE_VERSION:-1.14.39}"
 
 dump_logs_on_failure() {
   local status="$1"
@@ -174,6 +175,19 @@ assert_workspace_node_modules_is_local_directory() {
   '
 }
 
+assert_opencode_binary_version() {
+  docker exec "${NAME}" sh -lc '
+    actual="$(opencode --version | grep -Eo "[0-9]+\.[0-9]+\.[0-9]+" | head -1)"
+    test "${actual}" = "'"${OPENCODE_VERSION}"'"
+    node -e "
+const fs = require(\"fs\")
+const pkg = JSON.parse(fs.readFileSync(\"/app/runtime/package.json\", \"utf8\"))
+if (pkg.dependencies[\"opencode-ai\"] !== \"'"${OPENCODE_VERSION}"'\") { throw new Error(`package opencode-ai mismatch: ${pkg.dependencies[\"opencode-ai\"]}`) }
+if (pkg.dependencies[\"@opencode-ai/plugin\"] !== \"'"${OPENCODE_VERSION}"'\") { throw new Error(`package @opencode-ai/plugin mismatch: ${pkg.dependencies[\"@opencode-ai/plugin\"]}`) }
+"
+  '
+}
+
 run_runtime_contract_tests() {
   if [[ "${RUN_RUNTIME_CONTRACT_TESTS}" != "1" ]]; then
     return 0
@@ -191,7 +205,11 @@ run_runtime_contract_tests() {
     python -m pytest -q runtime_contract_tests
 }
 
-docker build -t efp-opencode-runtime:test .
+BUILD_FLAGS=()
+if [[ "${EFP_SMOKE_NO_CACHE:-0}" == "1" ]]; then
+  BUILD_FLAGS+=(--no-cache --pull)
+fi
+docker build "${BUILD_FLAGS[@]}" --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" -t efp-opencode-runtime:test .
 docker run -d --name "${NAME}" -p 8000:8000 -e OPENCODE_SERVER_PASSWORD=test-password -e OPENCODE_DATA_DIR=/root/.local/share/opencode -e EFP_ADAPTER_STATE_DIR=/root/.local/share/efp-compat -v "${WORKSPACE_DIR}:/workspace" -v "${ADAPTER_STATE_DIR}:/root/.local/share/efp-compat" -v "${OPENCODE_STATE_DIR}:/root/.local/share/opencode" -v "${SKILLS_DIR}:/app/skills:ro" -v "${TOOLS_DIR}:/app/tools:ro" efp-opencode-runtime:test >/dev/null
 
 wait_health() {
@@ -216,6 +234,7 @@ assert_health_state() {
 
 wait_health
 assert_health_state
+assert_opencode_binary_version
 assert_node_tool_dependency_resolution
 assert_opencode_tool_registry
 assert_workspace_package_lock_declares_plugin
@@ -245,6 +264,7 @@ docker exec "${NAME}" sh -lc 'echo opencode-persist > /root/.local/share/opencod
 docker restart "${NAME}" >/dev/null
 wait_health
 assert_health_state
+assert_opencode_binary_version
 assert_node_tool_dependency_resolution
 assert_opencode_tool_registry
 assert_workspace_package_lock_declares_plugin

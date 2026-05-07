@@ -29,6 +29,8 @@ def test_dockerfile_vendors_opencode_plugin_for_workspace_tool_resolution():
     assert '--prefix "${EFP_OPENCODE_TOOL_DEPS_DIR}"' in text
     assert '"@opencode-ai/plugin@${OPENCODE_VERSION}"' in text
     assert 'test -f "${EFP_OPENCODE_TOOL_DEPS_DIR}/node_modules/@opencode-ai/plugin/package.json"' in text
+    assert 'test "${actual}" = "${OPENCODE_VERSION}"' in text
+    assert "vendored @opencode-ai/plugin version" in text
 
 
 def test_entrypoint_materializes_tool_deps_before_opencode_serve():
@@ -62,3 +64,7 @@ def test_entrypoint_checks_tool_registry_after_health_before_server():
     assert "python -m efp_opencode_adapter.server" in text
     assert text.index("python -m efp_opencode_adapter.health --wait") < text.index("python -m efp_opencode_adapter.tool_registry_check")
     assert text.index("python -m efp_opencode_adapter.tool_registry_check") < text.index("python -m efp_opencode_adapter.server")
+    assert "OPENCODE_LOG_FILE" in text
+    assert "tool_registry_diagnostics" in text
+    assert "tail -200" in text
+    assert "--request-timeout" in text

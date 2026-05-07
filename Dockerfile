@@ -55,7 +55,16 @@ RUN set -eux; \
     --no-fund \
     "@opencode-ai/plugin@${OPENCODE_VERSION}"; \
   test -f "${EFP_OPENCODE_TOOL_DEPS_DIR}/node_modules/@opencode-ai/plugin/package.json"; \
-  opencode --version
+  actual="$(opencode --version | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"; \
+  test "${actual}" = "${OPENCODE_VERSION}"; \
+  node -e '\
+const fs = require("fs")\
+const path = process.env.EFP_OPENCODE_TOOL_DEPS_DIR + "/node_modules/@opencode-ai/plugin/package.json"\
+const actual = JSON.parse(fs.readFileSync(path, "utf8")).version\
+if (actual !== process.env.OPENCODE_VERSION) {\
+  throw new Error(`vendored @opencode-ai/plugin version ${actual} != OPENCODE_VERSION ${process.env.OPENCODE_VERSION}`)\
+}\
+'
 
 WORKDIR /app/runtime
 COPY pyproject.toml README.md package*.json ./

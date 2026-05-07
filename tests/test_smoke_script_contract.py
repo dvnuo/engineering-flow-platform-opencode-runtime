@@ -57,7 +57,7 @@ def test_smoke_script_does_not_enable_live_llm_contracts_by_default():
 
 def test_smoke_script_runs_contract_tests_after_restart():
     script = _script()
-    assert script.count('run_runtime_contract_tests') >= 3
+    assert _call_count(script, "run_runtime_contract_tests") >= 2
     assert 'docker restart' in script
 
 
@@ -103,6 +103,7 @@ def test_smoke_script_checks_registry_on_first_start_and_restart():
     script = _script()
 
     assert _call_count(script, "assert_node_tool_dependency_resolution") >= 2
+    assert _call_count(script, "assert_opencode_binary_version") >= 2
     assert _call_count(script, "assert_opencode_tool_registry") >= 2
     assert _call_count(script, "assert_workspace_package_lock_declares_plugin") >= 2
 
@@ -111,11 +112,13 @@ def test_smoke_script_checks_registry_on_first_start_and_restart():
         script.index("docker exec \"${NAME}\" sh -lc 'echo adapter-persist")
     ]
     assert "assert_node_tool_dependency_resolution" in first_segment
+    assert "assert_opencode_binary_version" in first_segment
     assert "assert_opencode_tool_registry" in first_segment
     assert "assert_workspace_package_lock_declares_plugin" in first_segment
 
     restart_segment = script[script.index("docker restart"):]
     assert "assert_node_tool_dependency_resolution" in restart_segment
+    assert "assert_opencode_binary_version" in restart_segment
     assert "assert_opencode_tool_registry" in restart_segment
     assert "assert_workspace_package_lock_declares_plugin" in restart_segment
 
@@ -144,3 +147,11 @@ def test_smoke_script_preseeds_and_repairs_node_modules_root_symlink():
     assert "assert_workspace_node_modules_is_local_directory" in script
     assert _call_count(script, "assert_workspace_node_modules_is_local_directory") >= 2
     assert "test ! -L /workspace/.opencode/node_modules" in script
+
+
+def test_smoke_script_builds_with_explicit_opencode_version_build_arg_and_checks_version():
+    script = _script()
+    assert '--build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}"' in script
+    assert "assert_opencode_binary_version" in script
+    assert "opencode --version" in script
+    assert "/app/runtime/package.json" in script

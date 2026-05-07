@@ -395,6 +395,36 @@ async def test_request_json_with_status_wraps_timeout_as_opencode_client_error()
 
 
 @pytest.mark.asyncio
+async def test_request_json_transport_error_includes_exception_type_for_timeout():
+    class InjectedTimeoutSession:
+        def request(self, *args, **kwargs):
+            raise asyncio.TimeoutError()
+
+    client = OpenCodeClient(Settings.from_env(), session=InjectedTimeoutSession())  # type: ignore[arg-type]
+    with pytest.raises(OpenCodeClientError) as exc:
+        await client.list_tool_ids()
+    message = str(exc.value)
+    assert "transport error" in message
+    assert "TimeoutError" in message
+    assert "TimeoutError()" in message
+
+
+@pytest.mark.asyncio
+async def test_request_json_with_status_transport_error_includes_exception_type_for_timeout():
+    class InjectedTimeoutSession:
+        def request(self, *args, **kwargs):
+            raise asyncio.TimeoutError()
+
+    client = OpenCodeClient(Settings.from_env(), session=InjectedTimeoutSession())  # type: ignore[arg-type]
+    with pytest.raises(OpenCodeClientError) as exc:
+        await client.abort_session("ses-1")
+    message = str(exc.value)
+    assert "transport error" in message
+    assert "TimeoutError" in message
+    assert "TimeoutError()" in message
+
+
+@pytest.mark.asyncio
 async def test_list_tool_ids_handles_list_response(monkeypatch):
     client = OpenCodeClient(Settings.from_env())
 
