@@ -2,7 +2,7 @@ FROM ubuntu:24.04
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ARG OPENCODE_VERSION=1.14.29
+ARG OPENCODE_VERSION=1.14.39
 ARG NODE_MAJOR=22
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -12,6 +12,7 @@ ENV PATH="/opt/venv/bin:/usr/local/bin:${PATH}"
 ENV NODE_PATH=/usr/local/lib/node_modules
 ENV NPM_CONFIG_PREFIX=/usr/local
 ENV HOME=/root
+ENV EFP_OPENCODE_TOOL_DEPS_DIR=/opt/opencode-tool-deps
 
 RUN set -eux; \
   apt-get update; \
@@ -45,7 +46,25 @@ RUN set -eux; \
 
 RUN set -eux; \
   npm install -g "opencode-ai@${OPENCODE_VERSION}" "@opencode-ai/plugin@${OPENCODE_VERSION}"; \
-  opencode --version
+  mkdir -p "${EFP_OPENCODE_TOOL_DEPS_DIR}"; \
+  npm install \
+    --prefix "${EFP_OPENCODE_TOOL_DEPS_DIR}" \
+    --omit=dev \
+    --ignore-scripts \
+    --no-audit \
+    --no-fund \
+    "@opencode-ai/plugin@${OPENCODE_VERSION}"; \
+  test -f "${EFP_OPENCODE_TOOL_DEPS_DIR}/node_modules/@opencode-ai/plugin/package.json"; \
+  actual="$(opencode --version | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"; \
+  test "${actual}" = "${OPENCODE_VERSION}"; \
+  node -e '\
+const fs = require("fs")\
+const path = process.env.EFP_OPENCODE_TOOL_DEPS_DIR + "/node_modules/@opencode-ai/plugin/package.json"\
+const actual = JSON.parse(fs.readFileSync(path, "utf8")).version\
+if (actual !== process.env.OPENCODE_VERSION) {\
+  throw new Error(`vendored @opencode-ai/plugin version ${actual} != OPENCODE_VERSION ${process.env.OPENCODE_VERSION}`)\
+}\
+'
 
 WORKDIR /app/runtime
 COPY pyproject.toml README.md package*.json ./

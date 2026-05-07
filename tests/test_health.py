@@ -17,7 +17,7 @@ class FakeUnhealthyClient:
 
 @pytest.mark.asyncio
 async def test_health_ok(monkeypatch):
-    monkeypatch.setenv("OPENCODE_VERSION", "1.14.29")
+    monkeypatch.setenv("OPENCODE_VERSION", "1.14.39")
     app = create_app(Settings.from_env(), opencode_client=FakeHealthyClient())
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -39,7 +39,7 @@ async def test_health_ok(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_health_reports_observed_opencode_version_without_enforcing_config(monkeypatch):
-    monkeypatch.setenv("OPENCODE_VERSION", "1.14.29")
+    monkeypatch.setenv("OPENCODE_VERSION", "1.14.39")
     app = create_app(Settings.from_env(), opencode_client=FakeHealthyClient())
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -53,7 +53,7 @@ async def test_health_reports_observed_opencode_version_without_enforcing_config
 
 @pytest.mark.asyncio
 async def test_health_degraded(monkeypatch):
-    monkeypatch.setenv("OPENCODE_VERSION", "1.14.29")
+    monkeypatch.setenv("OPENCODE_VERSION", "1.14.39")
     app = create_app(Settings.from_env(), opencode_client=FakeUnhealthyClient())
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -72,7 +72,7 @@ async def test_health_degraded(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_health_degraded_when_state_unwritable(monkeypatch):
-    monkeypatch.setenv("OPENCODE_VERSION", "1.14.29")
+    monkeypatch.setenv("OPENCODE_VERSION", "1.14.39")
     app = create_app(Settings.from_env(), opencode_client=FakeHealthyClient())
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -96,7 +96,7 @@ class SecretErrorClient:
 
 @pytest.mark.asyncio
 async def test_health_degraded_sanitizes_secret_error(monkeypatch):
-    monkeypatch.setenv("OPENCODE_VERSION", "1.14.29")
+    monkeypatch.setenv("OPENCODE_VERSION", "1.14.39")
     app = create_app(Settings.from_env(), opencode_client=SecretErrorClient())
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -116,7 +116,7 @@ class RaisingHealthClient:
 
 @pytest.mark.asyncio
 async def test_health_client_exception_is_degraded_and_does_not_leak_secret(monkeypatch, capsys):
-    monkeypatch.setenv("OPENCODE_VERSION", "1.14.29")
+    monkeypatch.setenv("OPENCODE_VERSION", "1.14.39")
     app = create_app(Settings.from_env(), opencode_client=RaisingHealthClient())
     client = TestClient(TestServer(app))
     await client.start_server()

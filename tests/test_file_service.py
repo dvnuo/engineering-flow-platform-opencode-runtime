@@ -20,7 +20,7 @@ def make_settings(tmp_path: Path) -> Settings:
         tools_dir=tmp_path / "tools",
         opencode_data_dir=tmp_path / "opencode-state",
         opencode_config_path=tmp_path / "workspace/.opencode/opencode.json",
-        opencode_version="1.14.29",
+        opencode_version="1.14.39",
         ready_timeout_seconds=60,
     )
 
@@ -120,7 +120,7 @@ async def test_legacy_alias_routes(tmp_path):
 
     class FakeHealthy:
         async def health(self):
-            return {"healthy": True, "version": "1.14.29"}
+            return {"healthy": True, "version": "1.14.39"}
 
     client = TestClient(TestServer(create_app(settings, opencode_client=FakeHealthy())))
     await client.start_server()

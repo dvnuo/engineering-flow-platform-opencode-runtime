@@ -18,6 +18,7 @@ RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL="${RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL:-
 RUNTIME_CONTRACT_EXPECT_TOOL_MAPPING="${RUNTIME_CONTRACT_EXPECT_TOOL_MAPPING:-${RUNTIME_CONTRACT_EXPECT_LEGACY_TOOL}:${RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL}}"
 RUNTIME_CONTRACT_EXPECT_TOOL="${RUNTIME_CONTRACT_EXPECT_TOOL:-${RUNTIME_CONTRACT_EXPECT_LEGACY_TOOL}}"
 RUNTIME_CONTRACT_EXPECT_EFP_TOOL="${RUNTIME_CONTRACT_EXPECT_EFP_TOOL:-${RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL}}"
+OPENCODE_VERSION="${OPENCODE_VERSION:-1.14.39}"
 
 dump_logs_on_failure() {
   local status="$1"
@@ -77,11 +78,115 @@ import argparse, json
 from pathlib import Path
 p=argparse.ArgumentParser(); p.add_argument('--tools-dir'); p.add_argument('--opencode-tools-dir'); p.add_argument('--state-dir'); a=p.parse_args()
 out=Path(a.opencode_tools_dir); out.mkdir(parents=True, exist_ok=True)
-(out/'efp_smoke_tool.ts').write_text('export default async function efp_smoke_tool() { return { ok: true }; }\n', encoding='utf-8')
+(out/'efp_smoke_tool.ts').write_text('import { tool } from "@opencode-ai/plugin"\n\nexport default tool({\n  description: "Smoke read-only tool",\n  args: {\n    query: tool.schema.string().describe("query")\n  },\n  async execute(args, context) {\n    return {\n      output: JSON.stringify({\n        ok: true,\n        query: args.query,\n        session_id: context.sessionID,\n        runtime_type: "opencode"\n      })\n    }\n  }\n})\n', encoding='utf-8')
 state=Path(a.state_dir); state.mkdir(parents=True, exist_ok=True)
 (state/'tools-index.json').write_text(json.dumps({'tools':[{'capability_id':'smoke.tool','tool_id':'smoke.tool','name':'efp_smoke_tool','opencode_name':'efp_smoke_tool','legacy_name':'smoke_tool','description':'Smoke read-only tool','enabled':True,'policy_tags':['read_only','smoke'],'runtime_compat':['opencode'],'risk_level':'low','requires_identity_binding':False,'type':'adapter_action','source_ref':'scripts/smoke.sh'}]}), encoding='utf-8')
 PY
 chmod +x "${TOOLS_DIR}/adapters/opencode/generate_tools.py"
+
+mkdir -p "${WORKSPACE_DIR}/.opencode"
+cat > "${WORKSPACE_DIR}/.opencode/package-lock.json" <<'LOCK'
+{
+  "name": "stale-opencode-workspace",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "dependencies": {}
+    }
+  }
+}
+LOCK
+
+mkdir -p "${WORKSPACE_DIR}/global-node-modules/@opencode-ai/plugin"
+cat > "${WORKSPACE_DIR}/global-node-modules/@opencode-ai/plugin/package.json" <<'JSON'
+{"name":"@opencode-ai/plugin","version":"old"}
+JSON
+
+ln -sfn "../global-node-modules" "${WORKSPACE_DIR}/.opencode/node_modules"
+
+assert_node_tool_dependency_resolution() {
+  docker exec "${NAME}" sh -lc 'cd /workspace/.opencode/tools && node --input-type=module -' <<'NODE'
+import fs from "node:fs"
+import { fileURLToPath } from "node:url"
+
+const localPrefix = fs.realpathSync("/workspace/.opencode/node_modules") + "/"
+
+const plugin = fileURLToPath(import.meta.resolve("@opencode-ai/plugin"))
+const zod = fileURLToPath(import.meta.resolve("zod"))
+const effect = fileURLToPath(import.meta.resolve("effect"))
+
+const pluginModule = await import("@opencode-ai/plugin")
+if (typeof pluginModule.tool !== "function") {
+  throw new Error("@opencode-ai/plugin did not export a tool function")
+}
+if (!pluginModule.tool.schema) {
+  throw new Error("@opencode-ai/plugin tool helper did not expose schema")
+}
+
+function assertLocal(label, value) {
+  const real = fs.realpathSync(value)
+  if (!real.startsWith(localPrefix)) {
+    throw new Error(`${label} resolved outside workspace .opencode node_modules: ${value} -> ${real}`)
+  }
+  return real
+}
+
+const realPlugin = assertLocal("plugin", plugin)
+const realZod = assertLocal("zod", zod)
+const realEffect = assertLocal("effect", effect)
+
+console.log(JSON.stringify({
+  plugin,
+  zod,
+  effect,
+  realPlugin,
+  realZod,
+  realEffect
+}))
+NODE
+}
+
+assert_opencode_tool_registry() {
+  docker exec "${NAME}" sh -lc '
+    curl -fsS -u "${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}" \
+      http://127.0.0.1:4096/experimental/tool/ids \
+    | python -c "
+import json, sys
+payload=json.load(sys.stdin)
+ids = payload if isinstance(payload, list) else payload.get(\"ids\") or payload.get(\"tools\") or []
+if \"efp_smoke_tool\" not in ids:
+    raise SystemExit(f\"efp_smoke_tool not found in {ids!r}\")
+"
+  '
+}
+
+assert_workspace_package_lock_declares_plugin() {
+  docker exec "${NAME}" sh -lc '
+    jq -e ".packages[\"\"].dependencies[\"@opencode-ai/plugin\"]" \
+      /workspace/.opencode/package-lock.json >/dev/null
+  '
+}
+
+assert_workspace_node_modules_is_local_directory() {
+  docker exec "${NAME}" sh -lc '
+    test -d /workspace/.opencode/node_modules
+    test ! -L /workspace/.opencode/node_modules
+  '
+}
+
+assert_opencode_binary_version() {
+  docker exec "${NAME}" sh -lc '
+    actual="$(opencode --version | grep -Eo "[0-9]+\.[0-9]+\.[0-9]+" | head -1)"
+    test "${actual}" = "'"${OPENCODE_VERSION}"'"
+    node -e "
+const fs = require(\"fs\")
+const pkg = JSON.parse(fs.readFileSync(\"/app/runtime/package.json\", \"utf8\"))
+if (pkg.dependencies[\"opencode-ai\"] !== \"'"${OPENCODE_VERSION}"'\") { throw new Error(`package opencode-ai mismatch: ${pkg.dependencies[\"opencode-ai\"]}`) }
+if (pkg.dependencies[\"@opencode-ai/plugin\"] !== \"'"${OPENCODE_VERSION}"'\") { throw new Error(`package @opencode-ai/plugin mismatch: ${pkg.dependencies[\"@opencode-ai/plugin\"]}`) }
+"
+  '
+}
 
 run_runtime_contract_tests() {
   if [[ "${RUN_RUNTIME_CONTRACT_TESTS}" != "1" ]]; then
@@ -125,12 +230,18 @@ assert_health_state() {
 
 wait_health
 assert_health_state
+assert_opencode_binary_version
+assert_node_tool_dependency_resolution
+assert_opencode_tool_registry
+assert_workspace_package_lock_declares_plugin
+assert_workspace_node_modules_is_local_directory
 
 docker exec "${NAME}" sh -lc 'test "$(id -u)" = "0"'
 docker exec "${NAME}" sh -lc 'test "${HOME:-}" = "/root"'
 
 docker exec "${NAME}" test -f /workspace/.opencode/skills/smoke-skill/SKILL.md
 docker exec "${NAME}" test -f /workspace/.opencode/tools/efp_smoke_tool.ts
+docker exec "${NAME}" test -f /workspace/.opencode/node_modules/@opencode-ai/plugin/package.json
 docker exec "${NAME}" test -f /root/.local/share/efp-compat/skills-index.json
 docker exec "${NAME}" test -f /root/.local/share/efp-compat/tools-index.json
 docker exec "${NAME}" sh -lc "grep -q 'smoke_tool -> efp_smoke_tool' /workspace/.opencode/skills/smoke-skill/SKILL.md"
@@ -149,10 +260,16 @@ docker exec "${NAME}" sh -lc 'echo opencode-persist > /root/.local/share/opencod
 docker restart "${NAME}" >/dev/null
 wait_health
 assert_health_state
+assert_opencode_binary_version
+assert_node_tool_dependency_resolution
+assert_opencode_tool_registry
+assert_workspace_package_lock_declares_plugin
+assert_workspace_node_modules_is_local_directory
 docker exec "${NAME}" test -f /root/.local/share/efp-compat/persistence-sentinel.txt
 docker exec "${NAME}" test -f /root/.local/share/opencode/persistence-sentinel.txt
 docker exec "${NAME}" test -f /workspace/.opencode/skills/smoke-skill/SKILL.md
 docker exec "${NAME}" test -f /workspace/.opencode/tools/efp_smoke_tool.ts
+docker exec "${NAME}" test -f /workspace/.opencode/node_modules/@opencode-ai/plugin/package.json
 docker exec "${NAME}" sh -lc "grep -q 'smoke_tool -> efp_smoke_tool' /workspace/.opencode/skills/smoke-skill/SKILL.md"
 docker exec "${NAME}" sh -lc "jq -e '.skills[] | select(.opencode_name == \"smoke-skill\") | .opencode_tools | index(\"efp_smoke_tool\")' /root/.local/share/efp-compat/skills-index.json >/dev/null"
 run_runtime_contract_tests

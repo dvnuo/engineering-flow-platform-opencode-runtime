@@ -14,7 +14,7 @@ class FakeOpenCodeClient:
         self.abort_session_called = 0
 
     async def health(self):
-        return {"healthy": True, "version": "1.14.29"}
+        return {"healthy": True, "version": "1.14.39"}
 
     async def create_session(self, title=None):
         self.create_calls += 1
