@@ -35,10 +35,8 @@ def test_smoke_script_asserts_local_opencode_plugin_dependency():
 
 def test_smoke_script_forces_opencode_tool_registry_import():
     script = _script()
-    assert '/experimental/tool/ids' in script
     assert 'efp_smoke_tool' in script
-    assert 'OPENCODE_SERVER_USERNAME' in script
-    assert 'OPENCODE_SERVER_PASSWORD' in script
+    assert "tool_registry_check" in script
 
 
 def test_smoke_script_can_run_runtime_contract_tests():

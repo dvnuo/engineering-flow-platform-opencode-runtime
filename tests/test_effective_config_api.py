@@ -3,6 +3,7 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from efp_opencode_adapter.profile_store import ProfileOverlay, ProfileOverlayStore
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 
@@ -13,7 +14,7 @@ class FakeClient:
 
 
 @pytest.mark.asyncio
-async def test_effective_config_auth_present(tmp_path, monkeypatch):
+async def test_effective_config_auth_present_and_profile(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     state = tmp_path / "state"
     data = tmp_path / "data"
@@ -25,9 +26,14 @@ async def test_effective_config_auth_present(tmp_path, monkeypatch):
     (workspace / ".opencode/opencode.json").write_text(json.dumps({"agent": {"efp-main": {"model": "github-copilot/gpt-x"}}, "provider": {"github-copilot": {"options": {"baseURL": "http://x"}}}}))
     data.mkdir(parents=True, exist_ok=True)
     (data / "auth.json").write_text(json.dumps({"github-copilot": {"type": "api", "key": "SECRET"}}))
-    app = create_app(Settings.from_env(), opencode_client=FakeClient())
+    settings = Settings.from_env()
+    ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id="rp-1", revision=3, config={}, applied_at="2026-01-01T00:00:00Z", generated_config_hash="h", status="applied", pending_restart=False, warnings=[], updated_sections=["llm"], last_apply_error=None, applied=True))
+
+    app = create_app(settings, opencode_client=FakeClient())
     c = TestClient(TestServer(app)); await c.start_server()
     body = await (await c.get('/api/internal/opencode-effective-config')).json()
     assert body['auth']['present'] is True
+    assert body['profile']['runtime_profile_id'] == 'rp-1'
+    assert body['profile']['revision'] == 3
     assert 'SECRET' not in json.dumps(body)
     await c.close()

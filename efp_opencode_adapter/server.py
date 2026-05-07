@@ -189,6 +189,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
         except Exception:
             auth = {}
     auth_obj = auth.get(provider) if isinstance(auth, dict) else None
+    overlay = ProfileOverlayStore(settings).load()
     return web.json_response(
         {
             "engine": "opencode",
@@ -198,6 +199,10 @@ async def effective_config_handler(request: web.Request) -> web.Response:
             "auth": {"provider": provider or None, "present": isinstance(auth_obj, dict), "type": auth_obj.get("type") if isinstance(auth_obj, dict) else None},
             "provider_options": (((cfg.get("provider") or {}).get(provider) or {}).get("options") if provider else {}) or {},
             "config_path": str(settings.opencode_config_path),
+            "profile": {
+                "runtime_profile_id": overlay.runtime_profile_id if overlay else None,
+                "revision": overlay.revision if overlay else None,
+            },
         }
     )
 

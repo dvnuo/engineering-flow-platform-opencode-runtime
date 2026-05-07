@@ -54,12 +54,9 @@ def _opencode_binary_version() -> str | dict[str, str] | None:
 
 async def _probe_http(settings: Settings, path: str, timeout: int) -> dict[str, Any]:
     url = f"{settings.opencode_url.rstrip('/')}{path}"
-    auth = None
-    if settings.opencode_server_password:
-        auth = aiohttp.BasicAuth(settings.opencode_server_username, settings.opencode_server_password)
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, auth=auth, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
                 text = await resp.text()
                 return {
                     "ok": 200 <= resp.status < 300,
