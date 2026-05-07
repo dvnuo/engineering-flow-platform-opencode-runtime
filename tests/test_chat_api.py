@@ -96,3 +96,57 @@ async def test_chat_and_stream(tmp_path, monkeypatch):
     assert "token-should-not-leak" not in json.dumps(p_secret["runtime_events"]).lower()
     assert "token-should-not-leak" not in json.dumps(p_secret["_llm_debug"]).lower()
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_final_contract_contains_response_and_done_is_json_marker(tmp_path, monkeypatch):
+    class ContractFakeOpenCodeClient(FakeOpenCodeClient):
+        async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+            user_text = parts[0].get("text", "")
+            user = {"id": f"u-{len(self.messages[session_id])+1}", "role": "user", "parts": [{"type": "text", "text": user_text}]}
+            assistant = {"id": f"a-{len(self.messages[session_id])+2}", "role": "assistant", "parts": [{"type": "text", "text": "hello from opencode"}]}
+            self.messages[session_id].extend([user, assistant])
+            return {"message": assistant, "usage": {"input_tokens": 10, "output_tokens": 5, "cost": 0.001}, "model": model or "test-model", "provider": "test-provider"}
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = ContractFakeOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/chat/stream",
+            json={
+                "message": "hi",
+                "session_id": "s-opencode-contract",
+                "request_id": "r-opencode-contract",
+            },
+        )
+        body = await resp.text()
+        assert resp.status == 200
+        assert "event: final" in body
+        assert "event: done" in body
+        assert body.index("event: final") < body.index("event: done")
+        assert "event: done\ndata: \n\n" not in body
+
+        events = []
+        for chunk in body.strip().split("\n\n"):
+            event_name = None
+            data_line = None
+            for line in chunk.splitlines():
+                if line.startswith("event: "):
+                    event_name = line.removeprefix("event: ")
+                elif line.startswith("data: "):
+                    data_line = line.removeprefix("data: ")
+            if event_name is not None and data_line is not None:
+                events.append((event_name, json.loads(data_line)))
+
+        final_data = next(payload for event_name, payload in events if event_name == "final")
+        assert final_data["response"] == "hello from opencode"
+        assert final_data["session_id"] == "s-opencode-contract"
+        assert final_data["request_id"] == "r-opencode-contract"
+
+        done_data = next(payload for event_name, payload in events if event_name == "done")
+        assert done_data["ok"] is True
+    finally:
+        await client.close()
