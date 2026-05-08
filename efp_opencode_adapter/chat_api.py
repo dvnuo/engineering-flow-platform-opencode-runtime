@@ -478,7 +478,11 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             raw_type = str(event.get("raw_type") or "").lower()
             data = event.get("data") if isinstance(event.get("data"), dict) else {}
             role = str(data.get("message_role") or data.get("role") or data.get("source_role") or event.get("role") or "").lower()
-            is_real = event.get("type") == "message.delta" and raw_type == "message.part.delta" and role != "user"
+            is_real = (
+                event.get("type") == "message.delta"
+                and raw_type == "message.part.delta"
+                and role == "assistant"
+            )
             is_synth = event.get("type") == "assistant_delta" and bool(event.get("synthetic_final_delta") or (event.get("data") or {}).get("synthetic_final_delta"))
             if is_real:
                 sent_real_model_delta = True

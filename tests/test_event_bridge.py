@@ -27,6 +27,11 @@ class FakeClient:
         return {"info": {"id": message_id, "role": "assistant"}, "parts": [{"id": "p1", "messageID": message_id, "type": "text"}]}
 
 
+class FakeClientNoFetch(FakeClient):
+    async def get_message(self, session_id, message_id):
+        raise AssertionError("get_message should not be called when message.updated and part.updated cache are available")
+
+
 @pytest.mark.asyncio
 async def test_normalizes_permission_event_and_maps_portal_session(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
@@ -167,6 +172,27 @@ async def test_publish_raw_event_fetches_message_once_when_delta_cache_miss(tmp_
     event = await bridge.publish_raw_event({"type": "message.part.delta", "sessionID": "oc-1", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "Hi"}})
     assert event["type"] == "message.delta"
     assert fake.get_message_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_raw_event_uses_top_level_properties_cache_without_fetch(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    paths = ensure_state_dirs(settings)
+    fake = FakeClientNoFetch()
+    bridge = OpenCodeEventBridge(settings, fake, EventBus(), SessionStore(paths.sessions_dir), TaskStore(paths.tasks_dir))
+
+    await bridge.publish_raw_event({"id": "evt-message", "type": "message.updated", "properties": {"sessionID": "oc-1", "info": {"id": "m-assistant", "role": "assistant", "sessionID": "oc-1"}}})
+    await bridge.publish_raw_event({"id": "evt-part", "type": "message.part.updated", "properties": {"sessionID": "oc-1", "part": {"id": "p1", "messageID": "m-assistant", "type": "text"}}})
+    event = await bridge.publish_raw_event({"id": "evt-delta", "type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "Hel"}})
+
+    assert event["type"] == "message.delta"
+    assert event["data"]["delta"] == "Hel"
+    assert event["data"]["message_role"] == "assistant"
+    assert event["data"]["part_type"] == "text"
+    assert ("oc-1", "m-assistant", "p1") in bridge._part_meta
+    assert ("oc-1", "m-assistant", "evt-part") not in bridge._part_meta
 @pytest.mark.asyncio
 async def test_event_bridge_redacts_top_level_request_id(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))

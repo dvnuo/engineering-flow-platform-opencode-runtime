@@ -25,6 +25,15 @@ def _sanitize_event_text(value: Any, max_chars: int = 300) -> str:
         return ""
     return "[redacted]"
 
+def _merge_properties_into_canonical(envelope: dict[str, Any]) -> dict[str, Any]:
+    canonical = dict(envelope)
+    props = canonical.get("properties")
+    if isinstance(props, dict):
+        for key, value in props.items():
+            if key not in canonical:
+                canonical[key] = value
+    return canonical
+
 
 def _canonical(raw_event: dict[str, Any]) -> dict[str, Any]:
     payload = raw_event.get("payload")
@@ -36,15 +45,11 @@ def _canonical(raw_event: dict[str, Any]) -> dict[str, Any]:
             canonical["type"] = sync.get("type") or payload.get("type")
             canonical["opencode_event_id"] = sync.get("id")
             return canonical
-        canonical = dict(payload)
-        props = canonical.get("properties")
-        if isinstance(props, dict):
-            canonical.update({k: v for k, v in props.items() if k not in canonical})
-        return canonical
+        return _merge_properties_into_canonical(payload)
     data = raw_event.get("data")
     if isinstance(data, dict):
-        return data
-    return raw_event
+        return _merge_properties_into_canonical(data)
+    return _merge_properties_into_canonical(raw_event)
 
 
 def _event_type(raw_event: dict[str, Any], canonical: dict[str, Any]) -> str:
@@ -171,11 +176,24 @@ def _raw_session_id_from_event(raw_event: dict[str, Any], canonical: dict[str, A
 
 
 def _raw_message_id_from_event(canonical: dict[str, Any], values: dict[str, str]) -> str:
-    return _first_string(values, "messageID", "message_id", "messageId", "id")
+    part = canonical.get("part") if isinstance(canonical.get("part"), dict) else {}
+    for key in ("messageID", "messageId", "message_id"):
+        value = part.get(key)
+        if isinstance(value, str) and value:
+            return value
+    info = canonical.get("info") if isinstance(canonical.get("info"), dict) else {}
+    value = info.get("id")
+    if isinstance(value, str) and value:
+        return value
+    return _first_string(values, "messageID", "message_id", "messageId")
 
 
 def _raw_part_id_from_event(canonical: dict[str, Any], values: dict[str, str]) -> str:
-    return _first_string(values, "partID", "part_id", "partId", "id")
+    part = canonical.get("part") if isinstance(canonical.get("part"), dict) else {}
+    value = part.get("id")
+    if isinstance(value, str) and value:
+        return value
+    return _first_string(values, "partID", "part_id", "partId")
 
 
 def _cache_put_limited(cache: OrderedDict, key: tuple[str, ...], value: Any, limit: int) -> None:

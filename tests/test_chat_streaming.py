@@ -293,3 +293,22 @@ async def test_chat_stream_blocks_message_part_updated_delta_echo(tmp_path, monk
     fake.release.set(); resp=await t; body=await resp.text()
     assert 'event: delta\ndata: {"delta": "hi"' not in body
     await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_blocks_message_part_delta_without_assistant_role(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = SlowFake()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    try:
+        t = asyncio.create_task(c.post("/api/chat/stream", json={"message": "m", "session_id": "portal-stream-missing-role-1", "request_id": "req-stream-missing-role-1"}))
+        await fake.entered.wait()
+        await app[EVENT_BUS_KEY].publish({"type": "message.delta", "session_id": "portal-stream-missing-role-1", "request_id": "raw-1", "raw_type": "message.part.delta", "data": {"delta": "hi"}})
+        fake.release.set()
+        resp = await t
+        body = await resp.text()
+        assert 'event: delta\ndata: {"delta": "hi"' not in body
+    finally:
+        await c.close()
