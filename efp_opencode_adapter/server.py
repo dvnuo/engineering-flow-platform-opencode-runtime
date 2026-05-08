@@ -125,7 +125,7 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
         ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status="failed", pending_restart=False, warnings=warnings, updated_sections=updated_sections, last_apply_error=last_error, applied=False))
         return web.json_response({"success": False, "engine": "opencode", "status": "failed", "applied": False, "pending_restart": False, "config_written": False, "error": "config_write_failed", "warnings": warnings, "status_endpoint": "/api/internal/runtime-profile/status"}, status=500)
     llm = runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
-    if llm and any(key in llm for key in ("provider", "model", "api_key", "temperature", "max_tokens")) and "llm" not in updated_sections:
+    if llm and any(key in llm for key in ("provider", "model", "api_key", "oauth", "temperature", "max_tokens")) and "llm" not in updated_sections:
         updated_sections.append("llm")
     auth_build = build_opencode_auth_from_runtime_config(runtime_config)
     provider = auth_build.provider

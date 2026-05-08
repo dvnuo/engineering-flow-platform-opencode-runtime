@@ -20,7 +20,7 @@ class OpenCodeClientError(Exception):
 
 
 def _format_transport_error(method: str, path: str, exc: BaseException) -> str:
-    return f"{method} {path} transport error ({type(exc).__name__}): {exc!r}"
+    return f"{method} {path} transport error ({type(exc).__name__}): {_safe_error_preview(str(exc) or repr(exc))}"
 
 
 
@@ -108,7 +108,7 @@ class OpenCodeClient:
                 raise OpenCodeClientError(
                     _format_transport_error(method, path, exc),
                     status=None,
-                    payload={"exception_type": type(exc).__name__, "exception_repr": repr(exc)},
+                    payload={"exception_type": type(exc).__name__, "exception": _safe_error_preview(str(exc) or repr(exc))},
                 ) from exc
         async with aiohttp.ClientSession() as session:
             try:
@@ -117,7 +117,7 @@ class OpenCodeClient:
                 raise OpenCodeClientError(
                     _format_transport_error(method, path, exc),
                     status=None,
-                    payload={"exception_type": type(exc).__name__, "exception_repr": repr(exc)},
+                    payload={"exception_type": type(exc).__name__, "exception": _safe_error_preview(str(exc) or repr(exc))},
                 ) from exc
 
     async def _request_json_with_status(self, method: str, path: str, *, json: dict | None = None, expected_statuses: tuple[int, ...] = (200,), timeout_seconds: int = 30) -> tuple[int, Any]:
@@ -143,7 +143,7 @@ class OpenCodeClient:
                 raise OpenCodeClientError(
                     _format_transport_error(method, path, exc),
                     status=None,
-                    payload={"exception_type": type(exc).__name__, "exception_repr": repr(exc)},
+                    payload={"exception_type": type(exc).__name__, "exception": _safe_error_preview(str(exc) or repr(exc))},
                 ) from exc
         async with aiohttp.ClientSession() as session:
             try:
@@ -152,7 +152,7 @@ class OpenCodeClient:
                 raise OpenCodeClientError(
                     _format_transport_error(method, path, exc),
                     status=None,
-                    payload={"exception_type": type(exc).__name__, "exception_repr": repr(exc)},
+                    payload={"exception_type": type(exc).__name__, "exception": _safe_error_preview(str(exc) or repr(exc))},
                 ) from exc
 
     async def _request(self, method: str, url: str, **kwargs):

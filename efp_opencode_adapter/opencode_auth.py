@@ -29,7 +29,8 @@ def build_opencode_auth_from_llm(llm: Mapping[str, Any]) -> AuthBuildResult:
     provider = _provider_from_llm(llm)
     if not provider:
         return AuthBuildResult()
-    api_key = llm.get("api_key") if isinstance(llm.get("api_key"), str) and llm.get("api_key").strip() else None
+    raw_api_key = llm.get("api_key")
+    api_key = raw_api_key.strip() if isinstance(raw_api_key, str) else ""
     if provider == "github-copilot":
         oauth = llm.get("oauth")
         if isinstance(oauth, dict):
@@ -58,9 +59,9 @@ def build_opencode_auth_from_llm(llm: Mapping[str, Any]) -> AuthBuildResult:
                         auth_info[extra] = value.strip()
                 return AuthBuildResult(provider=provider, auth_info=auth_info, auth_type="oauth")
             return AuthBuildResult(provider=provider, warning="github-copilot auth skipped because no valid oauth token was provided")
-        if api_key and api_key.startswith("gho_"):
+        if api_key.startswith("gho_"):
             return AuthBuildResult(provider=provider, auth_info={"type": "oauth", "refresh": api_key, "access": api_key, "expires": 0}, auth_type="oauth")
-        if api_key and api_key.startswith("ghu_"):
+        if api_key.startswith("ghu_"):
             return AuthBuildResult(provider=provider, warning="github-copilot received a legacy ghu_ token from Portal copilot/token_verification flow; OpenCode requires oauth auth generated from GitHub device flow")
         if api_key:
             return AuthBuildResult(provider=provider, warning="github-copilot auth skipped because no valid oauth token was provided")

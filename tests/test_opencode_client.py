@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 import aiohttp
@@ -502,3 +503,28 @@ async def test_send_message_model_ref_and_error_redaction(monkeypatch):
     assert "status 400" in msg
     assert "gho_SECRET" not in msg and "ghu_SECRET" not in msg
     await server2.close()
+
+
+@pytest.mark.asyncio
+async def test_transport_error_message_redacts_secret(monkeypatch):
+    class FailingRequestCtx:
+        async def __aenter__(self):
+            raise aiohttp.ClientError("failed gho_SECRET sk-SECRET")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FailingSession:
+        def request(self, *args, **kwargs):
+            return FailingRequestCtx()
+
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
+    client = OpenCodeClient(Settings.from_env(), session=FailingSession())
+    with pytest.raises(OpenCodeClientError) as exc:
+        await client._request_json("GET", "/global/health")
+    text = str(exc.value)
+    assert "gho_SECRET" not in text
+    assert "sk-SECRET" not in text
+    payload_dump = json.dumps(exc.value.payload)
+    assert "gho_SECRET" not in payload_dump
+    assert "sk-SECRET" not in payload_dump
