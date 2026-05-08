@@ -120,16 +120,6 @@ def _permission_response_from_body(body: Mapping[str, Any]) -> dict[str, str]:
     return {"response": "reject"}
 
 
-def _copilot_integration_headers_for_model(model: str | None) -> dict[str, str] | None:
-    if not isinstance(model, str) or "/" not in model:
-        return None
-    provider_prefix = model.split("/", 1)[0]
-    provider = normalize_opencode_provider_id(provider_prefix)
-    if provider == "github-copilot":
-        return {COPILOT_INTEGRATION_HEADER: COPILOT_INTEGRATION_ID}
-    return None
-
-
 async def _close_owned_response(resp: aiohttp.ClientResponse) -> None:
     session = getattr(resp, "_efp_session", None)
     if session is None:
@@ -381,8 +371,7 @@ class OpenCodeClient:
             payload["agent"] = agent
         if system:
             payload["system"] = system
-        headers = _copilot_integration_headers_for_model(model)
-        return await self._request_json("POST", f"/session/{session_id}/message", json=payload, headers=headers, expected_statuses=(200,))
+        return await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200,))
 
     async def fork_session(self, session_id: str, message_id: str | None = None) -> dict:
         payload = {"messageID": message_id} if message_id else {}
