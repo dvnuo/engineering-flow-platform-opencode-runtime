@@ -27,6 +27,8 @@ def _format_transport_error(method: str, path: str, exc: BaseException) -> str:
 
 _REDACT_KEYS = {"key", "api_key", "apikey", "access", "refresh", "access_token", "refresh_token", "token", "authorization", "password", "secret", "oauth"}
 _SENSITIVE_TEXT_KEYS = {"key", "api_key", "apikey", "access", "refresh", "access_token", "refresh_token", "token", "authorization", "password", "secret", "oauth"}
+COPILOT_INTEGRATION_HEADER = "copilot-integration-id"
+COPILOT_INTEGRATION_ID = "vscode-chat"
 
 
 def _redact_sensitive_text(text: str) -> str:
@@ -90,6 +92,16 @@ def _model_ref_from_value(model: Any) -> dict[str, str] | None:
     return None
 
 
+def _copilot_integration_headers_for_model(model: str | None) -> dict[str, str] | None:
+    if not isinstance(model, str) or "/" not in model:
+        return None
+    provider_prefix = model.split("/", 1)[0]
+    provider = normalize_opencode_provider_id(provider_prefix)
+    if provider == "github-copilot":
+        return {COPILOT_INTEGRATION_HEADER: COPILOT_INTEGRATION_ID}
+    return None
+
+
 async def _close_owned_response(resp: aiohttp.ClientResponse) -> None:
     session = getattr(resp, "_efp_session", None)
     if session is None:
@@ -108,9 +120,9 @@ class OpenCodeClient:
     def _url(self, path: str) -> str:
         return f"{self.settings.opencode_url.rstrip('/')}{path}"
 
-    async def _request_json(self, method: str, path: str, *, json: dict | None = None, expected_statuses: tuple[int, ...] = (200,), timeout_seconds: int = 30) -> Any:
+    async def _request_json(self, method: str, path: str, *, json: dict | None = None, headers: dict[str, str] | None = None, expected_statuses: tuple[int, ...] = (200,), timeout_seconds: int = 30) -> Any:
         async def _run(session: aiohttp.ClientSession) -> Any:
-            async with session.request(method, self._url(path), json=json, timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as resp:
+            async with session.request(method, self._url(path), json=json, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as resp:
                 if resp.status not in expected_statuses:
                     try:
                         err_payload = await resp.json()
@@ -333,7 +345,8 @@ class OpenCodeClient:
             payload["agent"] = agent
         if system:
             payload["system"] = system
-        return await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200, 201))
+        headers = _copilot_integration_headers_for_model(model)
+        return await self._request_json("POST", f"/session/{session_id}/message", json=payload, headers=headers, expected_statuses=(200, 201))
 
     async def fork_session(self, session_id: str, message_id: str | None = None) -> dict:
         payload = {"messageID": message_id} if message_id else {}

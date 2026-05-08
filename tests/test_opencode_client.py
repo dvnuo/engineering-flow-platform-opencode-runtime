@@ -560,3 +560,62 @@ async def test_text_plain_error_body_redacts_json_like_sensitive_keys(monkeypatc
     assert "abc123" not in payload_dump
     assert "def456" not in payload_dump
     await server.close()
+
+@pytest.mark.asyncio
+async def test_send_message_adds_copilot_integration_header(monkeypatch):
+    app = web.Application()
+
+    async def post_message(request: web.Request):
+        assert request.headers.get("copilot-integration-id") == "vscode-chat"
+        body = await request.json()
+        assert "headers" not in body
+        return web.json_response({"ok": True}, status=200)
+
+    app.router.add_post("/session/ses-1/message", post_message)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+
+    await OpenCodeClient(Settings.from_env()).send_message(
+        "ses-1",
+        parts=[{"type": "text", "text": "hi"}],
+        model="github-copilot/gpt-5",
+        agent="efp-main",
+    )
+    await server.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["github-copilot/gpt-x", "github_copilot/gpt-x", "copilot/gpt-x", "github/gpt-x"])
+async def test_send_message_adds_copilot_header_for_aliases(monkeypatch, model):
+    app = web.Application()
+
+    async def post_message(request: web.Request):
+        assert request.headers.get("copilot-integration-id") == "vscode-chat"
+        return web.json_response({"ok": True}, status=200)
+
+    app.router.add_post("/session/ses-1/message", post_message)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+
+    await OpenCodeClient(Settings.from_env()).send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model=model, agent="efp-main")
+    await server.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["openai/gpt-5", "anthropic/claude-sonnet-4-5"])
+async def test_send_message_does_not_add_copilot_header_for_non_copilot(monkeypatch, model):
+    app = web.Application()
+
+    async def post_message(request: web.Request):
+        assert request.headers.get("copilot-integration-id") is None
+        return web.json_response({"ok": True}, status=200)
+
+    app.router.add_post("/session/ses-1/message", post_message)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+
+    await OpenCodeClient(Settings.from_env()).send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model=model, agent="efp-main")
+    await server.close()
