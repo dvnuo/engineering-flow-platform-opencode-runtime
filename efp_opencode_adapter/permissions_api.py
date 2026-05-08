@@ -15,6 +15,26 @@ from .opencode_client import OpenCodeClientError, _permission_response_from_body
 from .thinking_events import build_thinking_event
 from .trace_context import add_trace_context, build_trace_context
 
+_ALLOWED_DECISIONS = {"allow", "deny", "approve", "reject"}
+_ALLOWED_PERMISSION_RESPONSES = {"once", "always", "reject"}
+
+
+def _validate_permission_response_body(body: dict) -> tuple[str, dict[str, str]]:
+    response = body.get("response")
+    decision = body.get("decision")
+
+    if isinstance(response, str) and response in _ALLOWED_PERMISSION_RESPONSES:
+        return response, {"response": response}
+
+    if isinstance(response, str) and response and response not in _ALLOWED_PERMISSION_RESPONSES:
+        raise web.HTTPBadRequest(text=json.dumps({"error": "invalid_response"}), content_type="application/json")
+
+    if decision not in _ALLOWED_DECISIONS:
+        raise web.HTTPBadRequest(text=json.dumps({"error": "invalid_decision"}), content_type="application/json")
+
+    payload = _permission_response_from_body(body)
+    return str(decision), payload
+
 
 async def permission_respond_handler(request: web.Request) -> web.Response:
     permission_id = request.match_info["permission_id"]
@@ -24,9 +44,7 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text=json.dumps({"error": "invalid_json"}), content_type="application/json")
     if not isinstance(body, dict):
         raise web.HTTPBadRequest(text=json.dumps({"error": "invalid_json"}), content_type="application/json")
-    decision = body.get("decision")
-    if decision not in {"allow", "deny", "approve", "reject"}:
-        raise web.HTTPBadRequest(text=json.dumps({"error": "invalid_decision"}), content_type="application/json")
+    decision_or_response, payload = _validate_permission_response_body(body)
     request_id = body.get("request_id", "")
     if not isinstance(request_id, str):
         request_id = ""
@@ -42,13 +60,12 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
         if rec is None:
             raise web.HTTPNotFound(text=json.dumps({"error": "session_not_found"}), content_type="application/json")
         opencode_session_id = rec.opencode_session_id
-    payload = _permission_response_from_body(body)
     try:
         await request.app[OPENCODE_CLIENT_KEY].respond_permission(opencode_session_id, permission_id, payload)
     except OpenCodeClientError as exc:
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
     trace_context = build_trace_context(request.app[SETTINGS_KEY], request_id=request_id, session_id=sid, opencode_session_id=str(opencode_session_id or ""), tool_name=tool_name)
-    event = add_trace_context(build_thinking_event("permission_resolved", session_id=str(sid or ""), request_id=request_id, opencode_session_id=str(opencode_session_id), state="success", summary=f"Permission {decision}", data={"permission_id": permission_id, **payload}), trace_context)
+    event = add_trace_context(build_thinking_event("permission_resolved", session_id=str(sid or ""), request_id=request_id, opencode_session_id=str(opencode_session_id), state="success", summary=f"Permission {decision_or_response}", data={"permission_id": permission_id, **payload}), trace_context)
     await request.app[EVENT_BUS_KEY].publish(event)
 
     portal_metadata_client = request.app.get(PORTAL_METADATA_CLIENT_KEY)
@@ -59,13 +76,14 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
                 latest_event_type="permission.resolved",
                 latest_event_state="success",
                 request_id=request_id,
-                summary=f"Permission {decision}",
+                summary=f"Permission {decision_or_response}",
                 runtime_events=[event],
                 metadata={
                     "engine": "opencode",
                     "opencode_session_id": str(opencode_session_id),
                     "permission_id": permission_id,
-                    "decision": decision,
+                    "decision": body.get("decision", ""),
+                    "response": payload.get("response", ""),
                     "trace_context": trace_context,
                 },
             )
