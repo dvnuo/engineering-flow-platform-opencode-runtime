@@ -240,3 +240,41 @@ async def test_stream_error_response_swallow_sse_client_disconnect(monkeypatch):
         monkeypatch.setattr(chat_api, "_write_sse", original_write_sse)
         monkeypatch.setattr(chat_api, "_safe_write_eof", original_safe_write_eof)
         await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_filters_noise_events_and_keeps_useful_events(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
+    fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
+    t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-filter-1','request_id':'req-stream-filter-1'}))
+    await fake.entered.wait()
+    for evt in [
+        {'type':'opencode.sync','session_id':'portal-stream-filter-1'},
+        {'type':'session.updated','session_id':'portal-stream-filter-1'},
+        {'type':'opencode.step.finished','session_id':'portal-stream-filter-1'},
+        {'type':'unknown.debug','session_id':'portal-stream-filter-1','request_id':''},
+        {'type':'message.delta','session_id':'portal-stream-filter-1','request_id':'raw-id','raw_type':'message.part.updated','data':{'delta':'Hi'}},
+        {'type':'llm_thinking','session_id':'portal-stream-filter-1','request_id':'raw-id','data':{'message':'thinking'}},
+    ]:
+        await app[EVENT_BUS_KEY].publish(evt)
+    fake.release.set(); resp=await t; body=await resp.text()
+    assert 'opencode.sync' not in body
+    assert 'session.updated' not in body
+    assert 'opencode.step.finished' not in body
+    assert 'unknown.debug' not in body
+    assert 'event: delta' in body and 'Hi' in body
+    assert 'llm_thinking' in body
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_does_not_duplicate_real_and_synthetic_delta(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
+    fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
+    t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-dup-1','request_id':'req-stream-dup-1'}))
+    await fake.entered.wait()
+    await app[EVENT_BUS_KEY].publish({'type':'message.delta','session_id':'portal-stream-dup-1','request_id':'raw-1','raw_type':'message.part.updated','data':{'delta':'Hi'}})
+    await app[EVENT_BUS_KEY].publish({'type':'assistant_delta','session_id':'portal-stream-dup-1','request_id':'req-stream-dup-1','synthetic_final_delta':True,'data':{'delta':'Hi','synthetic_final_delta':True}})
+    fake.release.set(); resp=await t; body=await resp.text()
+    assert body.count('event: delta') == 1
+    await c.close()

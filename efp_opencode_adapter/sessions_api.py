@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from typing import Any
 
 from aiohttp import web
@@ -51,11 +50,6 @@ def _message_info(message: Any) -> dict[str, Any]:
     return {}
 
 
-def _timestamp_from_message(message: dict[str, Any], info: dict[str, Any]) -> str:
-    for key in ("timestamp", "created_at", "updated_at"):
-        if isinstance(message.get(key), str) and message.get(key):
-            return message[key]
-
     time_info = info.get("time")
     if isinstance(time_info, dict):
         created = time_info.get("created")
@@ -68,10 +62,6 @@ def _timestamp_from_message(message: dict[str, Any], info: dict[str, Any]) -> st
 
 def message_to_text(message: Any) -> str:
     return message_to_visible_text(message)
-
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
 
     nested_message = message.get("message") if isinstance(message.get("message"), dict) else None
     parts = message.get("parts")

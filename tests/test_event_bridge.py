@@ -105,7 +105,7 @@ async def test_message_part_updated_extracts_delta_text(tmp_path, monkeypatch):
     settings = Settings.from_env()
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({"type": "message.part.updated", "sessionID": "oc-1", "part": {"type": "text", "text": "hello delta"}})
-    assert event["type"] == "assistant_delta"
+    assert event["type"] == "message.delta"
     assert "hello delta" in event["data"]["delta"]
 
 
@@ -315,3 +315,14 @@ def test_event_bridge_part_type_classification(tmp_path, monkeypatch):
     text = normalize_opencode_event({"type": "message.part.updated", "part": {"type": "text", "text": "Hi"}}, session_store=session_store, task_store=task_store, settings=settings)
     assert text["type"] in {"message.delta", "assistant_delta"}
     assert text["data"].get("delta") == "Hi"
+
+
+@pytest.mark.asyncio
+async def test_sync_step_finish_not_delta_or_execution_completed(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({"payload": {"type": "sync", "syncEvent": {"type": "message.part.updated.1", "id": "evt-1", "data": {"sessionID": "ses-1", "part": {"type": "step-finish", "reason": "stop"}}}}})
+    assert event["type"] not in {"assistant_delta", "message.delta", "execution.completed"}
+    assert "delta" not in event["data"]

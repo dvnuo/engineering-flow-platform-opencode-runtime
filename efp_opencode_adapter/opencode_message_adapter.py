@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -66,17 +67,11 @@ def message_to_visible_text(message: Any) -> str:
         return message
     if not isinstance(message, dict):
         return ""
-    parts = message.get("parts")
-    text = extract_visible_text_from_parts(parts)
-    if text:
-        return text
     nested = message.get("message")
-    if isinstance(nested, dict):
-        nested_parts = nested.get("parts")
-        text = extract_visible_text_from_parts(nested_parts)
-        if text:
-            return text
-    role = message_role(message).lower()
+    for parts in (message.get("parts"), nested.get("parts") if isinstance(nested, dict) else None):
+        if isinstance(parts, list):
+            return extract_visible_text_from_parts(parts)
+
     for key in ("content", "text", "response"):
         value = message.get(key)
         if isinstance(value, str) and value:
@@ -86,8 +81,62 @@ def message_to_visible_text(message: Any) -> str:
             value = nested.get(key)
             if isinstance(value, str) and value:
                 return value
-    if role == "assistant":
+    return ""
+
+
+def _as_iso(value: Any) -> str:
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, (int, float)):
+        seconds = value / 1000 if value > 1_000_000_000_000 else value
+        return datetime.fromtimestamp(seconds, UTC).isoformat()
+    return ""
+
+
+def timestamp_from_message(message: Any) -> str:
+    if not isinstance(message, dict):
         return ""
+    for key in ("timestamp", "created_at", "updated_at"):
+        out = _as_iso(message.get(key))
+        if out:
+            return out
+
+    def _from_info_time(obj: Any) -> str:
+        if not isinstance(obj, dict):
+            return ""
+        info = obj.get("info")
+        if not isinstance(info, dict):
+            return ""
+        time = info.get("time")
+        if not isinstance(time, dict):
+            return ""
+        for key in ("created", "completed", "updated"):
+            out = _as_iso(time.get(key))
+            if out:
+                return out
+        return ""
+
+    out = _from_info_time(message)
+    if out:
+        return out
+    nested = message.get("message")
+    return _from_info_time(nested)
+
+
+def opencode_session_id_from_message(message: Any) -> str:
+    if not isinstance(message, dict):
+        return ""
+    for key in ("session_id", "sessionID"):
+        if message.get(key):
+            return str(message[key])
+    info = message.get("info")
+    if isinstance(info, dict):
+        for key in ("session_id", "sessionID"):
+            if info.get(key):
+                return str(info[key])
+    nested = message.get("message")
+    if isinstance(nested, dict):
+        return opencode_session_id_from_message(nested)
     return ""
 
 
@@ -136,10 +185,10 @@ def to_efp_message(message: dict[str, Any], index: int | None = None) -> dict[st
         "id": out_id,
         "role": str(message_role(message) or "unknown"),
         "content": message_to_visible_text(message),
-        "timestamp": str(message.get("timestamp") or message.get("created_at") or message.get("updated_at") or ""),
+        "timestamp": timestamp_from_message(message),
         "metadata": {
             "opencode_message_id": out_id,
-            "opencode_session_id": str(message.get("session_id") or info.get("session_id") or ""),
+            "opencode_session_id": opencode_session_id_from_message(message),
             "parts_summary": summary,
         },
     }

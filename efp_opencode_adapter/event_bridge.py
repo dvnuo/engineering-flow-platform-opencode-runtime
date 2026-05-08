@@ -216,10 +216,10 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
             rs = extract_reasoning_texts_from_parts([part])
             text = rs[0] if rs else ""
         elif ptype == "step-start":
-            normalized_type = "execution.started"
+            normalized_type = "opencode.step.started"
             text = ""
         elif ptype == "step-finish":
-            normalized_type = "execution.completed"
+            normalized_type = "opencode.step.finished"
             text = ""
         elif ptype == "tool":
             normalized_type = "tool.started" if status in {"", "started", "running"} else "tool.completed"

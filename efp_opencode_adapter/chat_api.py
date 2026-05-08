@@ -256,14 +256,20 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         if not assistant_message_id and isinstance(response_payload, dict):
             candidate = response_payload.get("info", {}).get("id") if isinstance(response_payload.get("info"), dict) else ""
             if not candidate and isinstance(response_payload.get("message"), dict):
-                candidate = _message_id(response_payload["message"])
+                candidate = adapter_message_id(response_payload["message"])
             assistant_message_id = str(candidate or "")
 
-        for event in [add_trace_context(x, trace_context) for x in [
+        out_events = [
             assistant_delta_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
             chat_complete_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
             chat_completed_compat_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
-        ]]:
+        ]
+        if out_events and isinstance(out_events[0], dict):
+            out_events[0]["synthetic_final_delta"] = True
+            if not isinstance(out_events[0].get("data"), dict):
+                out_events[0]["data"] = {}
+            out_events[0]["data"]["synthetic_final_delta"] = True
+        for event in [add_trace_context(x, trace_context) for x in out_events]:
             runtime_events.append(event)
             await bus.publish(event)
 
@@ -384,7 +390,7 @@ def _is_stream_relevant_event(event: dict[str, Any], *, session_id: str, request
         if event_type in {"assistant_delta", "message.delta"}:
             return bool(_event_delta_text(event))
         return True
-    return str(event.get("request_id") or "") in {"", request_id}
+    return False
 
 
 def _event_delta_text(event: dict[str, Any]) -> str:
@@ -440,6 +446,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     settings = request.app[SETTINGS_KEY]
     stream_trace = build_trace_context(settings, request_id=req_id, session_id=session_id)
     client_disconnected = False
+    sent_real_model_delta = False
 
     async def _forward(event: dict[str, Any]) -> None:
         if not _is_stream_relevant_event(event, session_id=session_id, request_id=req_id):
@@ -449,9 +456,20 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             return
         seen.add(key)
         await _write_sse(resp, "runtime_event", event)
+        nonlocal sent_real_model_delta
         if event.get("type") in {"assistant_delta", "message.delta"}:
             delta = _event_delta_text(event)
-            if delta:
+            if not delta:
+                return
+            is_real = event.get("type") == "message.delta" and str(event.get("raw_type") or "") == "message.part.updated"
+            is_synth = event.get("type") == "assistant_delta" and bool(event.get("synthetic_final_delta") or (event.get("data") or {}).get("synthetic_final_delta"))
+            if is_real:
+                sent_real_model_delta = True
+                await _write_sse(resp, "delta", {"delta": delta, "session_id": session_id, "request_id": req_id})
+            elif is_synth:
+                if not sent_real_model_delta:
+                    await _write_sse(resp, "delta", {"delta": delta, "session_id": session_id, "request_id": req_id})
+            else:
                 await _write_sse(resp, "delta", {"delta": delta, "session_id": session_id, "request_id": req_id})
 
     try:

@@ -23,3 +23,17 @@ def test_extract_last_assistant_visible_text_never_falls_back_user():
     assert extract_last_assistant_visible_text(payload) == ""
     payload2 = {"messages": [{"role": "user", "parts": [{"type": "text", "text": "HI"}]}, {"role": "assistant", "parts": [{"type": "text", "text": "Hello"}]}]}
     assert extract_last_assistant_visible_text(payload2) == "Hello"
+
+
+def test_message_to_visible_text_typed_parts_do_not_fallback_to_text_field():
+    msg = {"role": "assistant", "parts": [{"type": "reasoning", "text": "hidden reasoning"}], "text": "hidden reasoning"}
+    assert message_to_visible_text(msg) == ""
+
+
+def test_message_to_visible_text_prefers_visible_text_part_over_legacy_text_field():
+    msg = {
+        "role": "assistant",
+        "parts": [{"type": "reasoning", "text": "hidden"}, {"type": "text", "text": "visible"}],
+        "text": "hidden",
+    }
+    assert message_to_visible_text(msg) == "visible"
