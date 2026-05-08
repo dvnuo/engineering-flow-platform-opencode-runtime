@@ -407,6 +407,20 @@ def _event_delta_text(event: dict[str, Any]) -> str:
     return ""
 
 
+def _stream_delta_payload(event: dict[str, Any], delta: str, session_id: str, req_id: str) -> dict[str, Any]:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    return {
+        "delta": delta,
+        "session_id": session_id,
+        "request_id": req_id,
+        "raw_type": event.get("raw_type") or data.get("raw_type") or "",
+        "message_role": data.get("message_role") or data.get("role") or event.get("message_role") or "",
+        "part_type": data.get("part_type") or "",
+        "message_id": data.get("message_id") or "",
+        "part_id": data.get("part_id") or "",
+    }
+
+
 async def _stream_error_response(request: web.Request, error: str, detail: str | None = None) -> web.StreamResponse:
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "keep-alive"})
     await resp.prepare(request)
@@ -461,16 +475,20 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             delta = _event_delta_text(event)
             if not delta:
                 return
-            is_real = event.get("type") == "message.delta" and str(event.get("raw_type") or "") == "message.part.updated"
+            raw_type = str(event.get("raw_type") or "").lower()
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            role = str(data.get("message_role") or data.get("role") or data.get("source_role") or event.get("role") or "").lower()
+            is_real = event.get("type") == "message.delta" and raw_type == "message.part.delta" and role != "user"
             is_synth = event.get("type") == "assistant_delta" and bool(event.get("synthetic_final_delta") or (event.get("data") or {}).get("synthetic_final_delta"))
             if is_real:
                 sent_real_model_delta = True
-                await _write_sse(resp, "delta", {"delta": delta, "session_id": session_id, "request_id": req_id})
+                await _write_sse(resp, "delta", _stream_delta_payload(event, delta, session_id, req_id))
             elif is_synth:
                 if not sent_real_model_delta:
-                    await _write_sse(resp, "delta", {"delta": delta, "session_id": session_id, "request_id": req_id})
+                    await _write_sse(resp, "delta", _stream_delta_payload(event, delta, session_id, req_id))
             else:
-                await _write_sse(resp, "delta", {"delta": delta, "session_id": session_id, "request_id": req_id})
+                if event.get("type") != "message.delta":
+                    await _write_sse(resp, "delta", _stream_delta_payload(event, delta, session_id, req_id))
 
     try:
         await _write_sse(resp, "runtime_event", add_trace_context({"type": "stream.started", "engine": "opencode", "session_id": session_id, "request_id": req_id, "created_at": utc_now_iso()}, stream_trace))

@@ -14,10 +14,17 @@ from efp_opencode_adapter.task_store import TaskStore
 
 
 class FakeClient:
+    def __init__(self):
+        self.get_message_calls = 0
+
     async def health(self): return {"healthy": True}
     async def event_stream(self, **kwargs):
         if False:
             yield {}
+
+    async def get_message(self, session_id, message_id):
+        self.get_message_calls += 1
+        return {"info": {"id": message_id, "role": "assistant"}, "parts": [{"id": "p1", "messageID": message_id, "type": "text"}]}
 
 
 @pytest.mark.asyncio
@@ -99,16 +106,67 @@ async def test_permission_updated_with_approved_status_is_resolved(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_message_part_updated_extracts_delta_text(tmp_path, monkeypatch):
+async def test_message_part_updated_text_snapshot_not_delta(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
     settings = Settings.from_env()
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
-    event = await bridge.publish_raw_event({"type": "message.part.updated", "sessionID": "oc-1", "part": {"type": "text", "text": "hello delta"}})
+    event = await bridge.publish_raw_event({"type": "message.part.updated", "sessionID": "oc-1", "part": {"id": "p1", "messageID": "m-user", "type": "text", "text": "hello delta"}})
+    assert event["type"] != "message.delta"
+    assert event["raw_type"] == "message.part.updated"
+    assert not event["data"].get("delta")
+    assert event["data"].get("message") != "hello delta"
+
+
+
+
+def test_message_part_delta_requires_assistant_role_and_text_part(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    paths = ensure_state_dirs(settings)
+    event = normalize_opencode_event({"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "Hello"}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="assistant", part_meta={"type": "text", "ignored": False, "synthetic": False})
     assert event["type"] == "message.delta"
-    assert "hello delta" in event["data"]["delta"]
+    assert event["raw_type"] == "message.part.delta"
+    assert event["data"]["delta"] == "Hello"
+    assert event["data"]["message_role"] == "assistant"
+    assert event["data"]["part_type"] == "text"
 
 
+def test_message_part_delta_user_role_not_streamed(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    paths = ensure_state_dirs(settings)
+    event = normalize_opencode_event({"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-user", "partID": "p1", "field": "text", "delta": "hi"}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="user", part_meta={"type": "text", "ignored": False, "synthetic": False})
+    assert event["type"] != "message.delta"
+    assert not event["data"].get("delta")
+
+
+@pytest.mark.asyncio
+async def test_publish_raw_event_uses_message_and_part_cache_for_delta(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    fake = FakeClient()
+    bridge = OpenCodeEventBridge(settings, fake, EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    await bridge.publish_raw_event({"type": "message.updated", "sessionID": "oc-1", "info": {"id": "m-assistant", "role": "assistant", "sessionID": "oc-1"}})
+    await bridge.publish_raw_event({"type": "message.part.updated", "sessionID": "oc-1", "part": {"id": "p1", "messageID": "m-assistant", "type": "text"}})
+    event = await bridge.publish_raw_event({"type": "message.part.delta", "sessionID": "oc-1", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "Hel"}})
+    assert event["type"] == "message.delta"
+    assert event["data"]["delta"] == "Hel"
+
+
+@pytest.mark.asyncio
+async def test_publish_raw_event_fetches_message_once_when_delta_cache_miss(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    fake = FakeClient()
+    bridge = OpenCodeEventBridge(settings, fake, EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({"type": "message.part.delta", "sessionID": "oc-1", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "Hi"}})
+    assert event["type"] == "message.delta"
+    assert fake.get_message_calls == 1
 @pytest.mark.asyncio
 async def test_event_bridge_redacts_top_level_request_id(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
@@ -309,12 +367,12 @@ def test_event_bridge_part_type_classification(tmp_path, monkeypatch):
     assert step["type"] != "assistant_delta"
 
     reason = normalize_opencode_event({"type": "message.part.updated", "part": {"type": "reasoning", "text": "hidden reasoning"}}, session_store=session_store, task_store=task_store, settings=settings)
-    assert reason["type"] == "llm_thinking"
+    assert reason["type"] == "opencode.message.part.updated"
     assert "delta" not in reason["data"]
 
     text = normalize_opencode_event({"type": "message.part.updated", "part": {"type": "text", "text": "Hi"}}, session_store=session_store, task_store=task_store, settings=settings)
-    assert text["type"] in {"message.delta", "assistant_delta"}
-    assert text["data"].get("delta") == "Hi"
+    assert text["type"] == "opencode.message.part.updated"
+    assert not text["data"].get("delta")
 
 
 @pytest.mark.asyncio

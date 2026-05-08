@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import OrderedDict
 from typing import Any
 
 from .index_loader import load_tools_index
@@ -61,6 +62,8 @@ def _event_type(raw_event: dict[str, Any], canonical: dict[str, Any]) -> str:
                 break
     if value.startswith("message.part.updated"):
         return "message.part.updated"
+    if value.startswith("message.part.delta"):
+        return "message.part.delta"
     return value
 
 
@@ -163,8 +166,57 @@ def _is_mutation_tool(meta: dict[str, Any]) -> bool:
 
 _BUILTIN_TOOLS = {"bash", "read", "edit", "write", "grep", "glob", "webfetch", "websearch", "skill", "todowrite", "question"}
 
+def _raw_session_id_from_event(raw_event: dict[str, Any], canonical: dict[str, Any], values: dict[str, str]) -> str:
+    return _first_string(values, "opencode_session_id", "session_id", "sessionID", "sessionId")
 
-def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_store, settings, tool_metadata: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
+
+def _raw_message_id_from_event(canonical: dict[str, Any], values: dict[str, str]) -> str:
+    return _first_string(values, "messageID", "message_id", "messageId", "id")
+
+
+def _raw_part_id_from_event(canonical: dict[str, Any], values: dict[str, str]) -> str:
+    return _first_string(values, "partID", "part_id", "partId", "id")
+
+
+def _cache_put_limited(cache: OrderedDict, key: tuple[str, ...], value: Any, limit: int) -> None:
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > limit:
+        cache.popitem(last=False)
+
+
+def _extract_info_from_message_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    info = payload.get("info")
+    return info if isinstance(info, dict) else {}
+
+
+def _extract_parts_from_message_payload(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    parts = payload.get("parts")
+    if isinstance(parts, list):
+        return [p for p in parts if isinstance(p, dict)]
+    message = payload.get("message")
+    if isinstance(message, dict) and isinstance(message.get("parts"), list):
+        return [p for p in message["parts"] if isinstance(p, dict)]
+    return []
+
+
+def _bool_true(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    return False
+
+
+def _part_meta_from_part(part: dict[str, Any]) -> dict[str, Any]:
+    return {"type": str(part.get("type") or "").lower(), "ignored": _bool_true(part.get("ignored")), "synthetic": _bool_true(part.get("synthetic"))}
+
+
+def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_store, settings, tool_metadata: dict[str, dict[str, Any]] | None = None, message_role: str | None = None, part_meta: dict[str, Any] | None = None) -> dict[str, Any] | None:
     if not isinstance(raw_event, dict):
         return None
     max_chars = settings.event_bridge_event_preview_chars
@@ -174,7 +226,7 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     _collect_strings(raw_event, values)
     _collect_strings(canonical, values)
 
-    opencode_session_id = _first_string(values, "opencode_session_id", "session_id", "sessionID", "sessionId")
+    opencode_session_id = _raw_session_id_from_event(raw_event, canonical, values)
     permission_id = _first_string(values, "permissionID", "permission_id", "requestID", "request_id", "id")
     request_id = _first_string(values, "requestID", "request_id", "id")
     tool = _tool_name(values)
@@ -208,25 +260,40 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     elif raw_type == "message.part.updated":
         part = canonical.get("part") if isinstance(canonical.get("part"), dict) else {}
         ptype = str(part.get("type") or "").lower()
-        if ptype == "text":
-            normalized_type = "message.delta"
-            text = extract_visible_text_from_parts([part])
-        elif ptype == "reasoning":
-            normalized_type = "llm_thinking"
-            rs = extract_reasoning_texts_from_parts([part])
-            text = rs[0] if rs else ""
+        if ptype == "tool":
+            normalized_type = "tool.started" if status in {"", "started", "running"} else "tool.completed"
         elif ptype == "step-start":
             normalized_type = "opencode.step.started"
-            text = ""
         elif ptype == "step-finish":
             normalized_type = "opencode.step.finished"
-            text = ""
-        elif ptype == "tool":
-            normalized_type = "tool.started" if status in {"", "started", "running"} else "tool.completed"
-            text = ""
         else:
             normalized_type = "opencode.message.part.updated"
-            text = ""
+        text = ""
+    elif raw_type == "message.part.delta":
+        message_id = _raw_message_id_from_event(canonical, values)
+        part_id = _raw_part_id_from_event(canonical, values)
+        field = str(canonical.get("field") or values.get("field") or "").lower()
+        delta = canonical.get("delta") or values.get("delta") or ""
+        delta = delta if isinstance(delta, str) else ""
+        normalized_type = "opencode.message.part.delta"
+        text = ""
+        role = str(message_role or "").lower()
+        pmeta = part_meta if isinstance(part_meta, dict) else {}
+        ptype = str(pmeta.get("type") or "").lower()
+        ignored = _bool_true(pmeta.get("ignored"))
+        synthetic = _bool_true(pmeta.get("synthetic"))
+        if field == "text" and delta and role == "assistant" and ptype in {"text", "reasoning"} and not ignored and not synthetic:
+            if ptype == "text":
+                normalized_type = "message.delta"
+                text = delta
+            elif ptype == "reasoning":
+                normalized_type = "llm_thinking"
+                text = delta
+        values["__part_field"] = field
+        values["__part_message_id"] = message_id
+        values["__part_id"] = part_id
+        values["__message_role"] = role
+        values["__part_type"] = ptype
     elif raw_type in {"message.completed", "message.finished"}:
         normalized_type = "message.completed"
     elif raw_type.startswith("session."):
@@ -259,6 +326,11 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         data["message"] = s_text
     elif normalized_type in {"llm_thinking", "opencode.reasoning"} and s_text:
         data["message"] = s_text
+    data["message_role"] = _sanitize_event_text(values.get("__message_role") or message_role or "", 100)
+    data["part_type"] = _sanitize_event_text(values.get("__part_type") or (part_meta or {}).get("type") or "", 100)
+    data["field"] = _sanitize_event_text(values.get("__part_field") or values.get("field") or "", 100)
+    data["message_id"] = _sanitize_event_text(values.get("__part_message_id") or _raw_message_id_from_event(canonical, values), 300)
+    data["part_id"] = _sanitize_event_text(values.get("__part_id") or _raw_part_id_from_event(canonical, values), 300)
 
     s_session_id = _sanitize_event_text(session_id, 300)
     s_opencode_session_id = _sanitize_event_text(opencode_session_id, 300)
@@ -361,6 +433,9 @@ class OpenCodeEventBridge:
         self.last_error = None
         self.last_raw_type = ""
         self.tool_metadata = _build_tool_metadata(settings)
+        self._message_roles: OrderedDict[tuple[str, str], str] = OrderedDict()
+        self._part_meta: OrderedDict[tuple[str, str, str], dict[str, Any]] = OrderedDict()
+        self._cache_limit = 5000
 
     def refresh_tool_metadata(self) -> dict[str, dict[str, Any]]:
         self.tool_metadata = _build_tool_metadata(self.settings)
@@ -370,7 +445,56 @@ class OpenCodeEventBridge:
         return {"enabled": self.enabled, "running": self.running, "connected": self.connected, "reconnects": self.reconnects, "last_event_at": self.last_event_at, "last_error": self.last_error, "last_raw_type": self.last_raw_type}
 
     async def publish_raw_event(self, raw_event: dict) -> dict | None:
-        event = normalize_opencode_event(raw_event, session_store=self.session_store, task_store=self.task_store, settings=self.settings, tool_metadata=self.tool_metadata)
+        canonical = _canonical(raw_event)
+        raw_type = _event_type(raw_event, canonical)
+        values: dict[str, str] = {}
+        _collect_strings(raw_event, values)
+        _collect_strings(canonical, values)
+        session_id = _raw_session_id_from_event(raw_event, canonical, values)
+        message_id = _raw_message_id_from_event(canonical, values)
+        part_id = _raw_part_id_from_event(canonical, values)
+        message_role = None
+        part_meta = None
+
+        if raw_type == "message.updated":
+            info = canonical.get("info") if isinstance(canonical.get("info"), dict) else {}
+            if info:
+                message_id = str(info.get("id") or message_id or "")
+                role = str(info.get("role") or "").lower()
+                info_session = str(info.get("sessionID") or info.get("sessionId") or session_id or "")
+                if info_session and message_id and role:
+                    _cache_put_limited(self._message_roles, (info_session, message_id), role, self._cache_limit)
+        elif raw_type == "message.part.updated":
+            part = canonical.get("part") if isinstance(canonical.get("part"), dict) else {}
+            p_message_id = str(part.get("messageID") or part.get("messageId") or part.get("message_id") or message_id or "")
+            p_part_id = str(part.get("id") or part_id or "")
+            if session_id and p_message_id and p_part_id:
+                _cache_put_limited(self._part_meta, (session_id, p_message_id, p_part_id), _part_meta_from_part(part), self._cache_limit)
+        elif raw_type == "message.part.delta":
+            if session_id and message_id:
+                message_role = self._message_roles.get((session_id, message_id))
+            if session_id and message_id and part_id:
+                part_meta = self._part_meta.get((session_id, message_id, part_id))
+            if (not message_role or not part_meta) and session_id and message_id and hasattr(self.client, "get_message"):
+                try:
+                    payload = await self.client.get_message(session_id, message_id)
+                    info = _extract_info_from_message_payload(payload)
+                    role = str(info.get("role") or "").lower()
+                    info_message_id = str(info.get("id") or message_id or "")
+                    if role and session_id and info_message_id:
+                        _cache_put_limited(self._message_roles, (session_id, info_message_id), role, self._cache_limit)
+                    for part in _extract_parts_from_message_payload(payload):
+                        p_id = str(part.get("id") or "")
+                        if session_id and info_message_id and p_id:
+                            _cache_put_limited(self._part_meta, (session_id, info_message_id, p_id), _part_meta_from_part(part), self._cache_limit)
+                except Exception:
+                    pass
+                if session_id and message_id:
+                    message_role = self._message_roles.get((session_id, message_id))
+                if session_id and message_id and part_id:
+                    part_meta = self._part_meta.get((session_id, message_id, part_id))
+
+        event = normalize_opencode_event(raw_event, session_store=self.session_store, task_store=self.task_store, settings=self.settings, tool_metadata=self.tool_metadata, message_role=message_role, part_meta=part_meta)
         if not event:
             return None
         self.last_event_at = event.get("created_at")
