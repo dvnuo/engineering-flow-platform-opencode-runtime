@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from typing import Any
 
 from aiohttp import web
 from .app_keys import CHATLOG_STORE_KEY, OPENCODE_CLIENT_KEY, SESSION_STORE_KEY
 
 from .opencode_client import OpenCodeClientError
+from .opencode_message_adapter import message_to_visible_text, to_efp_message
 
 
 def _json_bad_request(error: str) -> web.HTTPBadRequest:
@@ -50,65 +50,12 @@ def _message_info(message: Any) -> dict[str, Any]:
     return {}
 
 
-def _timestamp_from_message(message: dict[str, Any], info: dict[str, Any]) -> str:
-    for key in ("timestamp", "created_at", "updated_at"):
-        if isinstance(message.get(key), str) and message.get(key):
-            return message[key]
-
-    time_info = info.get("time")
-    if isinstance(time_info, dict):
-        created = time_info.get("created")
-        if isinstance(created, (int, float)):
-            seconds = created / 1000 if created > 1_000_000_000_000 else created
-            return datetime.fromtimestamp(seconds, UTC).isoformat()
-
-    return ""
-
-
 def message_to_text(message: Any) -> str:
-    if isinstance(message, str):
-        return message
-    if not isinstance(message, dict):
-        return json.dumps(message, ensure_ascii=False)
-
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
-
-    nested_message = message.get("message") if isinstance(message.get("message"), dict) else None
-    parts = message.get("parts")
-    if not isinstance(parts, list) and nested_message is not None:
-        parts = nested_message.get("parts")
-
-    if isinstance(parts, list):
-        out = []
-        for part in parts:
-            if isinstance(part, dict):
-                if part.get("type") == "text" and part.get("text"):
-                    out.append(str(part["text"]))
-                elif part.get("content"):
-                    out.append(str(part.get("content")))
-                else:
-                    out.append(json.dumps(part, ensure_ascii=False))
-            else:
-                out.append(json.dumps(part, ensure_ascii=False))
-        return "\n".join(out)
-    return ""
+    return message_to_visible_text(message)
 
 
 def _to_efp_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out = []
-    for idx, msg in enumerate(messages):
-        info = _message_info(msg)
-        out.append(
-            {
-                "id": str(info.get("id") or msg.get("id") or msg.get("message_id") or idx),
-                "role": str(info.get("role") or msg.get("role") or "unknown"),
-                "content": message_to_text(msg),
-                "timestamp": _timestamp_from_message(msg, info),
-            }
-        )
-    return out
+    return [to_efp_message(msg, index=idx) for idx, msg in enumerate(messages)]
 
 
 def _message_id(message: Any, fallback: str = "") -> str:

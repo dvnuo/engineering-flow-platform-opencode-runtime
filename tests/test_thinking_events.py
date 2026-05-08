@@ -34,8 +34,30 @@ def test_safe_preview_redacts_github_and_openai_token_prefixes():
     assert "ghu_SECRET" not in safe_preview("hello ghu_SECRET")
     assert "ghp_SECRET" not in safe_preview("hello ghp_SECRET")
     assert "github_pat_SECRET" not in safe_preview("hello github_pat_SECRET")
-    assert "sk-SECRET" not in safe_preview("hello sk-SECRET")
+    assert "sk-1234567890abcdef" not in safe_preview("hello sk-1234567890abcdef")
     assert "hello world" in safe_preview("hello world")
+
+
+def test_safe_preview_preserves_normal_ids_with_sk_substring():
+    payload = {
+        "agent_id": "agent-task-1",
+        "task_id": "task-1",
+        "session_id": "sess-task-1",
+        "request_id": "req-task-1",
+        "runtime_profile_id": "rp-task-1",
+    }
+    out = safe_preview(payload)
+    assert out == payload
+    assert "***REDACTED***" not in json.dumps(out)
+
+
+def test_safe_preview_redacts_real_sk_token_but_not_short_substring():
+    redacted = safe_preview("api key sk-1234567890abcdef should hide")
+    assert "***REDACTED***" in redacted
+    assert "sk-1234567890abcdef" not in redacted
+
+    plain = safe_preview("agent-task-1")
+    assert plain == "agent-task-1"
 
 
 def test_chat_failed_event_redacts_free_form_tokens():

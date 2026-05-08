@@ -150,3 +150,48 @@ async def test_chat_stream_final_contract_contains_response_and_done_is_json_mar
         assert done_data["ok"] is True
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_response_uses_history_assistant_text_not_user_input(tmp_path, monkeypatch):
+    class UserOnlyFirst(FakeOpenCodeClient):
+        async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+            user_text = parts[0].get("text", "")
+            self.messages[session_id].append({"id": "u-1", "role": "user", "parts": [{"type": "text", "text": user_text}]})
+            self.messages[session_id].append({"id": "a-1", "role": "assistant", "parts": [{"type": "reasoning", "text": "hidden"}, {"type": "text", "text": "Hi. What do you need?"}, {"type": "step-finish", "reason": "stop"}]})
+            return {"messages": [{"id": "u-1", "role": "user", "parts": [{"type": "text", "text": user_text}]}]}
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=UserOnlyFirst())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    resp = await client.post("/api/chat", json={"message": "HI", "session_id": "s-visible-1"})
+    payload = await resp.json()
+    assert payload["response"] == "Hi. What do you need?"
+    session = await (await client.get("/api/sessions/s-visible-1")).json()
+    assert session["messages"][-1]["content"] == "Hi. What do you need?"
+    assert "hidden" not in session["messages"][-1]["content"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_handles_malformed_usage_payload_without_500(tmp_path, monkeypatch):
+    class MalformedUsageClient(FakeOpenCodeClient):
+        async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+            assistant = {"role": "assistant", "parts": [{"type": "text", "text": "ok"}]}
+            self.messages[session_id].append({"role": "user", "parts": [{"type": "text", "text": parts[0].get("text", "")}]})
+            self.messages[session_id].append(assistant)
+            return {"message": assistant, "usage": {"input_tokens": "not-number", "output_tokens": None, "cost": "bad"}}
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=MalformedUsageClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    res = await client.post("/api/chat", json={"message": "hello", "session_id": "s-usage-bad"})
+    body = await res.json()
+    assert res.status == 200
+    assert body["response"] == "ok"
+    assert body["usage"]["input_tokens"] == 0
+    assert body["usage"]["output_tokens"] == 0
+    assert body["usage"]["cost"] == 0.0
+    await client.close()

@@ -108,8 +108,10 @@ async def test_wait_ready_ignores_version_mismatch(monkeypatch):
 @pytest.mark.asyncio
 async def test_prompt_async_accepts_204(monkeypatch):
     app = web.Application()
+    captured = {}
 
-    async def prompt(_):
+    async def prompt(request: web.Request):
+        captured["body"] = await request.json()
         return web.Response(status=204)
 
     app.router.add_post("/session/ses-1/prompt_async", prompt)
@@ -118,8 +120,29 @@ async def test_prompt_async_accepts_204(monkeypatch):
 
     monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
     client = OpenCodeClient(Settings.from_env())
-    result = await client.prompt_async("ses-1", {"parts": [{"type": "text", "text": "hi"}]})
+    payload = {"parts": [{"type": "text", "text": "hi"}], "model": "anthropic/claude-sonnet-4", "agent": "efp"}
+    result = await client.prompt_async("ses-1", payload)
     assert result is None
+    assert payload["model"] == "anthropic/claude-sonnet-4"
+    assert captured["body"]["model"] == {"providerID": "anthropic", "modelID": "claude-sonnet-4"}
+    await server.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 201, 202])
+async def test_prompt_async_rejects_non_204(monkeypatch, status):
+    app = web.Application()
+
+    async def prompt(_):
+        return web.json_response({"ok": True}, status=status)
+
+    app.router.add_post("/session/ses-1/prompt_async", prompt)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+    with pytest.raises(OpenCodeClientError):
+        await client.prompt_async("ses-1", {"parts": [{"type": "text", "text": "hi"}], "model": "anthropic/claude-sonnet-4"})
     await server.close()
 
 
@@ -159,7 +182,41 @@ async def test_mcp_unsupported_returns_empty(monkeypatch):
     await server.start_server()
     monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
     result = await OpenCodeClient(Settings.from_env()).mcp()
-    assert result == {"success": False, "tools": []}
+    assert result == {"success": False, "tools": [], "servers": {}}
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_servers_map_response(monkeypatch):
+    app = web.Application()
+
+    async def mcp(_):
+        return web.json_response({"github": {"type": "local", "status": "connected"}}, status=200)
+
+    app.router.add_get("/mcp", mcp)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    result = await OpenCodeClient(Settings.from_env()).mcp()
+    assert result["success"] is True
+    assert result["tools"] == []
+    assert result["servers"]["github"]["status"] == "connected"
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_legacy_tools_shape_still_supported(monkeypatch):
+    app = web.Application()
+
+    async def mcp(_):
+        return web.json_response({"tools": ["a"], "servers": {"x": {"status": "connected"}}}, status=200)
+
+    app.router.add_get("/mcp", mcp)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    result = await OpenCodeClient(Settings.from_env()).mcp()
+    assert result == {"success": True, "tools": ["a"], "servers": {"x": {"status": "connected"}}}
     await server.close()
 
 
@@ -303,7 +360,7 @@ async def test_send_message_includes_message_id_no_reply_and_tools(monkeypatch):
 
     async def message(request):
         captured["body"] = await request.json()
-        return web.json_response({"ok": True}, status=201)
+        return web.json_response({"ok": True}, status=200)
 
     app.router.add_post("/session/ses-1/message", message)
     server = TestServer(app)
@@ -507,10 +564,28 @@ async def test_send_message_model_ref_and_error_redaction(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_message_rejects_201(monkeypatch):
+    app = web.Application()
+
+    async def post_msg(_request: web.Request):
+        return web.json_response({"ok": True}, status=201)
+
+    app.router.add_post("/session/ses-1/message", post_msg)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    with pytest.raises(OpenCodeClientError):
+        await OpenCodeClient(Settings.from_env()).send_message(
+            "ses-1", parts=[{"type": "text", "text": "hi"}], model="anthropic/claude-sonnet-4", agent="efp-main"
+        )
+    await server.close()
+
+
+@pytest.mark.asyncio
 async def test_transport_error_message_redacts_secret(monkeypatch):
     class FailingRequestCtx:
         async def __aenter__(self):
-            raise aiohttp.ClientError("failed gho_SECRET sk-SECRET")
+            raise aiohttp.ClientError("failed gho_SECRET sk-1234567890abcdef")
 
         async def __aexit__(self, exc_type, exc, tb):
             return False
@@ -525,10 +600,10 @@ async def test_transport_error_message_redacts_secret(monkeypatch):
         await client._request_json("GET", "/global/health")
     text = str(exc.value)
     assert "gho_SECRET" not in text
-    assert "sk-SECRET" not in text
+    assert "sk-1234567890abcdef" not in text
     payload_dump = json.dumps(exc.value.payload)
     assert "gho_SECRET" not in payload_dump
-    assert "sk-SECRET" not in payload_dump
+    assert "sk-1234567890abcdef" not in payload_dump
 
 
 def test_safe_error_preview_redacts_json_like_access_refresh_text():
@@ -537,6 +612,16 @@ def test_safe_error_preview_redacts_json_like_access_refresh_text():
     assert "def456" not in text
     assert "tok789" not in text
     assert "***REDACTED***" in text
+
+
+def test_safe_error_preview_does_not_redact_short_sk_substring():
+    assert _safe_error_preview("agent-task-1") == "agent-task-1"
+
+
+def test_safe_error_preview_redacts_real_sk_token():
+    text = _safe_error_preview("bad sk-1234567890abcdef")
+    assert "***REDACTED***" in text
+    assert "sk-1234567890abcdef" not in text
 
 
 @pytest.mark.asyncio
