@@ -50,11 +50,11 @@ def _redact_env_lines(text: str) -> str:
 
 def _redact_token_patterns(text: str) -> str:
     patterns = [
-        r"gho_[A-Za-z0-9_\-]+",
-        r"ghu_[A-Za-z0-9_\-]+",
-        r"ghp_[A-Za-z0-9_\-]+",
-        r"github_pat_[A-Za-z0-9_\-]+",
-        r"sk-[A-Za-z0-9_\-]+",
+        r"(?<![A-Za-z0-9_\-])gho_[A-Za-z0-9_\-]+",
+        r"(?<![A-Za-z0-9_\-])ghu_[A-Za-z0-9_\-]+",
+        r"(?<![A-Za-z0-9_\-])ghp_[A-Za-z0-9_\-]+",
+        r"(?<![A-Za-z0-9_\-])github_pat_[A-Za-z0-9_\-]+",
+        r"(?<![A-Za-z0-9_\-])sk-[A-Za-z0-9_\-]{8,}",
     ]
     out = text
     for pattern in patterns:

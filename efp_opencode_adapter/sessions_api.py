@@ -50,38 +50,8 @@ def _message_info(message: Any) -> dict[str, Any]:
     return {}
 
 
-    time_info = info.get("time")
-    if isinstance(time_info, dict):
-        created = time_info.get("created")
-        if isinstance(created, (int, float)):
-            seconds = created / 1000 if created > 1_000_000_000_000 else created
-            return datetime.fromtimestamp(seconds, UTC).isoformat()
-
-    return ""
-
-
 def message_to_text(message: Any) -> str:
     return message_to_visible_text(message)
-
-    nested_message = message.get("message") if isinstance(message.get("message"), dict) else None
-    parts = message.get("parts")
-    if not isinstance(parts, list) and nested_message is not None:
-        parts = nested_message.get("parts")
-
-    if isinstance(parts, list):
-        out = []
-        for part in parts:
-            if isinstance(part, dict):
-                if part.get("type") == "text" and part.get("text"):
-                    out.append(str(part["text"]))
-                elif part.get("content"):
-                    out.append(str(part.get("content")))
-                else:
-                    out.append(json.dumps(part, ensure_ascii=False))
-            else:
-                out.append(json.dumps(part, ensure_ascii=False))
-        return "\n".join(out)
-    return ""
 
 
 def _to_efp_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
