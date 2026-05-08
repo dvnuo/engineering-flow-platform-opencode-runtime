@@ -647,11 +647,11 @@ async def test_text_plain_error_body_redacts_json_like_sensitive_keys(monkeypatc
     await server.close()
 
 @pytest.mark.asyncio
-async def test_send_message_adds_copilot_integration_header(monkeypatch):
+async def test_send_message_does_not_add_copilot_integration_header(monkeypatch):
     app = web.Application()
 
     async def post_message(request: web.Request):
-        assert request.headers.get("copilot-integration-id") == "vscode-chat"
+        assert request.headers.get("copilot-integration-id") is None
         body = await request.json()
         assert "headers" not in body
         return web.json_response({"ok": True}, status=200)
@@ -672,11 +672,13 @@ async def test_send_message_adds_copilot_integration_header(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", ["github-copilot/gpt-x", "github_copilot/gpt-x", "copilot/gpt-x", "github/gpt-x"])
-async def test_send_message_adds_copilot_header_for_aliases(monkeypatch, model):
+async def test_send_message_does_not_add_copilot_header_for_aliases(monkeypatch, model):
     app = web.Application()
 
     async def post_message(request: web.Request):
-        assert request.headers.get("copilot-integration-id") == "vscode-chat"
+        assert request.headers.get("copilot-integration-id") is None
+        body = await request.json()
+        assert "headers" not in body
         return web.json_response({"ok": True}, status=200)
 
     app.router.add_post("/session/ses-1/message", post_message)

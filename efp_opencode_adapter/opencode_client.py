@@ -27,8 +27,6 @@ def _format_transport_error(method: str, path: str, exc: BaseException) -> str:
 
 _REDACT_KEYS = {"key", "api_key", "apikey", "access", "refresh", "access_token", "refresh_token", "token", "authorization", "password", "secret", "oauth"}
 _SENSITIVE_TEXT_KEYS = {"key", "api_key", "apikey", "access", "refresh", "access_token", "refresh_token", "token", "authorization", "password", "secret", "oauth"}
-COPILOT_INTEGRATION_HEADER = "copilot-integration-id"
-COPILOT_INTEGRATION_ID = "vscode-chat"
 
 
 def _redact_sensitive_text(text: str) -> str:
