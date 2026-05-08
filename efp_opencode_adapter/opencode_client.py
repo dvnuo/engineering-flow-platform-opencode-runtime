@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any, Mapping
@@ -24,22 +25,44 @@ def _format_transport_error(method: str, path: str, exc: BaseException) -> str:
 
 
 
-_REDACT_KEYS = {"key", "api_key", "access", "refresh", "access_token", "refresh_token", "token", "authorization", "password", "secret"}
+_REDACT_KEYS = {"key", "api_key", "apikey", "access", "refresh", "access_token", "refresh_token", "token", "authorization", "password", "secret", "oauth"}
+_SENSITIVE_TEXT_KEYS = {"key", "api_key", "apikey", "access", "refresh", "access_token", "refresh_token", "token", "authorization", "password", "secret", "oauth"}
+
+
+def _redact_sensitive_text(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, (dict, list)):
+                return json.dumps(_redact_sensitive(parsed), ensure_ascii=False)
+        except Exception:
+            pass
+    key_union = "|".join(sorted(_SENSITIVE_TEXT_KEYS, key=len, reverse=True))
+    out = text
+    out = re.sub(
+        rf"(?i)([\"']?(?:{key_union})[\"']?\s*:\s*[\"'])([^\"']+)([\"'])",
+        r"\1***REDACTED***\3",
+        out,
+    )
+    out = re.sub(
+        rf"(?i)\b({key_union})\b(\s*[:=]\s*)([^\s,;&}}\]]+)",
+        r"\1\2***REDACTED***",
+        out,
+    )
+    patterns = [r"gho_[A-Za-z0-9_\-]+", r"ghu_[A-Za-z0-9_\-]+", r"ghp_[A-Za-z0-9_\-]+", r"github_pat_[A-Za-z0-9_\-]+", r"sk-[A-Za-z0-9_\-]+"]
+    for pat in patterns:
+        out = re.sub(pat, "***REDACTED***", out)
+    return out
 
 
 def _redact_sensitive(value: Any) -> Any:
-    import re
-
     if isinstance(value, dict):
         return {k: ("***REDACTED***" if str(k).lower() in _REDACT_KEYS else _redact_sensitive(v)) for k, v in value.items()}
     if isinstance(value, list):
         return [_redact_sensitive(v) for v in value]
     if isinstance(value, str):
-        out = value
-        patterns = [r"gho_[A-Za-z0-9_\-]+", r"ghu_[A-Za-z0-9_\-]+", r"ghp_[A-Za-z0-9_\-]+", r"github_pat_[A-Za-z0-9_\-]+", r"sk-[A-Za-z0-9_\-]+"]
-        for pat in patterns:
-            out = re.sub(pat, "***REDACTED***", out)
-        return out
+        return _redact_sensitive_text(value)
     return value
 
 

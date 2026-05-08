@@ -8,6 +8,7 @@ from aiohttp.test_utils import TestServer
 
 from efp_opencode_adapter.opencode_client import OpenCodeClient
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
+from efp_opencode_adapter.opencode_client import _safe_error_preview
 from efp_opencode_adapter.settings import Settings
 
 
@@ -528,3 +529,34 @@ async def test_transport_error_message_redacts_secret(monkeypatch):
     payload_dump = json.dumps(exc.value.payload)
     assert "gho_SECRET" not in payload_dump
     assert "sk-SECRET" not in payload_dump
+
+
+def test_safe_error_preview_redacts_json_like_access_refresh_text():
+    text = _safe_error_preview('{"access":"abc123","refresh":"def456","token":"tok789"}')
+    assert "abc123" not in text
+    assert "def456" not in text
+    assert "tok789" not in text
+    assert "***REDACTED***" in text
+
+
+@pytest.mark.asyncio
+async def test_text_plain_error_body_redacts_json_like_sensitive_keys(monkeypatch):
+    app = web.Application()
+
+    async def bad(_request: web.Request):
+        return web.Response(status=400, text='{"error":"bad","access":"abc123","refresh":"def456"}', content_type="text/plain")
+
+    app.router.add_post("/session/ses-plain/message", bad)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    with pytest.raises(OpenCodeClientError) as exc:
+        await OpenCodeClient(Settings.from_env()).send_message("ses-plain", parts=[{"type": "text", "text": "hi"}], model="github-copilot/gpt-5.4-mini", agent="efp-main")
+    message = str(exc.value)
+    assert "status 400" in message
+    assert "abc123" not in message
+    assert "def456" not in message
+    payload_dump = json.dumps(exc.value.payload)
+    assert "abc123" not in payload_dump
+    assert "def456" not in payload_dump
+    await server.close()
