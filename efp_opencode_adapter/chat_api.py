@@ -33,6 +33,12 @@ from .thinking_events import (
 )
 from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
 from .opencode_config import normalize_opencode_provider_id
+from .opencode_message_adapter import (
+    extract_last_assistant_visible_text,
+    extract_reasoning_texts_from_parts,
+    message_id as adapter_message_id,
+    message_role as adapter_message_role,
+)
 
 
 def _bad_request(error: str) -> web.HTTPBadRequest:
@@ -114,57 +120,15 @@ def _request_id_from_payload(payload: dict[str, Any]) -> str:
     return _optional_nonempty_string_from_payload(payload, "request_id", generated=f"chat-{uuid4()}", error="request_id_must_be_string")
 
 
-def _parts_to_text(parts: Any) -> str:
-    if not isinstance(parts, list):
-        return ""
-    out: list[str] = []
-    for part in parts:
-        if isinstance(part, dict):
-            if isinstance(part.get("text"), str):
-                out.append(part["text"])
-            elif isinstance(part.get("content"), str):
-                out.append(part["content"])
-        elif isinstance(part, str):
-            out.append(part)
-    return "\n".join(x for x in out if x).strip()
-
-
-def _message_role(message: dict[str, Any]) -> str:
-    info = message.get("info")
-    if isinstance(info, dict) and isinstance(info.get("role"), str):
-        return info["role"]
-    if isinstance(message.get("role"), str):
-        return message["role"]
-    nested = message.get("message")
-    if isinstance(nested, dict):
-        return _message_role(nested)
-    return ""
-
-
-def _message_id(message: Any) -> str:
-    if not isinstance(message, dict):
-        return ""
-    info = message.get("info")
-    if isinstance(info, dict) and info.get("id"):
-        return str(info["id"])
-    for key in ("id", "message_id"):
-        if message.get(key):
-            return str(message[key])
-    nested = message.get("message")
-    if isinstance(nested, dict):
-        return _message_id(nested)
-    return ""
-
-
 def _detect_new_message_ids(before_messages: list[dict[str, Any]], after_messages: list[dict[str, Any]]) -> tuple[str, str]:
-    before_ids = {_message_id(message) for message in before_messages if _message_id(message)}
+    before_ids = {adapter_message_id(message) for message in before_messages if adapter_message_id(message)}
     user_message_id = ""
     assistant_message_id = ""
     for message in after_messages:
-        message_id = _message_id(message)
+        message_id = adapter_message_id(message)
         if not message_id or message_id in before_ids:
             continue
-        role = _message_role(message).lower()
+        role = adapter_message_role(message).lower()
         if role == "user":
             user_message_id = message_id
         elif role == "assistant":
@@ -172,54 +136,10 @@ def _detect_new_message_ids(before_messages: list[dict[str, Any]], after_message
     return user_message_id, assistant_message_id
 
 
-def _message_text(message: Any) -> str:
-    if isinstance(message, str):
-        return message
-    if not isinstance(message, dict):
-        return ""
-    text = _parts_to_text(message.get("parts"))
-    if text:
-        return text
-    nested = message.get("message")
-    if isinstance(nested, dict):
-        text = _message_text(nested)
-        if text:
-            return text
-    for key in ("response", "text", "content"):
-        if isinstance(message.get(key), str) and message[key]:
-            return message[key]
-    return ""
 
 
 def extract_assistant_text(payload: Any) -> str:
-    if isinstance(payload, list):
-        for msg in reversed(payload):
-            if isinstance(msg, dict) and _message_role(msg) == "assistant":
-                text = _message_text(msg)
-                if text:
-                    return text
-        for msg in reversed(payload):
-            text = _message_text(msg)
-            if text:
-                return text
-        return ""
-    if isinstance(payload, dict):
-        nested = payload.get("message")
-        if isinstance(nested, (dict, list, str)):
-            text = extract_assistant_text(nested)
-            if text:
-                return text
-        text = _message_text(payload)
-        if text:
-            return text
-        for key in ("messages", "data"):
-            if isinstance(payload.get(key), list):
-                text = extract_assistant_text(payload[key])
-                if text:
-                    return text
-    return ""
-
-
+    return extract_last_assistant_visible_text(payload)
 async def _ensure_record_for_chat(*, client, store, portal_session_id: str, title: str, agent: str | None, model: str | None) -> tuple[SessionRecord, bool]:
     existing = store.get(portal_session_id)
     if existing is None:
@@ -311,7 +231,14 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         except Exception as exc:
             message_id_detection_error_before = str(exc)
         response_payload = await client.send_message(record.opencode_session_id, parts=[{"type": "text", "text": message}], model=model, agent=agent, system=system)
-        assistant_text = extract_assistant_text(response_payload) or "[no assistant response]"
+        assistant_text = extract_last_assistant_visible_text(response_payload)
+        payload_message = response_payload.get("message") if isinstance(response_payload, dict) else None
+        if isinstance(payload_message, dict):
+            reasoning_texts = extract_reasoning_texts_from_parts(payload_message.get("parts"))
+            for item in reasoning_texts:
+                think_event = add_trace_context({"type": "llm_thinking", "engine": "opencode", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "message": safe_preview(item, 300), "data": {"message": safe_preview(item, 300)}, "created_at": utc_now_iso()}, trace_context)
+                runtime_events.append(think_event)
+                await bus.publish(think_event)
         user_message_id = ""
         assistant_message_id = ""
         try:
@@ -319,6 +246,13 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             user_message_id, assistant_message_id = _detect_new_message_ids(before_messages, after_messages)
         except Exception:
             pass
+        if not assistant_text:
+            try:
+                assistant_text = extract_last_assistant_visible_text(after_messages) if "after_messages" in locals() else ""
+            except Exception:
+                assistant_text = ""
+        if not assistant_text:
+            assistant_text = ""
         if not assistant_message_id and isinstance(response_payload, dict):
             candidate = response_payload.get("info", {}).get("id") if isinstance(response_payload.get("info"), dict) else ""
             if not candidate and isinstance(response_payload.get("message"), dict):
@@ -375,7 +309,7 @@ async def chat_handler(request: web.Request) -> web.Response:
 
 
 STREAM_HEARTBEAT_SECONDS = 15.0
-BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.completed", "session.updated"}
+BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.delta", "llm_thinking", "opencode.reasoning", "provider.retry", "provider.status", "execution.started", "execution.completed", "execution.failed", "complete", "final", "error"}
 
 
 class SSEClientDisconnected(Exception):
@@ -441,14 +375,16 @@ def _is_stream_relevant_event(event: dict[str, Any], *, session_id: str, request
     explicit_portal_req = event.get("portal_request_id")
     if not explicit_portal_req and isinstance(event.get("data"), dict):
         explicit_portal_req = event["data"].get("portal_request_id")
-    if explicit_portal_req:
-        return str(explicit_portal_req) == request_id
+    if explicit_portal_req and str(explicit_portal_req) != request_id:
+        return False
     event_type = str(event.get("type") or event.get("event_type") or "")
-    raw_type = str(event.get("raw_type") or "")
-    if event_type in BRIDGE_EVENT_TYPES or event_type.startswith("tool.") or event_type.startswith("permission_") or event_type.startswith("opencode.") or raw_type:
+    if event_type in {"opencode.sync", "opencode.message.updated", "session.updated", "session.status", "session.idle", "session.diff"}:
+        return False
+    if event_type in BRIDGE_EVENT_TYPES or event_type.startswith("tool.") or event_type.startswith("permission_"):
+        if event_type in {"assistant_delta", "message.delta"}:
+            return bool(_event_delta_text(event))
         return True
-    ev_req = event.get("request_id")
-    return (not ev_req) or str(ev_req) == request_id
+    return str(event.get("request_id") or "") in {"", request_id}
 
 
 def _event_delta_text(event: dict[str, Any]) -> str:
@@ -513,7 +449,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             return
         seen.add(key)
         await _write_sse(resp, "runtime_event", event)
-        if event.get("type") == "assistant_delta":
+        if event.get("type") in {"assistant_delta", "message.delta"}:
             delta = _event_delta_text(event)
             if delta:
                 await _write_sse(resp, "delta", {"delta": delta, "session_id": session_id, "request_id": req_id})

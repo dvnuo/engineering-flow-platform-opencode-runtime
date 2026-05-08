@@ -8,6 +8,7 @@ from .index_loader import load_tools_index
 from .profile_store import sanitize_public_secrets
 from .thinking_events import safe_preview, utc_now_iso
 from .trace_context import add_trace_context, build_trace_context
+from .opencode_message_adapter import extract_visible_text_from_parts, extract_reasoning_texts_from_parts
 
 
 def _sanitize_event_value(value: Any, max_chars: int) -> Any:
@@ -27,6 +28,13 @@ def _sanitize_event_text(value: Any, max_chars: int = 300) -> str:
 def _canonical(raw_event: dict[str, Any]) -> dict[str, Any]:
     payload = raw_event.get("payload")
     if isinstance(payload, dict):
+        if payload.get("type") == "sync" and isinstance(payload.get("syncEvent"), dict):
+            sync = payload["syncEvent"]
+            data = sync.get("data") if isinstance(sync.get("data"), dict) else {}
+            canonical = dict(data)
+            canonical["type"] = sync.get("type") or payload.get("type")
+            canonical["opencode_event_id"] = sync.get("id")
+            return canonical
         canonical = dict(payload)
         props = canonical.get("properties")
         if isinstance(props, dict):
@@ -39,15 +47,21 @@ def _canonical(raw_event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _event_type(raw_event: dict[str, Any], canonical: dict[str, Any]) -> str:
+    value = ""
     for key in ("type", "event"):
-        value = canonical.get(key)
-        if value:
-            return str(value).lower()
-    for key in ("type", "event"):
-        value = raw_event.get(key)
-        if value:
-            return str(value).lower()
-    return ""
+        v = canonical.get(key)
+        if v:
+            value = str(v).lower()
+            break
+    if not value:
+        for key in ("type", "event"):
+            v = raw_event.get(key)
+            if v:
+                value = str(v).lower()
+                break
+    if value.startswith("message.part.updated"):
+        return "message.part.updated"
+    return value
 
 
 def _collect_strings(value: Any, out: dict[str, str]) -> None:
@@ -78,23 +92,17 @@ def _tool_name(values: dict[str, str]) -> str:
 
 
 def _message_text(canonical: dict[str, Any], values: dict[str, str]) -> str:
+    part = canonical.get("part")
+    if isinstance(part, dict):
+        return extract_visible_text_from_parts([part])
+    parts = canonical.get("parts")
+    if isinstance(parts, list):
+        text = extract_visible_text_from_parts(parts)
+        if text:
+            return text
     for key in ("delta", "text", "message", "content"):
         if values.get(key):
             return values[key]
-    part = canonical.get("part")
-    if isinstance(part, dict) and isinstance(part.get("text"), str):
-        return part["text"]
-    message = canonical.get("message")
-    if isinstance(message, dict):
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        text = message.get("text")
-        if isinstance(text, str):
-            return text
-    output = canonical.get("output")
-    if isinstance(output, dict) and isinstance(output.get("text"), str):
-        return output["text"]
     return ""
 
 
@@ -198,7 +206,27 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     elif "tool" in raw_type and any(t in raw_type for t in ("fail", "error")):
         normalized_type = "tool.failed"
     elif raw_type == "message.part.updated":
-        normalized_type = "assistant_delta"
+        part = canonical.get("part") if isinstance(canonical.get("part"), dict) else {}
+        ptype = str(part.get("type") or "").lower()
+        if ptype == "text":
+            normalized_type = "message.delta"
+            text = extract_visible_text_from_parts([part])
+        elif ptype == "reasoning":
+            normalized_type = "llm_thinking"
+            rs = extract_reasoning_texts_from_parts([part])
+            text = rs[0] if rs else ""
+        elif ptype == "step-start":
+            normalized_type = "execution.started"
+            text = ""
+        elif ptype == "step-finish":
+            normalized_type = "execution.completed"
+            text = ""
+        elif ptype == "tool":
+            normalized_type = "tool.started" if status in {"", "started", "running"} else "tool.completed"
+            text = ""
+        else:
+            normalized_type = "opencode.message.part.updated"
+            text = ""
     elif raw_type in {"message.completed", "message.finished"}:
         normalized_type = "message.completed"
     elif raw_type.startswith("session."):
@@ -224,10 +252,13 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         "input_preview": s_input,
         "output_preview": s_output,
         "risk_level": s_risk,
-        "delta": s_text,
-        "message": s_text,
         "status": s_status,
     }
+    if normalized_type in {"assistant_delta", "message.delta"} and s_text:
+        data["delta"] = s_text
+        data["message"] = s_text
+    elif normalized_type in {"llm_thinking", "opencode.reasoning"} and s_text:
+        data["message"] = s_text
 
     s_session_id = _sanitize_event_text(session_id, 300)
     s_opencode_session_id = _sanitize_event_text(opencode_session_id, 300)

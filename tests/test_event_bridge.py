@@ -296,3 +296,22 @@ async def test_policy_tags_dict_mutation_key_is_ignored_and_does_not_leak_secret
     assert event['mutation'] is False
     assert event['audit_event'] is False
     assert 'SECRET-SHOULD-NOT-LEAK' not in json.dumps(event)
+
+
+def test_event_bridge_part_type_classification(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    session_store = SessionStore(ensure_state_dirs(settings).sessions_dir)
+    task_store = TaskStore(ensure_state_dirs(settings).tasks_dir)
+
+    step = normalize_opencode_event({"payload": {"type": "sync", "syncEvent": {"type": "message.part.updated.1", "data": {"part": {"type": "step-finish"}}}}}, session_store=session_store, task_store=task_store, settings=settings)
+    assert step["type"] != "assistant_delta"
+
+    reason = normalize_opencode_event({"type": "message.part.updated", "part": {"type": "reasoning", "text": "hidden reasoning"}}, session_store=session_store, task_store=task_store, settings=settings)
+    assert reason["type"] == "llm_thinking"
+    assert "delta" not in reason["data"]
+
+    text = normalize_opencode_event({"type": "message.part.updated", "part": {"type": "text", "text": "Hi"}}, session_store=session_store, task_store=task_store, settings=settings)
+    assert text["type"] in {"message.delta", "assistant_delta"}
+    assert text["data"].get("delta") == "Hi"
