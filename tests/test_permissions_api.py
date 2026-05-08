@@ -33,7 +33,7 @@ async def test_permission_respond_has_trace_context_and_request_id(tmp_path, mon
     body = {"decision": "allow", "remember": True, "session_id": "sess-perm-1", "opencode_session_id": "ses-1", "request_id": "req-perm-1", "tool": "bash"}
     resp = await client.post('/api/permissions/perm-1/respond', json=body)
     assert resp.status == 200
-    assert fake.permission_calls == [('ses-1', 'perm-1', {'decision': 'allow', 'remember': True})]
+    assert fake.permission_calls == [('ses-1', 'perm-1', {'response': 'always'})]
 
     event = await ws.receive_json(timeout=2)
     assert event['type'] == 'permission_resolved'
@@ -50,3 +50,113 @@ async def test_permission_respond_has_trace_context_and_request_id(tmp_path, mon
     event2 = await ws.receive_json(timeout=2)
     assert 'token-permission-secret' not in json.dumps(event2).lower()
     await ws.close(); await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({"decision": "allow", "remember": False}, {"response": "once"}),
+        ({"decision": "allow", "remember": True}, {"response": "always"}),
+        ({"decision": "approve", "remember": True}, {"response": "always"}),
+        ({"decision": "deny"}, {"response": "reject"}),
+        ({"decision": "reject"}, {"response": "reject"}),
+        ({"response": "once", "decision": "allow"}, {"response": "once"}),
+        ({"response": "always", "decision": "deny"}, {"response": "always"}),
+        ({"response": "reject", "decision": "allow"}, {"response": "reject"}),
+    ],
+)
+async def test_permission_respond_maps_body_to_opencode_response(tmp_path, monkeypatch, body, expected):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = TrackingPermissionClient()
+    fake.sessions["ses-1"] = {"id": "ses-1", "title": "x"}
+    fake.messages["ses-1"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    payload = {"session_id": "sess-perm-1", "opencode_session_id": "ses-1", "request_id": "req-perm-1", **body}
+    resp = await client.post("/api/permissions/perm-1/respond", json=payload)
+    assert resp.status == 200
+    assert fake.permission_calls[-1] == ("ses-1", "perm-1", expected)
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_value", "expected"),
+    [
+        ("once", {"response": "once"}),
+        ("always", {"response": "always"}),
+        ("reject", {"response": "reject"}),
+    ],
+)
+async def test_permission_respond_accepts_response_only_body(tmp_path, monkeypatch, response_value, expected):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = TrackingPermissionClient()
+    fake.sessions["ses-1"] = {"id": "ses-1", "title": "x"}
+    fake.messages["ses-1"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    resp = await client.post(
+        "/api/permissions/perm-1/respond",
+        json={
+            "response": response_value,
+            "session_id": "sess-perm-1",
+            "opencode_session_id": "ses-1",
+            "request_id": "req-perm-1",
+        },
+    )
+    assert resp.status == 200
+    assert fake.permission_calls[-1] == ("ses-1", "perm-1", expected)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_permission_respond_prefers_explicit_response_over_decision(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = TrackingPermissionClient()
+    fake.sessions["ses-1"] = {"id": "ses-1", "title": "x"}
+    fake.messages["ses-1"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    resp = await client.post(
+        "/api/permissions/perm-1/respond",
+        json={
+            "response": "always",
+            "decision": "deny",
+            "session_id": "sess-perm-1",
+            "opencode_session_id": "ses-1",
+            "request_id": "req-perm-1",
+        },
+    )
+    assert resp.status == 200
+    assert fake.permission_calls[-1] == ("ses-1", "perm-1", {"response": "always"})
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_permission_respond_rejects_invalid_explicit_response(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = TrackingPermissionClient()
+    fake.sessions["ses-1"] = {"id": "ses-1", "title": "x"}
+    fake.messages["ses-1"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    resp = await client.post(
+        "/api/permissions/perm-1/respond",
+        json={
+            "response": "bad",
+            "decision": "allow",
+            "session_id": "sess-perm-1",
+            "opencode_session_id": "ses-1",
+            "request_id": "req-perm-1",
+        },
+    )
+    assert resp.status == 400
+    text = await resp.text()
+    assert "invalid_response" in text
+    assert fake.permission_calls == []
+    await client.close()

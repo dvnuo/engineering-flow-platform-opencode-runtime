@@ -50,7 +50,13 @@ def _redact_sensitive_text(text: str) -> str:
         r"\1\2***REDACTED***",
         out,
     )
-    patterns = [r"gho_[A-Za-z0-9_\-]+", r"ghu_[A-Za-z0-9_\-]+", r"ghp_[A-Za-z0-9_\-]+", r"github_pat_[A-Za-z0-9_\-]+", r"sk-[A-Za-z0-9_\-]+"]
+    patterns = [
+        r"(?<![A-Za-z0-9_\-])gho_[A-Za-z0-9_\-]+",
+        r"(?<![A-Za-z0-9_\-])ghu_[A-Za-z0-9_\-]+",
+        r"(?<![A-Za-z0-9_\-])ghp_[A-Za-z0-9_\-]+",
+        r"(?<![A-Za-z0-9_\-])github_pat_[A-Za-z0-9_\-]+",
+        r"(?<![A-Za-z0-9_\-])sk-[A-Za-z0-9_\-]{8,}",
+    ]
     for pat in patterns:
         out = re.sub(pat, "***REDACTED***", out)
     return out
@@ -87,6 +93,40 @@ def _model_ref_from_value(model: Any) -> dict[str, str] | None:
         model_id = model_id.strip()
         if provider and model_id:
             return {"providerID": provider, "modelID": model_id}
+    return None
+
+
+def _normalize_prompt_body(payload: Mapping[str, Any] | dict[str, Any]) -> dict[str, Any]:
+    body = dict(payload)
+    model_ref = _model_ref_from_value(body.get("model"))
+    if model_ref:
+        body["model"] = model_ref
+    else:
+        body.pop("model", None)
+    return body
+
+
+def _permission_response_from_body(body: Mapping[str, Any]) -> dict[str, str]:
+    response = body.get("response")
+    if response in {"once", "always", "reject"}:
+        return {"response": str(response)}
+
+    decision = str(body.get("decision") or "").lower()
+    remember = bool(body.get("remember", False))
+    if decision in {"allow", "approve"}:
+        return {"response": "always" if remember else "once"}
+    if decision in {"deny", "reject"}:
+        return {"response": "reject"}
+    return {"response": "reject"}
+
+
+def _copilot_integration_headers_for_model(model: str | None) -> dict[str, str] | None:
+    if not isinstance(model, str) or "/" not in model:
+        return None
+    provider_prefix = model.split("/", 1)[0]
+    provider = normalize_opencode_provider_id(provider_prefix)
+    if provider == "github-copilot":
+        return {COPILOT_INTEGRATION_HEADER: COPILOT_INTEGRATION_ID}
     return None
 
 
@@ -248,13 +288,21 @@ class OpenCodeClient:
             resp = await self._request("GET", url, timeout=aiohttp.ClientTimeout(total=5))
             try:
                 if resp.status // 100 != 2:
-                    return {"success": False, "tools": []}
+                    return {"success": False, "tools": [], "servers": {}}
                 payload = await resp.json()
-                return {"success": True, "tools": payload.get("tools", [])} if isinstance(payload, dict) else {"success": False, "tools": []}
+                if isinstance(payload, dict):
+                    if isinstance(payload.get("tools"), list):
+                        return {
+                            "success": True,
+                            "tools": payload.get("tools", []),
+                            "servers": payload.get("servers", {}) if isinstance(payload.get("servers"), dict) else {},
+                        }
+                    return {"success": True, "tools": [], "servers": payload}
+                return {"success": False, "tools": [], "servers": {}}
             finally:
                 await _close_owned_response(resp)
         except Exception:
-            return {"success": False, "tools": []}
+            return {"success": False, "tools": [], "servers": {}}
 
     async def list_tool_ids(self, timeout_seconds: int = 30) -> list[str]:
         data = await self._request_json(
@@ -333,7 +381,8 @@ class OpenCodeClient:
             payload["agent"] = agent
         if system:
             payload["system"] = system
-        return await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200, 201))
+        headers = _copilot_integration_headers_for_model(model)
+        return await self._request_json("POST", f"/session/{session_id}/message", json=payload, headers=headers, expected_statuses=(200,))
 
     async def fork_session(self, session_id: str, message_id: str | None = None) -> dict:
         payload = {"messageID": message_id} if message_id else {}
@@ -356,13 +405,15 @@ class OpenCodeClient:
         return {"success": True, "supported": True, "status": status}
 
     async def prompt_async(self, session_id: str, payload: dict[str, Any]) -> dict | None:
-        return await self._request_json("POST", f"/session/{session_id}/prompt_async", json=payload, expected_statuses=(200, 201, 202, 204))
+        body = _normalize_prompt_body(payload)
+        return await self._request_json("POST", f"/session/{session_id}/prompt_async", json=body, expected_statuses=(204,))
 
     async def respond_permission(self, session_id: str, permission_id: str, payload: dict[str, Any]) -> dict:
+        body = _permission_response_from_body(payload)
         return await self._request_json(
             "POST",
             f"/session/{session_id}/permissions/{permission_id}",
-            json=payload,
+            json=body,
             expected_statuses=(200, 201, 202, 204),
         ) or {"success": True}
 
