@@ -11,7 +11,7 @@ from .app_keys import (
     SESSION_STORE_KEY,
 )
 
-from .opencode_client import OpenCodeClientError
+from .opencode_client import OpenCodeClientError, _permission_response_from_body
 from .thinking_events import build_thinking_event
 from .trace_context import add_trace_context, build_trace_context
 
@@ -42,7 +42,7 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
         if rec is None:
             raise web.HTTPNotFound(text=json.dumps({"error": "session_not_found"}), content_type="application/json")
         opencode_session_id = rec.opencode_session_id
-    payload = {"decision": decision, "remember": bool(body.get("remember", False))}
+    payload = _permission_response_from_body(body)
     try:
         await request.app[OPENCODE_CLIENT_KEY].respond_permission(opencode_session_id, permission_id, payload)
     except OpenCodeClientError as exc:
