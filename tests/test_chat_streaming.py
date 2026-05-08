@@ -34,7 +34,7 @@ async def test_chat_stream_sends_delta_event_for_assistant_delta(tmp_path, monke
     fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
     t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-2','request_id':'req-stream-2'}))
     await fake.entered.wait()
-    await app[EVENT_BUS_KEY].publish({'type':'assistant_delta','session_id':'portal-stream-2','request_id':'raw-message-part-id','data':{'delta':'hello delta'},'engine':'opencode','raw_type':'message.part.updated'})
+    await app[EVENT_BUS_KEY].publish({'type':'assistant_delta','session_id':'portal-stream-2','request_id':'raw-message-part-id','data':{'delta':'hello delta'},'engine':'opencode','raw_type':'message.part.delta'})
     fake.release.set(); resp=await t; body=await resp.text()
     assert 'event: delta' in body and 'hello delta' in body and body.index('event: delta') < body.index('event: final')
     await c.close()
@@ -254,6 +254,7 @@ async def test_chat_stream_filters_noise_events_and_keeps_useful_events(tmp_path
         {'type':'opencode.step.finished','session_id':'portal-stream-filter-1'},
         {'type':'unknown.debug','session_id':'portal-stream-filter-1','request_id':''},
         {'type':'message.delta','session_id':'portal-stream-filter-1','request_id':'raw-id','raw_type':'message.part.updated','data':{'delta':'Hi'}},
+        {'type':'message.delta','session_id':'portal-stream-filter-1','request_id':'raw-id','raw_type':'message.part.delta','data':{'delta':'Yo','message_role':'assistant','part_type':'text'}},
         {'type':'llm_thinking','session_id':'portal-stream-filter-1','request_id':'raw-id','data':{'message':'thinking'}},
     ]:
         await app[EVENT_BUS_KEY].publish(evt)
@@ -262,7 +263,9 @@ async def test_chat_stream_filters_noise_events_and_keeps_useful_events(tmp_path
     assert 'session.updated' not in body
     assert 'opencode.step.finished' not in body
     assert 'unknown.debug' not in body
-    assert 'event: delta' in body and 'Hi' in body
+    assert '"raw_type": "message.part.updated"' in body
+    assert 'event: delta' in body and 'Yo' in body
+    assert 'event: delta\ndata: {"delta": "Hi"' not in body
     assert 'llm_thinking' in body
     await c.close()
 
@@ -273,8 +276,39 @@ async def test_chat_stream_does_not_duplicate_real_and_synthetic_delta(tmp_path,
     fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
     t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-dup-1','request_id':'req-stream-dup-1'}))
     await fake.entered.wait()
-    await app[EVENT_BUS_KEY].publish({'type':'message.delta','session_id':'portal-stream-dup-1','request_id':'raw-1','raw_type':'message.part.updated','data':{'delta':'Hi'}})
+    await app[EVENT_BUS_KEY].publish({'type':'message.delta','session_id':'portal-stream-dup-1','request_id':'raw-1','raw_type':'message.part.delta','data':{'delta':'Hi','message_role':'assistant','part_type':'text'}})
     await app[EVENT_BUS_KEY].publish({'type':'assistant_delta','session_id':'portal-stream-dup-1','request_id':'req-stream-dup-1','synthetic_final_delta':True,'data':{'delta':'Hi','synthetic_final_delta':True}})
     fake.release.set(); resp=await t; body=await resp.text()
     assert body.count('event: delta') == 1
     await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_blocks_message_part_updated_delta_echo(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
+    fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
+    t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-echo-1','request_id':'req-stream-echo-1'}))
+    await fake.entered.wait()
+    await app[EVENT_BUS_KEY].publish({'type':'message.delta','session_id':'portal-stream-echo-1','request_id':'raw-1','raw_type':'message.part.updated','data':{'delta':'hi'}})
+    fake.release.set(); resp=await t; body=await resp.text()
+    assert 'event: delta\ndata: {"delta": "hi"' not in body
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_blocks_message_part_delta_without_assistant_role(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = SlowFake()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    try:
+        t = asyncio.create_task(c.post("/api/chat/stream", json={"message": "m", "session_id": "portal-stream-missing-role-1", "request_id": "req-stream-missing-role-1"}))
+        await fake.entered.wait()
+        await app[EVENT_BUS_KEY].publish({"type": "message.delta", "session_id": "portal-stream-missing-role-1", "request_id": "raw-1", "raw_type": "message.part.delta", "data": {"delta": "hi"}})
+        fake.release.set()
+        resp = await t
+        body = await resp.text()
+        assert 'event: delta\ndata: {"delta": "hi"' not in body
+    finally:
+        await c.close()
