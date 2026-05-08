@@ -64,9 +64,6 @@ def provider_config_from_runtime_profile(runtime_config: dict) -> dict:
     chunk_timeout_ms = _int_or_none(llm.get("chunk_timeout_ms") or llm.get("chunkTimeout"))
     if chunk_timeout_ms:
         options["chunkTimeout"] = chunk_timeout_ms
-    if provider == "github-copilot":
-        existing_headers = options.get("headers") if isinstance(options.get("headers"), dict) else {}
-        options["headers"] = {**existing_headers, "copilot-integration-id": "vscode-chat"}
     if not options:
         return {}
     return {"provider": {provider: {"options": options}}}

@@ -27,8 +27,6 @@ def _format_transport_error(method: str, path: str, exc: BaseException) -> str:
 
 _REDACT_KEYS = {"key", "api_key", "apikey", "access", "refresh", "access_token", "refresh_token", "token", "authorization", "password", "secret", "oauth"}
 _SENSITIVE_TEXT_KEYS = {"key", "api_key", "apikey", "access", "refresh", "access_token", "refresh_token", "token", "authorization", "password", "secret", "oauth"}
-COPILOT_INTEGRATION_HEADER = "copilot-integration-id"
-COPILOT_INTEGRATION_ID = "vscode-chat"
 
 
 def _redact_sensitive_text(text: str) -> str:
@@ -89,16 +87,6 @@ def _model_ref_from_value(model: Any) -> dict[str, str] | None:
         model_id = model_id.strip()
         if provider and model_id:
             return {"providerID": provider, "modelID": model_id}
-    return None
-
-
-def _copilot_integration_headers_for_model(model: str | None) -> dict[str, str] | None:
-    if not isinstance(model, str) or "/" not in model:
-        return None
-    provider_prefix = model.split("/", 1)[0]
-    provider = normalize_opencode_provider_id(provider_prefix)
-    if provider == "github-copilot":
-        return {COPILOT_INTEGRATION_HEADER: COPILOT_INTEGRATION_ID}
     return None
 
 
@@ -345,8 +333,7 @@ class OpenCodeClient:
             payload["agent"] = agent
         if system:
             payload["system"] = system
-        headers = _copilot_integration_headers_for_model(model)
-        return await self._request_json("POST", f"/session/{session_id}/message", json=payload, headers=headers, expected_statuses=(200, 201))
+        return await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200, 201))
 
     async def fork_session(self, session_id: str, message_id: str | None = None) -> dict:
         payload = {"messageID": message_id} if message_id else {}

@@ -69,19 +69,22 @@ def test_write_main_agent_prompt(tmp_path, monkeypatch):
     assert "Use efp_* tools" in text
 
 
-def test_copilot_provider_config_includes_integration_header(tmp_path, monkeypatch):
+def test_copilot_provider_config_does_not_include_integration_header(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     cfg, _, updated = build_opencode_config(Settings.from_env(), {"llm": {"provider": "github_copilot", "model": "gpt-x"}})
-    assert cfg["provider"]["github-copilot"]["options"]["headers"]["copilot-integration-id"] == "vscode-chat"
-    assert "provider" in updated
+    assert cfg["agent"]["efp-main"]["model"] == "github-copilot/gpt-x"
+    assert "copilot-integration-id" not in json.dumps(cfg)
+    assert "provider" not in cfg
+    assert "provider" not in updated
 
 
-def test_copilot_model_prefix_includes_integration_header(tmp_path, monkeypatch):
+def test_copilot_provider_base_url_keeps_provider_options_without_integration_header(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
-    cfg, _, updated = build_opencode_config(Settings.from_env(), {"llm": {"model": "copilot/gpt-x"}})
-    assert cfg["provider"]["github-copilot"]["options"]["headers"]["copilot-integration-id"] == "vscode-chat"
+    cfg, _, updated = build_opencode_config(Settings.from_env(), {"llm": {"provider": "github_copilot", "model": "gpt-x", "api_base": "http://copilot.local"}})
+    assert cfg["provider"]["github-copilot"]["options"]["baseURL"] == "http://copilot.local"
+    assert "copilot-integration-id" not in json.dumps(cfg)
     assert "provider" in updated
 
 
