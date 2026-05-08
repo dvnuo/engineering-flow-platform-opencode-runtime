@@ -67,3 +67,28 @@ def test_write_main_agent_prompt(tmp_path, monkeypatch):
     assert "Obey Portal capability/profile/policy metadata." in text
     assert "Do not write back to external systems unless explicitly allowed." in text
     assert "Use efp_* tools" in text
+
+
+def test_copilot_provider_config_includes_integration_header(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    cfg, _, updated = build_opencode_config(Settings.from_env(), {"llm": {"provider": "github_copilot", "model": "gpt-x"}})
+    assert cfg["provider"]["github-copilot"]["options"]["headers"]["copilot-integration-id"] == "vscode-chat"
+    assert "provider" in updated
+
+
+def test_copilot_model_prefix_includes_integration_header(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    cfg, _, updated = build_opencode_config(Settings.from_env(), {"llm": {"model": "copilot/gpt-x"}})
+    assert cfg["provider"]["github-copilot"]["options"]["headers"]["copilot-integration-id"] == "vscode-chat"
+    assert "provider" in updated
+
+
+def test_non_copilot_providers_do_not_include_integration_header(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    cfg_openai, _, _ = build_opencode_config(Settings.from_env(), {"llm": {"provider": "openai", "model": "gpt-5"}})
+    cfg_anthropic, _, _ = build_opencode_config(Settings.from_env(), {"llm": {"provider": "anthropic", "model": "claude-sonnet-4-5"}})
+    assert "copilot-integration-id" not in json.dumps(cfg_openai)
+    assert "copilot-integration-id" not in json.dumps(cfg_anthropic)

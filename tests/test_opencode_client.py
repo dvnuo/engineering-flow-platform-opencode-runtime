@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 import aiohttp
@@ -7,6 +8,7 @@ from aiohttp.test_utils import TestServer
 
 from efp_opencode_adapter.opencode_client import OpenCodeClient
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
+from efp_opencode_adapter.opencode_client import _safe_error_preview
 from efp_opencode_adapter.settings import Settings
 
 
@@ -458,3 +460,162 @@ async def test_list_tool_ids_rejects_invalid_shape(monkeypatch):
     monkeypatch.setattr(client, "_request_json", fake_request_json)
     with pytest.raises(OpenCodeClientError, match="unexpected tool ids response shape"):
         await client.list_tool_ids()
+
+@pytest.mark.asyncio
+async def test_put_auth_info_sends_oauth(monkeypatch):
+    app = web.Application()
+    async def put_auth(request: web.Request):
+        assert request.headers.get("Authorization") is None
+        body = await request.json()
+        assert body == {"type": "oauth", "refresh": "gho_R", "access": "gho_A", "expires": 0}
+        return web.json_response({}, status=200)
+    app.router.add_put("/auth/github-copilot", put_auth)
+    server = TestServer(app); await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    result = await OpenCodeClient(Settings.from_env()).put_auth_info("github-copilot", {"type": "oauth", "refresh": "gho_R", "access": "gho_A", "expires": 0})
+    assert result["success"] is True
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_send_message_model_ref_and_error_redaction(monkeypatch):
+    captured = {}
+    app = web.Application()
+    async def post_msg(request: web.Request):
+        captured["body"] = await request.json()
+        return web.json_response({"ok": True}, status=200)
+    app.router.add_post("/session/ses-1/message", post_msg)
+    server = TestServer(app); await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+    await client.send_message("ses-1", parts=[{"type":"text","text":"hi"}], model="github_copilot/gpt-5.4-mini", agent="efp-main")
+    assert captured["body"]["model"] == {"providerID": "github-copilot", "modelID": "gpt-5.4-mini"}
+    await server.close()
+
+    app2 = web.Application()
+    async def bad(_request: web.Request):
+        return web.json_response({"error": "bad", "access": "gho_SECRET", "refresh": "gho_SECRET", "detail": "token=ghu_SECRET"}, status=400)
+    app2.router.add_post("/session/ses-2/message", bad)
+    server2 = TestServer(app2); await server2.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server2))
+    with pytest.raises(OpenCodeClientError) as exc:
+        await OpenCodeClient(Settings.from_env()).send_message("ses-2", parts=[{"type":"text","text":"hi"}], model="gpt-5.4-mini", agent="efp-main")
+    msg = str(exc.value)
+    assert "status 400" in msg
+    assert "gho_SECRET" not in msg and "ghu_SECRET" not in msg
+    await server2.close()
+
+
+@pytest.mark.asyncio
+async def test_transport_error_message_redacts_secret(monkeypatch):
+    class FailingRequestCtx:
+        async def __aenter__(self):
+            raise aiohttp.ClientError("failed gho_SECRET sk-SECRET")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FailingSession:
+        def request(self, *args, **kwargs):
+            return FailingRequestCtx()
+
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
+    client = OpenCodeClient(Settings.from_env(), session=FailingSession())
+    with pytest.raises(OpenCodeClientError) as exc:
+        await client._request_json("GET", "/global/health")
+    text = str(exc.value)
+    assert "gho_SECRET" not in text
+    assert "sk-SECRET" not in text
+    payload_dump = json.dumps(exc.value.payload)
+    assert "gho_SECRET" not in payload_dump
+    assert "sk-SECRET" not in payload_dump
+
+
+def test_safe_error_preview_redacts_json_like_access_refresh_text():
+    text = _safe_error_preview('{"access":"abc123","refresh":"def456","token":"tok789"}')
+    assert "abc123" not in text
+    assert "def456" not in text
+    assert "tok789" not in text
+    assert "***REDACTED***" in text
+
+
+@pytest.mark.asyncio
+async def test_text_plain_error_body_redacts_json_like_sensitive_keys(monkeypatch):
+    app = web.Application()
+
+    async def bad(_request: web.Request):
+        return web.Response(status=400, text='{"error":"bad","access":"abc123","refresh":"def456"}', content_type="text/plain")
+
+    app.router.add_post("/session/ses-plain/message", bad)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    with pytest.raises(OpenCodeClientError) as exc:
+        await OpenCodeClient(Settings.from_env()).send_message("ses-plain", parts=[{"type": "text", "text": "hi"}], model="github-copilot/gpt-5.4-mini", agent="efp-main")
+    message = str(exc.value)
+    assert "status 400" in message
+    assert "abc123" not in message
+    assert "def456" not in message
+    payload_dump = json.dumps(exc.value.payload)
+    assert "abc123" not in payload_dump
+    assert "def456" not in payload_dump
+    await server.close()
+
+@pytest.mark.asyncio
+async def test_send_message_adds_copilot_integration_header(monkeypatch):
+    app = web.Application()
+
+    async def post_message(request: web.Request):
+        assert request.headers.get("copilot-integration-id") == "vscode-chat"
+        body = await request.json()
+        assert "headers" not in body
+        return web.json_response({"ok": True}, status=200)
+
+    app.router.add_post("/session/ses-1/message", post_message)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+
+    await OpenCodeClient(Settings.from_env()).send_message(
+        "ses-1",
+        parts=[{"type": "text", "text": "hi"}],
+        model="github-copilot/gpt-5",
+        agent="efp-main",
+    )
+    await server.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["github-copilot/gpt-x", "github_copilot/gpt-x", "copilot/gpt-x", "github/gpt-x"])
+async def test_send_message_adds_copilot_header_for_aliases(monkeypatch, model):
+    app = web.Application()
+
+    async def post_message(request: web.Request):
+        assert request.headers.get("copilot-integration-id") == "vscode-chat"
+        return web.json_response({"ok": True}, status=200)
+
+    app.router.add_post("/session/ses-1/message", post_message)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+
+    await OpenCodeClient(Settings.from_env()).send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model=model, agent="efp-main")
+    await server.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["openai/gpt-5", "anthropic/claude-sonnet-4-5"])
+async def test_send_message_does_not_add_copilot_header_for_non_copilot(monkeypatch, model):
+    app = web.Application()
+
+    async def post_message(request: web.Request):
+        assert request.headers.get("copilot-integration-id") is None
+        return web.json_response({"ok": True}, status=200)
+
+    app.router.add_post("/session/ses-1/message", post_message)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+
+    await OpenCodeClient(Settings.from_env()).send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model=model, agent="efp-main")
+    await server.close()

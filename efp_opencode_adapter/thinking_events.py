@@ -12,6 +12,10 @@ SENSITIVE_KEYS = [
     "token",
     "api_key",
     "apikey",
+    "access",
+    "refresh",
+    "access_token",
+    "refresh_token",
     "authorization",
     "auth",
     "credential",
@@ -44,6 +48,36 @@ def _redact_env_lines(text: str) -> str:
     return "\n".join(out)
 
 
+def _redact_token_patterns(text: str) -> str:
+    patterns = [
+        r"gho_[A-Za-z0-9_\-]+",
+        r"ghu_[A-Za-z0-9_\-]+",
+        r"ghp_[A-Za-z0-9_\-]+",
+        r"github_pat_[A-Za-z0-9_\-]+",
+        r"sk-[A-Za-z0-9_\-]+",
+    ]
+    out = text
+    for pattern in patterns:
+        out = re.sub(pattern, "***REDACTED***", out)
+    return out
+
+
+def _redact_sensitive_text_values(text: str) -> str:
+    key_union = "key|api_key|apikey|access|refresh|access_token|refresh_token|token|authorization|password|secret|oauth"
+    out = text
+    out = re.sub(
+        rf"(?i)([\"']?(?:{key_union})[\"']?\s*:\s*[\"'])([^\"']+)([\"'])",
+        r"\1***REDACTED***\3",
+        out,
+    )
+    out = re.sub(
+        rf"(?i)\b({key_union})\b(\s*[:=]\s*)([^\s,;&}}\]]+)",
+        r"\1\2***REDACTED***",
+        out,
+    )
+    return out
+
+
 def safe_preview(value: Any, max_chars: int = 500) -> Any:
     if isinstance(value, dict):
         return {k: ("***REDACTED***" if _is_sensitive_key(str(k)) else safe_preview(v, max_chars)) for k, v in value.items()}
@@ -56,6 +90,8 @@ def safe_preview(value: Any, max_chars: int = 500) -> Any:
             r"\1***REDACTED***",
             cleaned,
         )
+        cleaned = _redact_sensitive_text_values(cleaned)
+        cleaned = _redact_token_patterns(cleaned)
         return _truncate(cleaned, max_chars)
     return value
 

@@ -16,9 +16,12 @@ class FakeOpenCodeClient:
     async def health(self):
         return {"healthy": True, "version": "1.14.39"}
 
-    async def put_auth(self, provider, api_key):
-        self.auth_calls.append((provider, api_key))
+    async def put_auth_info(self, provider, auth_info):
+        self.auth_calls.append((provider, auth_info))
         return {"success": self.auth_success, "status": 500 if not self.auth_success else 200}
+
+    async def put_auth(self, provider, api_key):
+        return await self.put_auth_info(provider, {"type": "api", "key": api_key})
 
     async def patch_config(self, config):
         self.patch_calls.append(config)
@@ -81,7 +84,7 @@ class RaisingOpenCodeClient:
     async def health(self):
         return {"healthy": True, "version": "1.14.39"}
 
-    async def put_auth(self, provider, api_key):
+    async def put_auth_info(self, provider, auth_info):
         raise RuntimeError("boom SECRET-KEY-SHOULD-NOT-LEAK")
 
     async def patch_config(self, config):
@@ -118,9 +121,12 @@ class FakeAuthOnlyClient:
     async def health(self):
         return {"healthy": True, "version": "1.14.39"}
 
-    async def put_auth(self, provider, api_key):
-        self.auth_calls.append((provider, api_key))
+    async def put_auth_info(self, provider, auth_info):
+        self.auth_calls.append((provider, auth_info))
         return {"success": True, "status": 200}
+
+    async def put_auth(self, provider, api_key):
+        return await self.put_auth_info(provider, {"type": "api", "key": api_key})
 
     async def patch_config(self, config):
         return {"success": True, "status": 200}
@@ -159,7 +165,7 @@ async def test_apply_auth_only_llm_marks_llm_updated(tmp_path, monkeypatch):
 
     cfg_text = (workspace / ".opencode/opencode.json").read_text()
     assert secret not in cfg_text
-    assert fake.auth_calls == [("anthropic", secret)]
+    assert fake.auth_calls == [("anthropic", {"type": "api", "key": secret})]
 
     await client.close()
 
@@ -170,7 +176,7 @@ class PendingRestartClient(FakeAuthOnlyClient):
 
 
 class AuthFailurePatchSuccessClient(FakeAuthOnlyClient):
-    async def put_auth(self, provider, api_key):
+    async def put_auth_info(self, provider, auth_info):
         return {"success": False, "status": 500}
 
 
@@ -230,3 +236,31 @@ async def test_apply_allowed_skills_reflects_capability_state(tmp_path, monkeypa
     skill = next(c for c in caps["capabilities"] if c.get("type") == "skill" and c.get("name") == "my-skill")
     assert skill["permission_state"] == "allowed"
     await client.close()
+
+@pytest.mark.asyncio
+async def test_apply_github_copilot_oauth_uses_put_auth_info(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    fake = FakeAuthOnlyClient()
+    app = create_app(Settings.from_env(), opencode_client=fake); c = TestClient(TestServer(app)); await c.start_server()
+    resp = await c.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={"config": {"llm": {"provider": "github_copilot", "model": "gpt", "oauth": {"type": "oauth", "refresh": "gho_R", "access": "gho_A", "expires": 0}}}})
+    body = await resp.json()
+    assert body["auth_update_status"] == "updated"
+    assert fake.auth_calls[0][0] == "github-copilot"
+    assert fake.auth_calls[0][1]["type"] == "oauth"
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_github_copilot_ghu_skips_auth(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    fake = FakeAuthOnlyClient()
+    app = create_app(Settings.from_env(), opencode_client=fake); c = TestClient(TestServer(app)); await c.start_server()
+    resp = await c.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={"config": {"llm": {"provider": "github_copilot", "api_key": "ghu_TEST"}}})
+    body = await resp.json()
+    assert body["auth_update_status"] == "skipped"
+    assert body.get("auth_warning")
+    assert "ghu_TEST" not in json.dumps(body)
+    assert fake.auth_calls == []
+    await c.close()

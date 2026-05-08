@@ -8,7 +8,7 @@ from typing import Any
 from .settings import Settings
 
 REDACTED = "***REDACTED***"
-SECRET_KEYS = ("api_key", "token", "secret", "password", "authorization", "credential")
+SECRET_KEYS = ("api_key", "token", "secret", "password", "authorization", "credential", "access", "refresh", "oauth", "access_token", "refresh_token")
 
 
 PUBLIC_REDACTED = "[redacted]"

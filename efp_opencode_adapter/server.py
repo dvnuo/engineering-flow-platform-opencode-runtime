@@ -43,6 +43,7 @@ from .recovery import RecoveryManager
 from .usage_api import usage_handler
 from .usage_tracker import UsageTracker
 from .opencode_config import build_opencode_config, normalize_opencode_provider_id, write_main_agent_prompt, write_opencode_config
+from .opencode_auth import build_opencode_auth_from_runtime_config
 from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_status_payload, sanitize_profile_config_for_storage, sanitize_public_secrets
 from .session_store import SessionStore
 from .task_store import TaskStore
@@ -124,28 +125,34 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
         ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status="failed", pending_restart=False, warnings=warnings, updated_sections=updated_sections, last_apply_error=last_error, applied=False))
         return web.json_response({"success": False, "engine": "opencode", "status": "failed", "applied": False, "pending_restart": False, "config_written": False, "error": "config_write_failed", "warnings": warnings, "status_endpoint": "/api/internal/runtime-profile/status"}, status=500)
     llm = runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
-    if llm and any(key in llm for key in ("provider", "model", "api_key", "temperature", "max_tokens")) and "llm" not in updated_sections:
+    if llm and any(key in llm for key in ("provider", "model", "api_key", "oauth", "temperature", "max_tokens")) and "llm" not in updated_sections:
         updated_sections.append("llm")
-    provider, api_key = normalize_opencode_provider_id(llm.get("provider")), llm.get("api_key")
-    if not provider and isinstance(llm.get("model"), str) and "/" in llm.get("model"):
-        provider = normalize_opencode_provider_id(str(llm.get("model")).split("/", 1)[0])
+    auth_build = build_opencode_auth_from_runtime_config(runtime_config)
+    provider = auth_build.provider
     auth_update_status = "skipped"
-    if provider and api_key:
-        if hasattr(client, "put_auth"):
+    if auth_build.warning:
+        warnings.append(auth_build.warning)
+    if provider and auth_build.auth_info:
+        if hasattr(client, "put_auth_info"):
             try:
-                auth_result = await client.put_auth(provider, api_key)
+                auth_result = await client.put_auth_info(provider, auth_build.auth_info)
             except Exception:
                 auth_result = {"success": False, "error": "auth update failed"}
-            if auth_result.get("success"):
-                auth_update_status = "updated"
-            elif auth_result.get("skipped"):
-                warnings.append("opencode auth update skipped")
-                auth_update_status = "skipped"
-            else:
-                warnings.append("opencode auth update failed; manual auth or restart may be required")
-                auth_update_status = "failed"
+        elif hasattr(client, "put_auth") and auth_build.auth_info.get("type") == "api":
+            try:
+                auth_result = await client.put_auth(provider, auth_build.auth_info.get("key"))
+            except Exception:
+                auth_result = {"success": False, "error": "auth update failed"}
         else:
+            auth_result = {"success": False, "skipped": True}
             warnings.append("opencode auth update skipped")
+        if auth_result.get("success"):
+            auth_update_status = "updated"
+        elif auth_result.get("skipped"):
+            auth_update_status = "skipped"
+        else:
+            warnings.append("opencode auth update failed; manual auth or restart may be required")
+            auth_update_status = "failed"
     patch_result: dict = {"success": False, "pending_restart": True}
     if hasattr(client, "patch_config"):
         try:
@@ -162,7 +169,10 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     else:
         status, applied = "applied", True
     ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status=status, pending_restart=pending_restart, warnings=warnings, updated_sections=updated_sections, last_apply_error=last_error, applied=applied))
-    return web.json_response({"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "updated_sections": updated_sections, "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "patch_config_result": sanitize_public_secrets({"success": patch_result.get("success"), "pending_restart": patch_result.get("pending_restart"), "status": patch_result.get("status")}), "auth_update_status": auth_update_status, "status_endpoint": "/api/internal/runtime-profile/status"})
+    response = {"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "updated_sections": updated_sections, "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "patch_config_result": sanitize_public_secrets({"success": patch_result.get("success"), "pending_restart": patch_result.get("pending_restart"), "status": patch_result.get("status")}), "auth_update_status": auth_update_status, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "status_endpoint": "/api/internal/runtime-profile/status"}
+    if auth_build.warning:
+        response["auth_warning"] = auth_build.warning
+    return web.json_response(response)
 
 
 async def runtime_profile_status_handler(request: web.Request) -> web.Response:
