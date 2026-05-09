@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -322,4 +323,9 @@ async def test_apply_with_manager_restarts_and_no_patch(tmp_path, monkeypatch):
     assert fake.patch_calls == []
     await c.close()
 
-    await c.close()
+
+def test_runtime_profile_apply_test_file_has_no_merge_conflict_markers():
+    text = Path(__file__).read_text(encoding="utf-8")
+    assert "<<<" + "<<<<" not in text
+    assert "===" + "====" not in text
+    assert ">>>" + ">>>>" not in text
