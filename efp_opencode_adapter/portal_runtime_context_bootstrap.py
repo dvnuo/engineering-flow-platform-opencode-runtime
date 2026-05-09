@@ -101,7 +101,7 @@ async def _run(workspace_dir: Path) -> int:
         env_path=str(env_path),
     ))
 
-    out = {"env_written": True, "env_hash": env_result.env_hash}
+    out = {"env_written": True, "env_hash": env_result.env_hash, "auth_written": auth_written}
     if auth_build.warning:
         out["auth_warning"] = auth_build.warning
     print(json.dumps(out))
