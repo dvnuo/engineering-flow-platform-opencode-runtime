@@ -264,3 +264,37 @@ async def test_apply_github_copilot_ghu_skips_auth(tmp_path, monkeypatch):
     assert "ghu_TEST" not in json.dumps(body)
     assert fake.auth_calls == []
     await c.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_github_copilot_oauth_by_runtime_uses_opencode_entry(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    fake = FakeAuthOnlyClient()
+    app = create_app(Settings.from_env(), opencode_client=fake); c = TestClient(TestServer(app)); await c.start_server()
+    resp = await c.post(
+        "/api/internal/runtime-profile/apply",
+        headers={"X-Portal-Author-Source": "portal"},
+        json={
+            "config": {
+                "llm": {
+                    "provider": "github_copilot",
+                    "oauth_by_runtime": {
+                        "native": {"type": "oauth", "access": "NATIVE_SECRET", "refresh": "NATIVE_SECRET", "expires": 0},
+                        "opencode": {"type": "oauth", "access": "OPENCODE_SECRET", "refresh": "OPENCODE_SECRET", "expires": 0},
+                    },
+                }
+            }
+        },
+    )
+    body = await resp.json()
+    assert resp.status == 200
+    assert "llm" in body["updated_sections"]
+    assert fake.auth_calls == [(
+        "github-copilot",
+        {"type": "oauth", "access": "OPENCODE_SECRET", "refresh": "OPENCODE_SECRET", "expires": 0},
+    )]
+    encoded = json.dumps(body)
+    assert "NATIVE_SECRET" not in encoded
+    assert "OPENCODE_SECRET" not in encoded
+    await c.close()

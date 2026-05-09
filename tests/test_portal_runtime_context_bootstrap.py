@@ -128,3 +128,44 @@ async def test_bootstrap_infers_auth_provider_from_model_prefix(tmp_path, monkey
     auth = json.loads((data / "auth.json").read_text())
     assert "github-copilot" in auth
     await server.close()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_oauth_by_runtime_opencode_writes_auth_without_leaking_tokens(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "opdata"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(data))
+
+    async def runtime_context(_):
+        return web.json_response({
+            "runtime_profile_context": {
+                "config": {
+                    "llm": {
+                        "provider": "github_copilot",
+                        "oauth_by_runtime": {
+                            "native": {"type": "oauth", "access": "NATIVE_SECRET", "refresh": "NATIVE_SECRET", "expires": 0},
+                            "opencode": {"type": "oauth", "access": "OPENCODE_SECRET", "refresh": "OPENCODE_SECRET", "expires": 0},
+                        },
+                    }
+                }
+            }
+        })
+
+    app = web.Application(); app.router.add_get("/api/internal/agents/agent-1/runtime-context", runtime_context)
+    server = TestServer(app); await server.start_server()
+
+    monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", str(server.make_url("/")).rstrip("/"))
+    monkeypatch.setenv("PORTAL_AGENT_ID", "agent-1")
+
+    assert await mod._run(workspace) == 0
+    auth = json.loads((data / "auth.json").read_text())
+    assert auth["github-copilot"]["access"] == "OPENCODE_SECRET"
+
+    emitted = capsys.readouterr()
+    assert "OPENCODE_SECRET" not in emitted.out
+    assert "OPENCODE_SECRET" not in emitted.err
+    assert "NATIVE_SECRET" not in emitted.out
+    assert "NATIVE_SECRET" not in emitted.err
+
+    await server.close()

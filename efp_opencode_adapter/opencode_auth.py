@@ -25,6 +25,46 @@ def _provider_from_llm(llm: Mapping[str, Any]) -> str | None:
     return provider or None
 
 
+def _normalize_oauth_payload(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    oauth_type = value.get("type")
+    if oauth_type not in (None, "oauth"):
+        return None
+    refresh = value.get("refresh") if isinstance(value.get("refresh"), str) else ""
+    access = value.get("access") if isinstance(value.get("access"), str) else ""
+    refresh = refresh.strip()
+    access = access.strip()
+    if not refresh and access:
+        refresh = access
+    if not access and refresh:
+        access = refresh
+    if not refresh or not access:
+        return None
+    try:
+        expires = int(value.get("expires", 0))
+        if expires < 0:
+            expires = 0
+    except Exception:
+        expires = 0
+    auth_info: dict[str, Any] = {"type": "oauth", "refresh": refresh, "access": access, "expires": expires}
+    for extra in ("enterpriseUrl", "accountId"):
+        extra_value = value.get(extra)
+        if isinstance(extra_value, str) and extra_value.strip():
+            auth_info[extra] = extra_value.strip()
+    return auth_info
+
+
+def _selected_copilot_oauth(llm: Mapping[str, Any]) -> dict[str, Any] | None:
+    oauth = _normalize_oauth_payload(llm.get("oauth"))
+    if oauth:
+        return oauth
+    oauth_by_runtime = llm.get("oauth_by_runtime")
+    if not isinstance(oauth_by_runtime, Mapping):
+        return None
+    return _normalize_oauth_payload(oauth_by_runtime.get("opencode"))
+
+
 def build_opencode_auth_from_llm(llm: Mapping[str, Any]) -> AuthBuildResult:
     provider = _provider_from_llm(llm)
     if not provider:
@@ -32,33 +72,9 @@ def build_opencode_auth_from_llm(llm: Mapping[str, Any]) -> AuthBuildResult:
     raw_api_key = llm.get("api_key")
     api_key = raw_api_key.strip() if isinstance(raw_api_key, str) else ""
     if provider == "github-copilot":
-        oauth = llm.get("oauth")
-        if isinstance(oauth, dict):
-            oauth_type = oauth.get("type")
-            if oauth_type not in (None, "oauth"):
-                return AuthBuildResult(provider=provider, warning="github-copilot auth skipped because no valid oauth token was provided")
-            refresh = oauth.get("refresh") if isinstance(oauth.get("refresh"), str) else ""
-            access = oauth.get("access") if isinstance(oauth.get("access"), str) else ""
-            refresh = refresh.strip()
-            access = access.strip()
-            if not refresh and access:
-                refresh = access
-            if not access and refresh:
-                access = refresh
-            if refresh and access:
-                try:
-                    expires = int(oauth.get("expires", 0))
-                    if expires < 0:
-                        expires = 0
-                except Exception:
-                    expires = 0
-                auth_info: dict[str, Any] = {"type": "oauth", "refresh": refresh, "access": access, "expires": expires}
-                for extra in ("enterpriseUrl", "accountId"):
-                    value = oauth.get(extra)
-                    if isinstance(value, str) and value.strip():
-                        auth_info[extra] = value.strip()
-                return AuthBuildResult(provider=provider, auth_info=auth_info, auth_type="oauth")
-            return AuthBuildResult(provider=provider, warning="github-copilot auth skipped because no valid oauth token was provided")
+        oauth = _selected_copilot_oauth(llm)
+        if oauth:
+            return AuthBuildResult(provider=provider, auth_info=oauth, auth_type="oauth")
         if api_key.startswith("gho_"):
             return AuthBuildResult(provider=provider, auth_info={"type": "oauth", "refresh": api_key, "access": api_key, "expires": 0}, auth_type="oauth")
         if api_key.startswith("ghu_"):
