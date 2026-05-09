@@ -218,9 +218,15 @@ def _collect_allowed_and_denied(config: dict) -> tuple[set[str], set[str], set[s
     return allowed_ids, allowed_actions, allowed_types, denied_actions, denied_types, allowed_external_systems, allowed_skill_names, denied_skill_names
 
 
+def _llm_tools_configured(config: dict[str, Any]) -> bool:
+    llm = config.get("llm") if isinstance(config.get("llm"), dict) else {}
+    return "tools" in llm
+
+
 def build_permission(config: dict, skills_index: dict | None = None, tools_index: dict | None = None) -> dict:
     permission = copy.deepcopy(default_permission_baseline())
     config = config if isinstance(config, dict) else {}
+    llm_tools_configured = _llm_tools_configured(config)
     allowed_ids, allowed_actions, allowed_types, denied_actions, denied_types, allowed_external_systems, allowed_skill_names, denied_skill_names = _collect_allowed_and_denied(config)
     _apply_builtin_denies(permission, denied_actions, denied_types)
 
@@ -246,7 +252,7 @@ def build_permission(config: dict, skills_index: dict | None = None, tools_index
     denied_values = {_norm(x) for x in denied_actions}
     allowed_type_values = {_norm(x) for x in allowed_types}
     denied_type_values = {_norm(x) for x in denied_types}
-    allow_all_generated_tools = "*" in allowed_values
+    allow_all_generated_tools = "*" in allowed_values or not llm_tools_configured
 
     tools = (tools_index or {}).get("tools", []) if isinstance(tools_index, dict) else []
     for tool in tools:

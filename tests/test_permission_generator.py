@@ -250,3 +250,81 @@ def test_deny_overrides_wildcard_generated_tool_allow():
         tools,
     )
     assert p["efp_jira_search"] == "deny"
+
+
+TOOLS_INDEX = {
+    "tools": [
+        {
+            "capability_id": "adapter:jira:read_issue",
+            "opencode_name": "jira_read_issue",
+            "type": "adapter_action",
+            "policy_tags": ["read", "jira"],
+            "runtime_compat": ["opencode"],
+        },
+        {
+            "capability_id": "adapter:jira:add_comment",
+            "opencode_name": "jira_add_comment",
+            "type": "adapter_action",
+            "policy_tags": ["comment", "jira"],
+            "runtime_compat": ["opencode"],
+        },
+        {
+            "capability_id": "adapter:jira:dangerous_delete",
+            "opencode_name": "jira_dangerous_delete",
+            "type": "adapter_action",
+            "policy_tags": ["unsafe", "jira"],
+            "runtime_compat": ["opencode"],
+        },
+    ]
+}
+
+
+def test_missing_llm_tools_defaults_to_all_generated_tools():
+    permission = build_permission({}, tools_index=TOOLS_INDEX)
+    assert permission["jira_read_issue"] == "allow"
+    assert permission["jira_add_comment"] == "ask"
+    assert permission["jira_dangerous_delete"] == "deny"
+
+
+def test_llm_present_but_missing_tools_key_still_defaults_to_all_generated_tools():
+    permission = build_permission({"llm": {}}, tools_index=TOOLS_INDEX)
+    assert permission["jira_read_issue"] == "allow"
+    assert permission["jira_add_comment"] == "ask"
+
+
+def test_llm_tools_wildcard_still_allows_all_generated_tools():
+    permission = build_permission({"llm": {"tools": ["*"]}}, tools_index=TOOLS_INDEX)
+    assert permission["jira_read_issue"] == "allow"
+    assert permission["jira_add_comment"] == "ask"
+
+
+def test_explicit_empty_llm_tools_does_not_trigger_missing_fallback():
+    permission = build_permission({"llm": {"tools": []}}, tools_index=TOOLS_INDEX)
+    assert "jira_read_issue" not in permission
+    assert "jira_add_comment" not in permission
+    assert permission.get("jira_dangerous_delete") in (None, "deny")
+
+
+def test_generated_tool_deny_still_overrides_missing_llm_tools_default_all():
+    permission = build_permission(
+        {
+            "llm": {},
+            "derived_runtime_rules": {
+                "denied_actions": ["adapter:jira:add_comment", "jira_add_comment"]
+            },
+        },
+        tools_index=TOOLS_INDEX,
+    )
+    assert permission["jira_read_issue"] == "allow"
+    assert permission["jira_add_comment"] == "deny"
+
+
+def test_external_system_restriction_still_overrides_missing_llm_tools_default_all():
+    permission = build_permission(
+        {
+            "llm": {},
+            "allowed_external_systems": ["github"],
+        },
+        tools_index=TOOLS_INDEX,
+    )
+    assert permission["jira_read_issue"] == "deny"

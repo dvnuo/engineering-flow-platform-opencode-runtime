@@ -33,14 +33,17 @@ def test_dockerfile_vendors_opencode_plugin_for_workspace_tool_resolution():
     assert "vendored @opencode-ai/plugin version" in text
 
 
-def test_entrypoint_materializes_tool_deps_before_opencode_serve():
+def test_entrypoint_materializes_tool_deps_before_managed_adapter_server():
     root = Path(__file__).resolve().parents[1]
     text = (root / "entrypoint.sh").read_text(encoding="utf-8")
     assert "python -m efp_opencode_adapter.init_assets" in text
     assert "python -m efp_opencode_adapter.tool_deps" in text
-    assert "opencode serve" in text
+    assert "python -m efp_opencode_adapter.portal_runtime_context_bootstrap" in text
+    assert "python -m efp_opencode_adapter.server" in text
+    assert "--manage-opencode" in text
     assert text.index("python -m efp_opencode_adapter.init_assets") < text.index("python -m efp_opencode_adapter.tool_deps")
-    assert text.index("python -m efp_opencode_adapter.tool_deps") < text.index("opencode serve")
+    assert text.index("python -m efp_opencode_adapter.tool_deps") < text.index("python -m efp_opencode_adapter.portal_runtime_context_bootstrap")
+    assert text.index("python -m efp_opencode_adapter.portal_runtime_context_bootstrap") < text.index("python -m efp_opencode_adapter.server")
 
 
 def test_dockerfile_runs_as_root_with_root_state_dirs():
@@ -56,15 +59,10 @@ def test_dockerfile_runs_as_root_with_root_state_dirs():
     assert "/home/opencode" not in text
 
 
-def test_entrypoint_checks_tool_registry_after_health_before_server():
+def test_managed_opencode_startup_checks_health_before_tool_registry():
     root = Path(__file__).resolve().parents[1]
-    text = (root / "entrypoint.sh").read_text(encoding="utf-8")
-    assert "python -m efp_opencode_adapter.health --wait" in text
-    assert "python -m efp_opencode_adapter.tool_registry_check" in text
-    assert "python -m efp_opencode_adapter.server" in text
-    assert text.index("python -m efp_opencode_adapter.health --wait") < text.index("python -m efp_opencode_adapter.tool_registry_check")
-    assert text.index("python -m efp_opencode_adapter.tool_registry_check") < text.index("python -m efp_opencode_adapter.server")
-    assert "OPENCODE_LOG_FILE" in text
-    assert "tool_registry_diagnostics" in text
-    assert "tail -200" in text
-    assert "--request-timeout" in text
+    server_text = (root / "efp_opencode_adapter" / "server.py").read_text(encoding="utf-8")
+    process_text = (root / "efp_opencode_adapter" / "opencode_process.py").read_text(encoding="utf-8")
+    assert "app.on_startup.append(_managed_opencode_startup)" in server_text
+    assert "await manager.start(env, reason=\"startup\")" in server_text
+    assert "await self.client.wait_until_ready" in process_text

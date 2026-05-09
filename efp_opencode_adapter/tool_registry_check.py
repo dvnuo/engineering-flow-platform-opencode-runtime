@@ -12,9 +12,14 @@ from .opencode_client import OpenCodeClient
 from .settings import Settings
 
 
-async def _run(timeout: int, request_timeout: int, expected_tools: list[str], opencode_url: str | None) -> int:
-    settings = Settings.from_env(opencode_url=opencode_url)
-    client = OpenCodeClient(settings)
+async def run_tool_registry_check(
+    settings: Settings,
+    client: OpenCodeClient,
+    *,
+    timeout: int,
+    request_timeout: int,
+    expected_tools: list[str],
+) -> dict[str, object]:
     deadline = time.monotonic() + timeout
     attempt = 0
     last_error: Exception | None = None
@@ -31,34 +36,47 @@ async def _run(timeout: int, request_timeout: int, expected_tools: list[str], op
                 last_ids = ids
                 last_error = RuntimeError(f"missing expected tools {missing}")
             else:
-                print(
-                    json.dumps(
-                        {
-                            "status": "ok",
-                            "tool_count": len(ids),
-                            "expected_tools": expected_tools,
-                            "missing_tools": [],
-                            "attempts": attempt,
-                        },
-                        sort_keys=True,
-                    )
-                )
-                return 0
+                return {
+                    "status": "ok",
+                    "tool_count": len(ids),
+                    "expected_tools": expected_tools,
+                    "missing_tools": [],
+                    "attempts": attempt,
+                }
         except Exception as exc:
             last_error = exc
         await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
 
     if isinstance(last_error, RuntimeError) and str(last_error).startswith("missing expected tools"):
-        print(
-            f"OpenCode ToolRegistry readiness check failed: {last_error}; attempts={attempt}; ids={last_ids}",
-            file=sys.stderr,
-        )
-        return 1
+        return {
+            "status": "error",
+            "error": f"OpenCode ToolRegistry readiness check failed: {last_error}; attempts={attempt}; ids={last_ids}",
+            "attempts": attempt,
+            "ids": last_ids,
+        }
 
-    print(
-        f"OpenCode ToolRegistry readiness check failed after {attempt} attempts over {timeout}s: {last_error}",
-        file=sys.stderr,
+    return {
+        "status": "error",
+        "error": f"OpenCode ToolRegistry readiness check failed after {attempt} attempts over {timeout}s: {last_error}",
+        "attempts": attempt,
+        "ids": last_ids,
+    }
+
+
+async def _run(timeout: int, request_timeout: int, expected_tools: list[str], opencode_url: str | None) -> int:
+    settings = Settings.from_env(opencode_url=opencode_url)
+    client = OpenCodeClient(settings)
+    result = await run_tool_registry_check(
+        settings,
+        client,
+        timeout=timeout,
+        request_timeout=request_timeout,
+        expected_tools=expected_tools,
     )
+    if result.get("status") == "ok":
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    print(str(result.get("error") or "OpenCode ToolRegistry readiness check failed"), file=sys.stderr)
     return 1
 
 
