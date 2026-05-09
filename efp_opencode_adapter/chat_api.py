@@ -41,6 +41,7 @@ from .opencode_message_adapter import (
     message_id as adapter_message_id,
     message_role as adapter_message_role,
 )
+from .skill_invocation import build_skill_prompt, evaluate_skill_invocation, parse_slash_invocation
 
 DATA_URL_RE = re.compile(r"data:[A-Za-z0-9.+/_-]+(?:;[A-Za-z0-9.+/_=-]+)*;base64,[A-Za-z0-9+/=]+")
 
@@ -271,7 +272,82 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                 attachment_debug.append({"status": "error", "error": safe_error})
                 parts.append({"type": "text", "text": f"Attachment processing failed: {safe_error}"})
 
-        response_payload = await client.send_message(record.opencode_session_id, parts=parts, model=model, agent=agent, system=system)
+        invocation = parse_slash_invocation(message)
+        skill_debug = None
+        if invocation:
+            skill_decision = evaluate_skill_invocation(settings, invocation)
+            executed_native_command = False
+            skill_detected = add_trace_context({"type": "skill.detected", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"raw_name": invocation.raw_name, "skill_name": invocation.skill_name, "arguments": invocation.arguments}}, trace_context)
+            runtime_events.append(skill_detected)
+            await bus.publish(skill_detected)
+            skill_debug = {"kind": "skill", "raw_name": invocation.raw_name, "skill_name": invocation.skill_name, "arguments": invocation.arguments, "reason": skill_decision.reason, "permission_state": skill_decision.permission_state, "used_command_api": False, "used_skill_prompt": False, "blocked": False}
+            if skill_decision.reason == "unknown_skill":
+                try:
+                    available_commands = await client.list_commands()
+                    command_names = {str(c.get("name") or "") for c in available_commands if isinstance(c, dict)}
+                    if invocation.skill_name in command_names:
+                        response_payload = await client.execute_command(record.opencode_session_id, command=invocation.skill_name, arguments=invocation.arguments, model=model, agent=agent or "efp-main")
+                        skill_debug.update({"kind": "command", "used_command_api": True, "native_command": True, "reason": "allowed"})
+                        executed_native_command = True
+                        command_evt = add_trace_context({"type": "skill.command.executed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"command": invocation.skill_name, "native_command": True}}, trace_context)
+                        runtime_events.append(command_evt)
+                        await bus.publish(command_evt)
+                    else:
+                        skill_decision = type(skill_decision)(skill=None, allowed=False, reason="unknown_skill_or_command", permission_state="unknown")
+                        skill_debug["reason"] = "unknown_skill_or_command"
+                except Exception as exc:
+                    skill_decision = type(skill_decision)(skill=None, allowed=False, reason="command_lookup_failed", permission_state="unknown")
+                    skill_debug["reason"] = "command_lookup_failed"
+                    skill_debug["command_lookup_error"] = safe_preview(str(exc), 300)
+            elif not skill_decision.allowed:
+                pass
+
+            if (not skill_decision.allowed) and (not executed_native_command):
+                assistant_text = f"Skill `{invocation.skill_name}` cannot run in OpenCode runtime: {skill_decision.reason}."
+                skill_debug["blocked"] = True
+                skill_debug["kind"] = "skill" if skill_decision.reason != "unknown_skill_or_command" and skill_decision.reason != "command_lookup_failed" else "command"
+                blocked_evt = add_trace_context({"type": "skill.blocked", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"reason": skill_decision.reason, "permission_state": skill_decision.permission_state}}, trace_context)
+                runtime_events.append(blocked_evt)
+                await bus.publish(blocked_evt)
+                for event in [add_trace_context(assistant_delta_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text), trace_context), add_trace_context(chat_complete_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text), trace_context), add_trace_context(chat_completed_compat_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text), trace_context)]:
+                    runtime_events.append(event)
+                    await bus.publish(event)
+                final_context = {**context_state, "summary": assistant_text[:500], "current_state": "blocked", "next_step": ""}
+                updated = store.update_after_chat(portal_session_id, message, assistant_text, model, agent)
+                usage_record = usage_tracker.record_chat(session_id=portal_session_id, request_id=request_id, model=model, provider=provider_for_trace, response_payload={}, input_text=message, output_text=assistant_text)
+                usage_record["request_id"] = trace_context.get("request_id", usage_record.get("request_id", ""))
+                llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "trace_context": trace_context, "attachments": attachment_debug, "skill_invocation": skill_debug}
+                chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="blocked", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
+                await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state="blocked", request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "context_state": final_context, "usage": usage_record, "trace_context": trace_context, "skill_invocation": skill_debug})
+                return {"session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": "", "assistant_message_id": "", "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": llm_debug}
+
+            if not executed_native_command:
+                command_names: set[str] = set()
+                if not attachments:
+                    try:
+                        available_commands = await client.list_commands()
+                        command_names = {str(c.get("name") or "") for c in available_commands if isinstance(c, dict)}
+                    except Exception as exc:
+                        skill_debug["command_lookup_error"] = safe_preview(str(exc), 300)
+                if (not attachments) and str(skill_decision.skill.get("opencode_name") or "") in command_names:
+                    response_payload = await client.execute_command(record.opencode_session_id, command=str(skill_decision.skill["opencode_name"]), arguments=invocation.arguments, model=model, agent=agent or "efp-main")
+                    skill_debug["used_command_api"] = True
+                    skill_debug["kind"] = "skill"
+                    command_evt = add_trace_context({"type": "skill.command.executed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"command": skill_decision.skill["opencode_name"]}}, trace_context)
+                    runtime_events.append(command_evt)
+                    await bus.publish(command_evt)
+                else:
+                    parts[0]["text"] = build_skill_prompt(skill_decision.skill or {}, invocation)
+                    skill_debug["used_skill_prompt"] = True
+                    response_payload = await client.send_message(record.opencode_session_id, parts=parts, model=model, agent=agent, system=system)
+                    prompt_data = {"skill": skill_decision.skill.get("opencode_name") if skill_decision.skill else invocation.skill_name}
+                    if skill_debug.get("command_lookup_error"):
+                        prompt_data["command_lookup_error"] = skill_debug["command_lookup_error"]
+                    prompt_evt = add_trace_context({"type": "skill.prompt_applied", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": prompt_data}, trace_context)
+                    runtime_events.append(prompt_evt)
+                    await bus.publish(prompt_evt)
+        else:
+            response_payload = await client.send_message(record.opencode_session_id, parts=parts, model=model, agent=agent, system=system)
         assistant_text = extract_last_assistant_visible_text(response_payload)
         payload_message = response_payload.get("message") if isinstance(response_payload, dict) else None
         if isinstance(payload_message, dict):
@@ -299,6 +375,10 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             if not candidate and isinstance(response_payload.get("message"), dict):
                 candidate = adapter_message_id(response_payload["message"])
             assistant_message_id = str(candidate or "")
+        if skill_debug and not skill_debug.get("blocked"):
+            completed_evt = add_trace_context({"type": "skill.completed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"skill": skill_debug.get("skill_name"), "kind": skill_debug.get("kind", "skill"), "used_command_api": bool(skill_debug.get("used_command_api")), "used_skill_prompt": bool(skill_debug.get("used_skill_prompt"))}}, trace_context)
+            runtime_events.append(completed_evt)
+            await bus.publish(completed_evt)
 
         out_events = [
             assistant_delta_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
@@ -321,6 +401,8 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         final_context = {**context_state, "summary": assistant_text[:500], "current_state": "completed", "next_step": ""}
 
         llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(_redact_attachment_payloads_for_debug(response_payload), 2000), "trace_context": trace_context, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or ""}, "attachments": attachment_debug}
+        if skill_debug:
+            llm_debug["skill_invocation"] = skill_debug
         if message_id_detection_error_before:
             llm_debug["message_id_detection_error_before"] = message_id_detection_error_before
         chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="success", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
@@ -340,6 +422,8 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
 
     out = {"session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context, "attachments": attachment_debug}}
+    if 'skill_debug' in locals() and skill_debug:
+        out["_llm_debug"]["skill_invocation"] = skill_debug
     if partial_recovery or getattr(updated, "partial_recovery", False):
         out["_llm_debug"]["partial_recovery"] = True
     return out
@@ -356,7 +440,7 @@ async def chat_handler(request: web.Request) -> web.Response:
 
 
 STREAM_HEARTBEAT_SECONDS = 15.0
-BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.delta", "llm_thinking", "opencode.reasoning", "provider.retry", "provider.status", "execution.started", "execution.completed", "execution.failed", "complete", "final", "error"}
+BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.delta", "llm_thinking", "opencode.reasoning", "provider.retry", "provider.status", "execution.started", "execution.completed", "execution.failed", "complete", "final", "error", "skill.detected", "skill.blocked", "skill.command.executed", "skill.prompt_applied", "skill.completed"}
 
 
 class SSEClientDisconnected(Exception):

@@ -70,6 +70,31 @@ def test_adapter_does_not_wildcard_import_app_keys():
     assert not offenders
 
 
+def test_no_string_app_key_patterns_in_hot_paths():
+    # Regression guard for AppKey CI gate failures in chat/event-bridge code paths.
+    checked = [
+        ADAPTER_DIR / "chat_api.py",
+        ADAPTER_DIR / "server.py",
+    ]
+    patterns = [
+        'app.get("',
+        "app.get('",
+        'request.app.get("',
+        "request.app.get('",
+        'app["',
+        "app['",
+        'request.app["',
+        "request.app['",
+    ]
+    offenders = []
+    for path in checked:
+        text = path.read_text(encoding="utf-8")
+        for pat in patterns:
+            if pat in text:
+                offenders.append(f"{path.name}: contains {pat}")
+    assert not offenders
+
+
 class IdleEventStreamClient:
     async def health(self):
         return {'healthy': True, 'version': '1.14.39'}

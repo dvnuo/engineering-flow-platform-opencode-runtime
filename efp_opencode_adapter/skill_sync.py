@@ -34,6 +34,7 @@ KNOWN_FIELDS = {
 SUBAGENT_ALLOWLIST = {"review-pull-request", "create-pull-request"}
 SKIP_DIRS = {".git", ".github", "scripts", "__pycache__"}
 GENERATED_MARKER = "This skill was generated from an EFP skill asset."
+GENERATED_COMMAND_MARKER = "This command was generated from an EFP skill asset."
 
 
 @dataclass(frozen=True)
@@ -236,9 +237,17 @@ def build_tool_name_map(tools_index: dict[str, Any] | None) -> dict[str, dict[st
                     out[k] = base
     return out
 
+def _to_metadata_string(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
 def _render_skill_markdown(opencode_name: str, entry: SkillIndexEntry, frontmatter: dict, body: str) -> str:
     efp_extra = {k: v for k, v in frontmatter.items() if k not in KNOWN_FIELDS}
-    metadata: dict = {
+    metadata_raw: dict[str, Any] = {
         "efp_name": entry.efp_name,
         "efp_version": str(frontmatter.get("version", "")),
         "efp_owner": frontmatter.get("owner", ""),
@@ -252,7 +261,9 @@ def _render_skill_markdown(opencode_name: str, entry: SkillIndexEntry, frontmatt
     }
     for optional in ("output_format", "model", "hooks"):
         if optional in frontmatter:
-            metadata[f"efp_{optional}"] = frontmatter.get(optional)
+            metadata_raw[f"efp_{optional}"] = frontmatter.get(optional)
+
+    metadata = {k: _to_metadata_string(v) for k, v in metadata_raw.items()}
 
     header = {
         "name": opencode_name,
@@ -332,9 +343,33 @@ Instructions:
     prompt_path.write_text(content, encoding="utf-8")
 
 
-def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path, tools_index: dict[str, Any] | None = None) -> SkillsIndex:
+def _render_command_markdown(entry: SkillIndexEntry) -> str:
+    return f"""---
+description: Run EFP skill {entry.opencode_name}
+agent: efp-main
+---
+
+{GENERATED_COMMAND_MARKER}
+
+Run the OpenCode agent skill `{entry.opencode_name}`.
+
+Arguments:
+$ARGUMENTS
+
+Instructions:
+1. Use the native OpenCode `skill` tool to load `{entry.opencode_name}`.
+2. Follow `.opencode/skills/{entry.opencode_name}/SKILL.md`.
+3. Do not claim success until the skill has been loaded and applied.
+4. If the skill cannot be loaded, or required tools are unavailable, report the blocker.
+"""
+
+
+def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path, tools_index: dict[str, Any] | None = None, opencode_commands_dir: Path | None = None) -> SkillsIndex:
     opencode_skills_dir.mkdir(parents=True, exist_ok=True)
     state_dir.mkdir(parents=True, exist_ok=True)
+    if opencode_commands_dir is None:
+        opencode_commands_dir = opencode_skills_dir.parent / "commands"
+    opencode_commands_dir.mkdir(parents=True, exist_ok=True)
 
     warnings_list: list[str] = []
     skills: list[SkillIndexEntry] = []
@@ -382,7 +417,12 @@ def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path, to
         if GENERATED_MARKER in candidate.read_text(encoding="utf-8"):
             shutil.rmtree(child)
 
+    for cmd_file in opencode_commands_dir.glob("*.md"):
+        if cmd_file.read_text(encoding="utf-8").find(GENERATED_COMMAND_MARKER) >= 0 and cmd_file.stem not in current_opencode_names:
+            cmd_file.unlink()
+
     name_to_source: dict[str, Path] = {}
+    generated_commands: set[str] = set()
     for source_path in discovered:
         content = source_path.read_text(encoding="utf-8")
         parsed = _split_frontmatter(content)
@@ -480,9 +520,19 @@ def sync_skills(skills_dir: Path, opencode_skills_dir: Path, state_dir: Path, to
         )
         target_path.write_text(_render_skill_markdown(opencode_name, entry, frontmatter, body), encoding="utf-8")
         skills.append(entry)
+        if entry.opencode_supported and entry.runtime_equivalence and (not entry.missing_tools) and (not entry.missing_opencode_tools):
+            (opencode_commands_dir / f"{entry.opencode_name}.md").write_text(_render_command_markdown(entry), encoding="utf-8")
+            generated_commands.add(entry.opencode_name)
 
         if task_tools or raw_efp_name in SUBAGENT_ALLOWLIST or opencode_name in SUBAGENT_ALLOWLIST:
             _write_subagent_prompt(opencode_skills_dir.parent / "agents", entry)
+
+    for cmd_file in opencode_commands_dir.glob("*.md"):
+        if cmd_file.stem in generated_commands:
+            continue
+        text = cmd_file.read_text(encoding="utf-8")
+        if GENERATED_COMMAND_MARKER in text:
+            cmd_file.unlink()
 
     index = SkillsIndex(
         generated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),

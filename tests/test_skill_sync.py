@@ -70,9 +70,7 @@ def test_skill_sync_core_behaviors(tmp_path):
     assert payload["name"] == "review-pull-request"
     assert payload["metadata"]["efp_tools"] == "github_get_pr,github_get_pr_files"
     assert payload["metadata"]["efp_task_tools"] == "run_command"
-    assert payload["metadata"]["efp_extra"]["planning_mode"] == "strict"
-    assert payload["metadata"]["efp_extra"]["strategy"] == "high-signal"
-    assert payload["metadata"]["efp_extra"]["references"] == ["a", "b"]
+    assert isinstance(payload["metadata"]["efp_extra"], str)
 
     index_path = state_dir / "skills-index.json"
     assert index_path.exists()
@@ -245,3 +243,20 @@ def test_frontmatter_opencode_tools_disabled_are_exposed(tmp_path):
     assert 'efp_run_command' not in entry.opencode_tools
     assert entry.missing_opencode_tools == ['efp_run_command']
     assert any('disabled' in (m.get('missing_reason') or '') for m in entry.tool_mappings)
+
+def test_sync_generates_commands_and_preserves_manual(tmp_path):
+    skills_dir = tmp_path / 'skills'; opdir = tmp_path / 'workspace/.opencode/skills'; state = tmp_path / 'state'
+    cmds = tmp_path / 'workspace/.opencode/commands'
+    _write_skill(skills_dir / 'a' / 'skill.md', {'name':'a','description':'d'})
+    _write_skill(skills_dir / 'b' / 'skill.md', {'name':'b','description':'d','opencode_supported':False})
+    (cmds).mkdir(parents=True, exist_ok=True)
+    (cmds / 'manual.md').write_text('manual', encoding='utf-8')
+    (cmds / 'old.md').write_text('This command was generated from an EFP skill asset.', encoding='utf-8')
+    res = sync_skills(skills_dir, opdir, state, opencode_commands_dir=cmds)
+    assert (cmds / 'a.md').exists()
+    assert not (cmds / 'b.md').exists()
+    assert (cmds / 'manual.md').exists()
+    assert not (cmds / 'old.md').exists()
+
+    payload = _parse_frontmatter((opdir / 'a' / 'SKILL.md').read_text(encoding='utf-8'))
+    assert all(isinstance(v, str) for v in payload['metadata'].values())

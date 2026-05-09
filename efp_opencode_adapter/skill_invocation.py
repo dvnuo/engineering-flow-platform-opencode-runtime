@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import re
+from typing import Any
+
+from .index_loader import load_skills_index, read_json_file
+from .permission_generator import default_permission_baseline, skill_permission_state
+from .settings import Settings
+from .skill_sync import normalize_skill_name
+
+SLASH_RE = re.compile(r"^/([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+(.*))?$")
+
+
+@dataclass(frozen=True)
+class SlashInvocation:
+    raw_name: str
+    skill_name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class SkillDecision:
+    skill: dict[str, Any] | None
+    allowed: bool
+    reason: str
+    permission_state: str
+
+
+def parse_slash_invocation(message: str) -> SlashInvocation | None:
+    if not isinstance(message, str) or not message.strip():
+        return None
+    stripped = message.strip()
+    if "\n" in stripped:
+        lines = stripped.splitlines()
+        if len(lines) != 1:
+            return None
+        stripped = lines[0].strip()
+    match = SLASH_RE.match(stripped)
+    if not match:
+        return None
+    raw_name = match.group(1)
+    skill_name = normalize_skill_name(raw_name, raw_name)
+    arguments = (match.group(2) or "").strip()
+    return SlashInvocation(raw_name=raw_name, skill_name=skill_name, arguments=arguments)
+
+
+def resolve_skill(settings: Settings, name: str) -> dict[str, Any] | None:
+    skills = load_skills_index(settings).get("skills", [])
+    if not isinstance(skills, list):
+        return None
+    input_canonical = normalize_skill_name(name, name)
+    aliases = {name.lower(), name.replace("_", "-").lower(), input_canonical}
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        efp_name = str(skill.get("efp_name") or "")
+        opencode_name = str(skill.get("opencode_name") or "")
+        candidates: set[str] = set()
+        for value in (opencode_name, efp_name):
+            if not value:
+                continue
+            candidates.add(value.lower())
+            candidates.add(value.replace("_", "-").lower())
+            candidates.add(normalize_skill_name(value, value))
+        if aliases & candidates:
+            return skill
+    return None
+
+
+def load_skill_permission(settings: Settings) -> dict[str, Any]:
+    cfg = read_json_file(settings.opencode_config_path) or {}
+    if isinstance(cfg.get("permission"), dict):
+        return cfg["permission"]
+    return default_permission_baseline()
+
+
+def evaluate_skill_invocation(settings: Settings, invocation: SlashInvocation) -> SkillDecision:
+    skill = resolve_skill(settings, invocation.skill_name)
+    if not skill:
+        return SkillDecision(skill=None, allowed=False, reason="unknown_skill", permission_state="unknown")
+    if skill.get("opencode_supported") is False:
+        return SkillDecision(skill=skill, allowed=False, reason="unsupported_for_opencode", permission_state="unknown")
+    permission_state = skill_permission_state(load_skill_permission(settings), str(skill.get("opencode_name") or invocation.skill_name))
+    if permission_state in {"denied", "unknown"}:
+        return SkillDecision(skill=skill, allowed=False, reason="permission_denied", permission_state=permission_state)
+    if bool(skill.get("programmatic")) and not bool(skill.get("runtime_equivalence")):
+        return SkillDecision(skill=skill, allowed=False, reason="programmatic_skill_requires_opencode_wrapper", permission_state=permission_state)
+    if skill.get("missing_tools") or skill.get("missing_opencode_tools"):
+        return SkillDecision(skill=skill, allowed=False, reason="missing_required_tools", permission_state=permission_state)
+    return SkillDecision(skill=skill, allowed=True, reason="allowed", permission_state=permission_state)
+
+
+def build_skill_prompt(skill: dict[str, Any], invocation: SlashInvocation) -> str:
+    skill_name = str(skill.get("opencode_name") or invocation.skill_name)
+    raw = f"/{invocation.raw_name} {invocation.arguments}".strip()
+    return (
+        f"Run the OpenCode agent skill `{skill_name}`.\n\n"
+        "Original user slash command:\n"
+        f"`{raw}`\n\n"
+        "Arguments:\n"
+        f"{invocation.arguments}\n\n"
+        "Instructions:\n"
+        f"1. Use the native OpenCode `skill` tool to load skill `{skill_name}`.\n"
+        f"2. Follow `.opencode/skills/{skill_name}/SKILL.md`.\n"
+        "3. Do not claim that the skill is running unless you have actually loaded and applied it.\n"
+        "4. If the skill cannot be loaded, or required tools are unavailable, report the exact blocker."
+    )

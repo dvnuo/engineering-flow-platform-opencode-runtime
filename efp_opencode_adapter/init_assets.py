@@ -14,6 +14,7 @@ def init_assets(settings: Settings) -> None:
         settings.workspace_dir / ".opencode" / "skills",
         settings.workspace_dir / ".opencode" / "tools",
         settings.workspace_dir / ".opencode" / "agents",
+        settings.workspace_dir / ".opencode" / "commands",
         settings.skills_dir,
         settings.tools_dir,
         settings.opencode_data_dir,
@@ -32,6 +33,7 @@ def init_assets(settings: Settings) -> None:
         settings.workspace_dir / ".opencode" / "skills",
         settings.adapter_state_dir,
         tools_index=tools_index.to_json_dict() if hasattr(tools_index, "to_json_dict") else tools_index,
+        opencode_commands_dir=settings.workspace_dir / ".opencode" / "commands",
     )
 
     write_main_agent_prompt(settings)

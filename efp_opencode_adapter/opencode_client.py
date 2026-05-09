@@ -259,6 +259,49 @@ class OpenCodeClient:
     async def put_auth(self, provider: str, api_key: str) -> dict[str, Any]:
         return await self.put_auth_info(provider, {"type": "api", "key": api_key})
 
+    async def list_commands(self, timeout_seconds: int = 30) -> list[dict[str, Any]]:
+        data = await self._request_json(
+            "GET",
+            "/command",
+            expected_statuses=(200,),
+            timeout_seconds=timeout_seconds,
+        )
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, dict):
+            commands = data.get("commands") or data.get("data") or []
+            if isinstance(commands, list):
+                return [x for x in commands if isinstance(x, dict)]
+        raise OpenCodeClientError("unexpected command response shape", payload=data)
+
+    async def execute_command(
+        self,
+        session_id: str,
+        *,
+        command: str,
+        arguments: str,
+        model: str | None,
+        agent: str | None,
+        message_id: str | None = None,
+    ) -> dict:
+        payload: dict[str, Any] = {
+            "command": command,
+            "arguments": arguments,
+        }
+        if message_id:
+            payload["messageID"] = message_id
+        if agent:
+            payload["agent"] = agent
+        model_ref = _model_ref_from_value(model)
+        if model_ref:
+            payload["model"] = model_ref
+        return await self._request_json(
+            "POST",
+            f"/session/{session_id}/command",
+            json=payload,
+            expected_statuses=(200,),
+        )
+
     async def patch_config(self, config: dict[str, Any]) -> dict[str, Any]:
         url = f"{self.settings.opencode_url.rstrip('/')}/config"
         try:

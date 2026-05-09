@@ -706,3 +706,33 @@ async def test_send_message_does_not_add_copilot_header_for_non_copilot(monkeypa
 
     await OpenCodeClient(Settings.from_env()).send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model=model, agent="efp-main")
     await server.close()
+
+@pytest.mark.asyncio
+async def test_list_commands_parses_list(monkeypatch):
+    app = web.Application()
+    async def h(_):
+        return web.json_response([{"name": "java-cucumber-generator"}])
+    app.router.add_get('/command', h)
+    server = TestServer(app); await server.start_server()
+    monkeypatch.setenv('EFP_OPENCODE_URL', server_base_url(server))
+    out = await OpenCodeClient(Settings.from_env()).list_commands()
+    assert out[0]['name'] == 'java-cucumber-generator'
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_execute_command_uses_command_api(monkeypatch):
+    app = web.Application(); captured = {}
+    async def h(request):
+        captured['path'] = request.path
+        captured['body'] = await request.json()
+        return web.json_response({"message": {"role": "assistant", "parts": [{"type": "text", "text": "ok"}]}})
+    app.router.add_post('/session/s1/command', h)
+    server = TestServer(app); await server.start_server()
+    monkeypatch.setenv('EFP_OPENCODE_URL', server_base_url(server))
+    await OpenCodeClient(Settings.from_env()).execute_command('s1', command='java-cucumber-generator', arguments='hello world', model='anthropic/claude-sonnet-4', agent='efp-main')
+    assert captured['path'] == '/session/s1/command'
+    assert captured['body']['command'] == 'java-cucumber-generator'
+    assert captured['body']['arguments'] == 'hello world'
+    assert captured['body']['model'] == {'providerID': 'anthropic', 'modelID': 'claude-sonnet-4'}
+    await server.close()
