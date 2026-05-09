@@ -4,20 +4,38 @@ import asyncio
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from .opencode_client import OpenCodeClient
 from .runtime_env import strip_managed_external_env
 from .settings import Settings
+from .tool_registry_check import run_tool_registry_check
 
 
 class OpenCodeProcessManager:
-    def __init__(self, settings: Settings, client: OpenCodeClient | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        client: OpenCodeClient | None = None,
+        registry_check: Callable[[Settings, OpenCodeClient], Awaitable[dict[str, object]]] | None = None,
+    ):
         self.settings = settings
         self.client = client or OpenCodeClient(settings)
+        self.registry_check = registry_check or (
+            lambda s, c: run_tool_registry_check(
+                s,
+                c,
+                timeout=int(os.getenv("EFP_OPENCODE_TOOL_REGISTRY_TIMEOUT_SECONDS", "60")),
+                request_timeout=int(os.getenv("EFP_OPENCODE_TOOL_REGISTRY_REQUEST_TIMEOUT_SECONDS", "15")),
+                expected_tools=[],
+            )
+        )
         self.process: asyncio.subprocess.Process | None = None
         self.last_restart_reason: str | None = None
         self.last_restart_at: str | None = None
         self.health_ok: bool | None = None
+        self.registry_ok: bool | None = None
+        self.last_startup_error: str | None = None
 
     async def start(self, env: dict[str, str] | None = None, *, reason: str = "startup") -> dict:
         if self.process and self.process.returncode is None:
@@ -38,11 +56,24 @@ class OpenCodeProcessManager:
             handle.close()
         self.last_restart_reason = reason
         self.last_restart_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        self.last_startup_error = None
+        self.health_ok = None
+        self.registry_ok = None
         try:
             await self.client.wait_until_ready(self.settings.ready_timeout_seconds)
             self.health_ok = True
-        except Exception:
+            registry_result = await self.registry_check(self.settings, self.client)
+            self.registry_ok = bool(registry_result.get("status") == "ok")
+            if not self.registry_ok:
+                err = str(registry_result.get("error") or "tool registry check failed")
+                self.last_startup_error = self._startup_error_with_log_tail(err, log_path)
+                raise RuntimeError(self.last_startup_error)
+        except Exception as exc:
             self.health_ok = False
+            self.registry_ok = False if self.registry_ok is None else self.registry_ok
+            if not self.last_startup_error:
+                self.last_startup_error = self._startup_error_with_log_tail(str(exc), log_path)
+            raise
         return self.status_snapshot()
 
     async def stop(self, timeout_seconds: float = 10.0) -> dict:
@@ -66,6 +97,34 @@ class OpenCodeProcessManager:
             "running": running,
             "pid": self.process.pid if self.process else None,
             "health_ok": self.health_ok,
+            "registry_ok": self.registry_ok,
+            "last_startup_error": self.last_startup_error,
             "last_restart_reason": self.last_restart_reason,
             "last_restart_at": self.last_restart_at,
         }
+
+    def _startup_error_with_log_tail(self, message: str, log_path: Path) -> str:
+        message = self._sanitize(message)
+        tail = ""
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-200:]
+            tail = self._sanitize("\n".join(lines))
+        except Exception:
+            tail = ""
+        return f"{message}; opencode_log_file={log_path}; tail_200={tail}"
+
+    def _sanitize(self, text: str) -> str:
+        cleaned = str(text or "")
+        for key in ("PORTAL_INTERNAL_TOKEN", "OPENAI_API_KEY", "GITHUB_TOKEN"):
+            secret = os.getenv(key, "")
+            if secret:
+                cleaned = cleaned.replace(secret, "***REDACTED***")
+        for prefix in ("ghu_", "gho_", "sk-"):
+            idx = cleaned.find(prefix)
+            while idx != -1:
+                end = idx + len(prefix)
+                while end < len(cleaned) and (cleaned[end].isalnum() or cleaned[end] in "_-"):
+                    end += 1
+                cleaned = cleaned[:idx] + f"{prefix}***REDACTED***" + cleaned[end:]
+                idx = cleaned.find(prefix, idx + len(prefix))
+        return cleaned
