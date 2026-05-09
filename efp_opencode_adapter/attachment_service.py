@@ -198,17 +198,21 @@ def _append_truncated(parts: list[str], block: str, used: int, max_chars: int) -
     return max_chars, True
 
 
-def normalize_attachment_refs(attachments) -> list[dict]:
+def _normalize_attachment_refs_with_debug(attachments) -> tuple[list[dict], list[dict]]:
     refs: list[dict] = []
+    debug: list[dict] = []
     if not attachments:
-        return refs
+        return refs, debug
     if not isinstance(attachments, list):
-        return refs
+        debug.append({"status": "error", "error": "attachments_not_list"})
+        return refs, debug
     for item in attachments:
         if isinstance(item, str):
             fid = item.strip()
             if fid:
                 refs.append({"file_id": fid})
+            else:
+                debug.append({"status": "skipped", "error": "invalid_attachment_ref"})
             continue
         if isinstance(item, dict):
             fid = item.get("file_id") or item.get("id")
@@ -218,6 +222,15 @@ def normalize_attachment_refs(attachments) -> list[dict]:
                     if k in item:
                         out[k] = item[k]
                 refs.append(out)
+            else:
+                debug.append({"status": "skipped", "error": "invalid_attachment_ref"})
+            continue
+        debug.append({"status": "skipped", "error": "invalid_attachment_ref"})
+    return refs, debug
+
+
+def normalize_attachment_refs(attachments) -> list[dict]:
+    refs, _debug = _normalize_attachment_refs_with_debug(attachments)
     return refs
 
 
@@ -244,14 +257,22 @@ def build_opencode_attachment_parts(
 ) -> tuple[list[dict], list[dict]]:
     parts: list[dict] = []
     debug: list[dict] = []
+    has_attachments = bool(attachments)
+    if not service and has_attachments:
+        return [{"type": "text", "text": "Attachments were provided, but the attachment service is unavailable."}], [{"status": "error", "error": "attachment_service_unavailable"}]
     if not service:
         return parts, debug
 
     sid = service.sanitize_session_id(session_id)
-    refs = normalize_attachment_refs(attachments)
+    refs, normalize_debug = _normalize_attachment_refs_with_debug(attachments)
+    debug.extend(normalize_debug)
+    if any(item.get("error") == "attachments_not_list" for item in normalize_debug):
+        parts.append({"type": "text", "text": "Attachments could not be processed: attachments must be a list."})
+        return parts, debug
     text_blocks: list[str] = ["Attached files:\n"]
     used = len(text_blocks[0])
     text_added = False
+    text_budget_exhausted = False
 
     for ref in refs:
         fid_raw = ref.get("file_id", "")
@@ -262,11 +283,15 @@ def build_opencode_attachment_parts(
             name = service.sanitize_filename(meta.get("name"))
             content_type = meta.get("content_type") or "application/octet-stream"
             raw = original_path.read_bytes()
-            size = int(meta.get("size") or len(raw))
+            size = len(raw)
             item = {"file_id": fid, "name": name, "content_type": content_type, "size": size, "status": "ok"}
 
             parsed_file = base / "parsed.json"
             if parsed_file.exists() or _is_supported_text(name, content_type, raw):
+                if text_budget_exhausted:
+                    item.update({"action": "text_context", "truncated": True})
+                    debug.append(item)
+                    continue
                 text = ""
                 action = "text_context"
                 if parsed_file.exists():
@@ -285,7 +310,7 @@ def build_opencode_attachment_parts(
                     item.update({"action": action, "truncated": bool(truncated)})
                     debug.append(item)
                     if truncated:
-                        break
+                        text_budget_exhausted = True
                     continue
 
             if content_type.startswith("image/") or content_type == "application/pdf":

@@ -67,3 +67,45 @@ def test_build_opencode_attachment_parts_for_text_and_missing(tmp_path):
     assert any("hello file" in p.get("text", "") and "notes.txt" in p.get("text", "") for p in text_parts)
     assert any("could not be loaded" in p.get("text", "") for p in text_parts)
     assert any(d.get("status") == "error" for d in debug)
+
+
+def test_text_truncation_still_processes_image_and_pdf(tmp_path):
+    settings = make_settings(tmp_path)
+    svc = AttachmentService(settings)
+    big = svc.upload("s1", "big.txt", b"a" * 500, "text/plain")
+    img = svc.upload("s1", "cat.png", b"\x89PNG\r\n\x1a\nabc", "image/png")
+    pdf = svc.upload("s1", "doc.pdf", b"%PDF-1.4\nabc", "application/pdf")
+    parts, debug = build_opencode_attachment_parts(svc, "s1", [big["file_id"], img["file_id"], pdf["file_id"]], max_text_chars=80)
+    assert any(p.get("type") == "text" and "[Attachment context truncated]" in p.get("text", "") for p in parts)
+    assert any(p.get("type") == "file" and p.get("mime") == "image/png" for p in parts)
+    assert any(p.get("type") == "file" and p.get("mime") == "application/pdf" for p in parts)
+    assert any(d.get("file_id") == big["file_id"] and d.get("truncated") is True for d in debug)
+    assert any(d.get("file_id") == img["file_id"] and d.get("inlined") is True for d in debug)
+
+
+def test_text_budget_exhausted_next_text_not_unsupported(tmp_path):
+    settings = make_settings(tmp_path)
+    svc = AttachmentService(settings)
+    big1 = svc.upload("s1", "big1.txt", b"a" * 500, "text/plain")
+    big2 = svc.upload("s1", "big2.txt", b"b" * 300, "text/plain")
+    parts, debug = build_opencode_attachment_parts(svc, "s1", [big1["file_id"], big2["file_id"]], max_text_chars=80)
+    assert not any("runtime cannot parse or inline this file type yet" in p.get("text", "") and "big2.txt" in p.get("text", "") for p in parts if p.get("type") == "text")
+    assert any(d.get("file_id") == big2["file_id"] and d.get("action") == "text_context" and d.get("truncated") is True for d in debug)
+
+
+def test_invalid_attachment_refs_and_non_list_and_service_none(tmp_path):
+    settings = make_settings(tmp_path)
+    svc = AttachmentService(settings)
+    valid = svc.upload("s1", "ok.txt", b"ok", "text/plain")
+    parts, debug = build_opencode_attachment_parts(svc, "s1", [123, {}, {"name": "x"}, "", {"id": valid["file_id"]}])
+    assert any("ok.txt" in p.get("text", "") for p in parts if p.get("type") == "text")
+    assert any(d.get("status") in {"skipped", "error"} and d.get("error") == "invalid_attachment_ref" for d in debug)
+    assert not any("Attachments could not be processed" in p.get("text", "") for p in parts)
+
+    parts2, debug2 = build_opencode_attachment_parts(svc, "s1", {"file_id": "x"})
+    assert any("attachments must be a list" in p.get("text", "") for p in parts2)
+    assert any(d.get("error") == "attachments_not_list" for d in debug2)
+
+    parts3, debug3 = build_opencode_attachment_parts(None, "s1", ["x"])
+    assert any("attachment service is unavailable" in p.get("text", "") for p in parts3)
+    assert any(d.get("error") == "attachment_service_unavailable" for d in debug3)

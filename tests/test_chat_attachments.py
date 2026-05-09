@@ -4,8 +4,10 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from efp_opencode_adapter.app_keys import ATTACHMENT_SERVICE_KEY
+from efp_opencode_adapter.chat_api import _redact_attachment_payloads_for_debug
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
+from efp_opencode_adapter.thinking_events import safe_preview
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -68,3 +70,13 @@ async def test_chat_attachments_end_to_end(tmp_path, monkeypatch):
         assert any(d.get("status") == "error" for d in p6["_llm_debug"]["attachments"])
     finally:
         await client.close()
+
+
+def test_response_payload_redaction():
+    payload = {"message": {"parts": [{"type": "file", "url": "data:image/png;base64,AAAA"}]}, "note": "see data:application/pdf;base64,BBBB"}
+    redacted = _redact_attachment_payloads_for_debug(payload)
+    preview = safe_preview(redacted, 2000)
+    preview_text = json.dumps(preview, ensure_ascii=False)
+    assert "data:image/png;base64,AAAA" not in preview_text
+    assert "data:application/pdf;base64,BBBB" not in preview_text
+    assert "data:<redacted>" in preview_text

@@ -142,6 +142,24 @@ def _detect_new_message_ids(before_messages: list[dict[str, Any]], after_message
 
 def extract_assistant_text(payload: Any) -> str:
     return extract_last_assistant_visible_text(payload)
+
+
+def _redact_attachment_payloads_for_debug(value: Any) -> Any:
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key == "url" and isinstance(item, str) and item.startswith("data:"):
+                out[key] = "data:<redacted>"
+            else:
+                out[key] = _redact_attachment_payloads_for_debug(item)
+        return out
+    if isinstance(value, list):
+        return [_redact_attachment_payloads_for_debug(item) for item in value]
+    if isinstance(value, str):
+        return re.sub(r"data:[^\\s\"']+;base64,[A-Za-z0-9+/=]+", "data:<redacted>;base64,<redacted>", value)
+    return value
+
+
 async def _ensure_record_for_chat(*, client, store, portal_session_id: str, title: str, agent: str | None, model: str | None) -> tuple[SessionRecord, bool]:
     existing = store.get(portal_session_id)
     if existing is None:
@@ -300,7 +318,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         usage_record["request_id"] = trace_context.get("request_id", usage_record.get("request_id", ""))
         final_context = {**context_state, "summary": assistant_text[:500], "current_state": "completed", "next_step": ""}
 
-        llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(response_payload, 2000), "trace_context": trace_context, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or ""}, "attachments": attachment_debug}
+        llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(_redact_attachment_payloads_for_debug(response_payload), 2000), "trace_context": trace_context, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or ""}, "attachments": attachment_debug}
         if message_id_detection_error_before:
             llm_debug["message_id_detection_error_before"] = message_id_detection_error_before
         chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="success", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
