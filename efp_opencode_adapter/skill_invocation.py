@@ -49,15 +49,21 @@ def resolve_skill(settings: Settings, name: str) -> dict[str, Any] | None:
     skills = load_skills_index(settings).get("skills", [])
     if not isinstance(skills, list):
         return None
-    aliases = {name, name.replace("_", "-"), name.replace("-", "_")}
+    input_canonical = normalize_skill_name(name, name)
+    aliases = {name.lower(), name.replace("_", "-").lower(), input_canonical}
     for skill in skills:
         if not isinstance(skill, dict):
             continue
         efp_name = str(skill.get("efp_name") or "")
         opencode_name = str(skill.get("opencode_name") or "")
-        normalized_efp = normalize_skill_name(efp_name, efp_name) if efp_name else ""
-        candidates = {opencode_name, efp_name, normalized_efp, opencode_name.replace("_", "-"), efp_name.replace("_", "-")}
-        if aliases & {x for x in candidates if x}:
+        candidates: set[str] = set()
+        for value in (opencode_name, efp_name):
+            if not value:
+                continue
+            candidates.add(value.lower())
+            candidates.add(value.replace("_", "-").lower())
+            candidates.add(normalize_skill_name(value, value))
+        if aliases & candidates:
             return skill
     return None
 
