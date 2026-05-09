@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from efp_opencode_adapter.attachment_service import AttachmentService, build_attachment_context
+from efp_opencode_adapter.attachment_service import AttachmentService, build_attachment_context, build_opencode_attachment_parts, normalize_attachment_refs
 from efp_opencode_adapter.settings import Settings
 
 
@@ -51,3 +51,19 @@ def test_attachment_lifecycle(tmp_path):
 
     deleted = svc.delete(fid, "s1")
     assert deleted["deleted"] is True
+
+
+def test_normalize_attachment_refs():
+    refs = normalize_attachment_refs(["a1", {"file_id": "a2", "name": "n"}, {"id": "a3"}, 123, {}, ""])
+    assert [r["file_id"] for r in refs] == ["a1", "a2", "a3"]
+
+
+def test_build_opencode_attachment_parts_for_text_and_missing(tmp_path):
+    settings = make_settings(tmp_path)
+    svc = AttachmentService(settings)
+    up = svc.upload("s1", "notes.txt", b"hello file", "text/plain")
+    parts, debug = build_opencode_attachment_parts(svc, "s1", [up["file_id"], "does-not-exist"])
+    text_parts = [p for p in parts if p.get("type") == "text"]
+    assert any("hello file" in p.get("text", "") and "notes.txt" in p.get("text", "") for p in text_parts)
+    assert any("could not be loaded" in p.get("text", "") for p in text_parts)
+    assert any(d.get("status") == "error" for d in debug)

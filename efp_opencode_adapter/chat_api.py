@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from aiohttp import web
 from .app_keys import (
+    ATTACHMENT_SERVICE_KEY,
     CHATLOG_STORE_KEY,
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
@@ -20,6 +21,7 @@ from .app_keys import (
 )
 
 from .opencode_client import OpenCodeClientError
+from .attachment_service import build_opencode_attachment_parts
 from .session_store import SessionRecord
 from .thinking_events import (
     assistant_delta_event,
@@ -189,6 +191,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
     model = _model_from_chat_payload(payload, metadata, runtime_profile)
     agent = _optional_str(metadata.get("agent"))
     system = _optional_str(metadata.get("system"))
+    attachments = payload.get("attachments")
 
     store = request.app[SESSION_STORE_KEY]
     bus = request.app[EVENT_BUS_KEY]
@@ -230,7 +233,25 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             before_messages = await client.list_messages(record.opencode_session_id)
         except Exception as exc:
             message_id_detection_error_before = str(exc)
-        response_payload = await client.send_message(record.opencode_session_id, parts=[{"type": "text", "text": message}], model=model, agent=agent, system=system)
+        parts = [{"type": "text", "text": message}]
+        attachment_debug = []
+        attachment_service = request.app.get(ATTACHMENT_SERVICE_KEY)
+        if attachments:
+            try:
+                attachment_parts, attachment_debug = build_opencode_attachment_parts(
+                    attachment_service,
+                    portal_session_id,
+                    attachments,
+                    max_text_chars=30000,
+                    max_inline_bytes=10 * 1024 * 1024,
+                )
+                parts.extend(attachment_parts)
+            except Exception as exc:
+                safe_error = safe_preview(str(exc), 300)
+                attachment_debug.append({"status": "error", "error": safe_error})
+                parts.append({"type": "text", "text": f"Attachment processing failed: {safe_error}"})
+
+        response_payload = await client.send_message(record.opencode_session_id, parts=parts, model=model, agent=agent, system=system)
         assistant_text = extract_last_assistant_visible_text(response_payload)
         payload_message = response_payload.get("message") if isinstance(response_payload, dict) else None
         if isinstance(payload_message, dict):
@@ -279,7 +300,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         usage_record["request_id"] = trace_context.get("request_id", usage_record.get("request_id", ""))
         final_context = {**context_state, "summary": assistant_text[:500], "current_state": "completed", "next_step": ""}
 
-        llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(response_payload, 2000), "trace_context": trace_context, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or ""}}
+        llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(response_payload, 2000), "trace_context": trace_context, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or ""}, "attachments": attachment_debug}
         if message_id_detection_error_before:
             llm_debug["message_id_detection_error_before"] = message_id_detection_error_before
         chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="success", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
@@ -298,7 +319,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.failed", latest_event_state="error", request_id=request_id, summary=str(exc), runtime_events=runtime_events, metadata={"engine": "opencode", "trace_context": trace_context})
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
 
-    out = {"session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context}}
+    out = {"session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context, "attachments": attachment_debug}}
     if partial_recovery or getattr(updated, "partial_recovery", False):
         out["_llm_debug"]["partial_recovery"] = True
     return out

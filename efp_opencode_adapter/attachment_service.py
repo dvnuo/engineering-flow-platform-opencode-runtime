@@ -196,6 +196,125 @@ def _append_truncated(parts: list[str], block: str, used: int, max_chars: int) -
     parts.append(block[: remaining - len(marker)])
     parts.append(marker)
     return max_chars, True
+
+
+def normalize_attachment_refs(attachments) -> list[dict]:
+    refs: list[dict] = []
+    if not attachments:
+        return refs
+    if not isinstance(attachments, list):
+        return refs
+    for item in attachments:
+        if isinstance(item, str):
+            fid = item.strip()
+            if fid:
+                refs.append({"file_id": fid})
+            continue
+        if isinstance(item, dict):
+            fid = item.get("file_id") or item.get("id")
+            if isinstance(fid, str) and fid.strip():
+                out = {"file_id": fid.strip()}
+                for k in ("name", "content_type", "size"):
+                    if k in item:
+                        out[k] = item[k]
+                refs.append(out)
+    return refs
+
+
+def _safe_attachment_error(exc: Exception) -> str:
+    if isinstance(exc, ValueError):
+        msg = str(exc).lower()
+        if "invalid file_id" in msg:
+            return "invalid file_id"
+        return "invalid attachment reference"
+    if isinstance(exc, FileNotFoundError):
+        return "not found"
+    if isinstance(exc, json.JSONDecodeError):
+        return "metadata unreadable"
+    return "unreadable"
+
+
+def build_opencode_attachment_parts(
+    service: AttachmentService,
+    session_id: str,
+    attachments,
+    *,
+    max_text_chars: int = 30000,
+    max_inline_bytes: int = 10 * 1024 * 1024,
+) -> tuple[list[dict], list[dict]]:
+    parts: list[dict] = []
+    debug: list[dict] = []
+    if not service:
+        return parts, debug
+
+    sid = service.sanitize_session_id(session_id)
+    refs = normalize_attachment_refs(attachments)
+    text_blocks: list[str] = ["Attached files:\n"]
+    used = len(text_blocks[0])
+    text_added = False
+
+    for ref in refs:
+        fid_raw = ref.get("file_id", "")
+        try:
+            fid = service.sanitize_file_id(fid_raw)
+            base = service.resolve_attachment(fid, sid)
+            original_path, meta = service.download_path(fid, sid)
+            name = service.sanitize_filename(meta.get("name"))
+            content_type = meta.get("content_type") or "application/octet-stream"
+            raw = original_path.read_bytes()
+            size = int(meta.get("size") or len(raw))
+            item = {"file_id": fid, "name": name, "content_type": content_type, "size": size, "status": "ok"}
+
+            parsed_file = base / "parsed.json"
+            if parsed_file.exists() or _is_supported_text(name, content_type, raw):
+                text = ""
+                action = "text_context"
+                if parsed_file.exists():
+                    try:
+                        text = json.loads(parsed_file.read_text(encoding='utf-8')).get('text', '')
+                    except Exception:
+                        text = ""
+                if not text:
+                    parsed = service.parse(fid, sid)
+                    if parsed.get("success"):
+                        text = parsed.get("text", "")
+                if text:
+                    block = f"\n## {name}\n{text}\n"
+                    used, truncated = _append_truncated(text_blocks, block, used, max_text_chars)
+                    text_added = True
+                    item.update({"action": action, "truncated": bool(truncated)})
+                    debug.append(item)
+                    if truncated:
+                        break
+                    continue
+
+            if content_type.startswith("image/") or content_type == "application/pdf":
+                if size <= max_inline_bytes:
+                    if content_type.startswith("image/"):
+                        parts.append({"type": "text", "text": f"Attached image: {name} ({content_type}, {size} bytes). The binary image is included as a file part."})
+                    else:
+                        parts.append({"type": "text", "text": f"Attached PDF: {name} ({content_type}, {size} bytes). The binary PDF is included as a file part."})
+                    import base64
+                    parts.append({"type": "file", "mime": content_type, "filename": name, "url": f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"})
+                    item.update({"action": "inline_file", "inlined": True})
+                else:
+                    parts.append({"type": "text", "text": f"Attached file {name} ({content_type}, {size} bytes) was not inlined because it exceeds the {max_inline_bytes} byte inline limit."})
+                    item.update({"action": "inline_file", "inlined": False})
+                debug.append(item)
+                continue
+
+            parts.append({"type": "text", "text": f"Attached file {name} ({content_type}, {size} bytes) is uploaded, but this runtime cannot parse or inline this file type yet."})
+            item.update({"action": "unsupported", "status": "ok"})
+            debug.append(item)
+        except Exception as exc:
+            reason = _safe_attachment_error(exc)
+            parts.append({"type": "text", "text": f"Attachment {str(fid_raw)[:80]} could not be loaded: {reason}."})
+            debug.append({"file_id": str(fid_raw)[:80], "status": "error", "error": reason})
+
+    if text_added and len(text_blocks) > 1:
+        parts.insert(0, {"type": "text", "text": "".join(text_blocks)})
+
+    return parts, debug
 def build_attachment_context(session_id: str, attachments: list[dict], *, settings: Settings | None = None, max_chars: int = 30000) -> str:
     if settings is None:
         settings = Settings.from_env()
