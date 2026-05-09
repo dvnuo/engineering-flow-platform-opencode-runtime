@@ -159,3 +159,94 @@ def test_skill_permission_state_supports_scalar_and_aliases():
     assert skill_permission_state({"skill": {"skill:my-skill": "allow"}}, "my-skill") == "allowed"
     assert skill_permission_state({"skill": {"opencode.skill.my_skill": "deny"}}, "my-skill") == "denied"
     assert skill_permission_state({"skill": {"*": "deny"}}, "my-skill") == "denied"
+
+
+def test_llm_tools_wildcard_allows_generated_jira_read_tool():
+    tools = {"tools": [{
+        "capability_id": "efp.tool.jira.jira_search",
+        "tool_id": "efp.tool.jira.jira_search",
+        "name": "efp_jira_search",
+        "opencode_name": "efp_jira_search",
+        "legacy_name": "jira_search",
+        "domain": "jira",
+        "type": "adapter_action",
+        "policy_tags": ["jira", "read_only"],
+        "runtime_compat": ["opencode"],
+    }]}
+    p = build_permission({"llm": {"tools": ["*"]}}, None, tools)
+    assert p["efp_jira_search"] == "allow"
+
+
+def test_tool_set_fallback_tool_alias_allows_jira_wrapper():
+    tools = {"tools": [{
+        "capability_id": "efp.tool.jira.jira_search",
+        "tool_id": "efp.tool.jira.jira_search",
+        "name": "efp_jira_search",
+        "opencode_name": "efp_jira_search",
+        "legacy_name": "jira_search",
+        "domain": "jira",
+        "type": "adapter_action",
+        "policy_tags": ["jira", "read_only"],
+        "runtime_compat": ["opencode"],
+    }]}
+    p = build_permission({"allowed_capability_ids": ["tool:jira_search"]}, None, tools)
+    assert p["efp_jira_search"] == "allow"
+
+
+def test_portal_seed_jira_read_issue_alias_allows_jira_read_only_wrapper_only():
+    tools = {"tools": [
+        {
+            "capability_id": "efp.tool.jira.jira_search",
+            "tool_id": "efp.tool.jira.jira_search",
+            "name": "efp_jira_search",
+            "opencode_name": "efp_jira_search",
+            "legacy_name": "jira_search",
+            "domain": "jira",
+            "type": "adapter_action",
+            "policy_tags": ["jira", "read_only"],
+            "runtime_compat": ["opencode"],
+        },
+        {
+            "capability_id": "efp.tool.github.github_get_pr",
+            "tool_id": "efp.tool.github.github_get_pr",
+            "name": "efp_github_get_pr",
+            "opencode_name": "efp_github_get_pr",
+            "legacy_name": "github_get_pr",
+            "domain": "github",
+            "type": "adapter_action",
+            "policy_tags": ["github", "read_only"],
+            "runtime_compat": ["opencode"],
+        },
+    ]}
+    p = build_permission(
+        {
+            "allowed_capability_ids": ["adapter:jira:read_issue"],
+            "allowed_adapter_actions": ["adapter:jira:read_issue"],
+            "allowed_external_systems": ["jira"],
+        },
+        None,
+        tools,
+    )
+    assert p["efp_jira_search"] == "allow"
+    assert "efp_github_get_pr" not in p or p["efp_github_get_pr"] == "deny"
+
+
+def test_deny_overrides_wildcard_generated_tool_allow():
+    tools = {"tools": [{
+        "capability_id": "efp.tool.jira.jira_search",
+        "name": "efp_jira_search",
+        "legacy_name": "jira_search",
+        "domain": "jira",
+        "type": "adapter_action",
+        "policy_tags": ["jira", "read_only"],
+        "runtime_compat": ["opencode"],
+    }]}
+    p = build_permission(
+        {
+            "llm": {"tools": ["*"]},
+            "derived_runtime_rules": {"denied_actions": ["jira_search"]},
+        },
+        None,
+        tools,
+    )
+    assert p["efp_jira_search"] == "deny"

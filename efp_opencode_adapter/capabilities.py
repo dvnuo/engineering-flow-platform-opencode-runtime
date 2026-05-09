@@ -65,6 +65,11 @@ def load_tools_capabilities(settings: Settings) -> list[dict[str, Any]]:
     for t in load_tools_index(settings).get("tools", []):
         if not isinstance(t, dict):
             continue
+        legacy_name = t.get("legacy_name") or t.get("native_name") or t.get("efp_name")
+        opencode_name = t.get("opencode_name") or t.get("name")
+        external_system = t.get("external_system") or t.get("system_type") or t.get("domain")
+        runtime_compat = t.get("runtime_compat")
+        runtime_compatibility = "opencode" if ((isinstance(runtime_compat, str) and runtime_compat.lower() == "opencode") or (isinstance(runtime_compat, list) and "opencode" in {str(x).lower() for x in runtime_compat})) else runtime_compat
         out.append(
             _drop_none(
                 {
@@ -78,6 +83,16 @@ def load_tools_capabilities(settings: Settings) -> list[dict[str, Any]]:
                     "input_schema": t.get("input_schema"),
                     "output_schema": t.get("output_schema"),
                     "requires_identity_binding": t.get("requires_identity_binding"),
+                    "action_alias": legacy_name or opencode_name,
+                    "external_system": external_system,
+                    "adapter_system": external_system,
+                    "runtime_compatibility": runtime_compatibility,
+                    "metadata": _drop_none({
+                        "legacy_name": legacy_name,
+                        "opencode_name": opencode_name,
+                        "domain": t.get("domain"),
+                        "source_path": t.get("source_path"),
+                    }),
                 }
             )
         )

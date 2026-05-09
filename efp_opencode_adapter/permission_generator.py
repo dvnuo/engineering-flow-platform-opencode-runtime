@@ -89,6 +89,53 @@ def _tool_external_systems(tool: dict[str, Any], tags: set[str]) -> set[str]:
     return systems
 
 
+
+
+def _norm(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _prefixed_aliases(value: Any) -> set[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return set()
+    lower = raw.lower()
+    return {raw, lower, f"tool:{raw}", f"tool:{lower}", f"adapter_action:{raw}", f"adapter_action:{lower}"}
+
+
+def _portal_seed_aliases_for_tool(tool: dict[str, Any], tags: set[str], systems: set[str]) -> set[str]:
+    aliases: set[str] = set()
+    if "jira" in systems:
+        if tags & READ_TAGS:
+            aliases.update({
+                "adapter:jira:read_issue",
+                "adapter:jira:search_issue",
+                "adapter:jira:search_issues",
+                "read_issue",
+                "search_issue",
+                "search_issues",
+            })
+        if "comment" in tags:
+            aliases.update({"adapter:jira:add_comment", "add_comment"})
+        if "transition" in tags:
+            aliases.update({"adapter:jira:transition_issue", "transition_issue"})
+        if "assign" in tags:
+            aliases.update({"adapter:jira:assign_issue", "assign_issue"})
+        if "update" in tags:
+            aliases.update({"adapter:jira:update_issue", "update_issue"})
+    return {a.lower() for a in aliases if a}
+
+
+def _tool_permission_aliases(tool: dict[str, Any], cap_id: str, name: str, typ: str, tags: set[str]) -> set[str]:
+    aliases: set[str] = set()
+    systems = _tool_external_systems(tool, tags)
+    for key in ("capability_id", "tool_id", "action_id", "name", "opencode_name", "legacy_name", "native_name", "efp_name"):
+        aliases |= _prefixed_aliases(tool.get(key))
+    aliases |= _prefixed_aliases(cap_id)
+    aliases |= _prefixed_aliases(name)
+    aliases |= _prefixed_aliases(typ)
+    aliases.update(_portal_seed_aliases_for_tool(tool, tags, systems))
+    return {_norm(a) for a in aliases if _norm(a)}
 def _external_system_allowed(tool_systems: set[str], allowed_external_systems: set[str]) -> bool:
     if not allowed_external_systems or not tool_systems:
         return True
@@ -195,6 +242,12 @@ def build_permission(config: dict, skills_index: dict | None = None, tools_index
         if (aliases & (allowed_ids | allowed_actions | allowed_skill_names)) or "skill" in allowed_types:
             permission["skill"][name] = "allow"
 
+    allowed_values = {_norm(x) for x in (allowed_ids | allowed_actions)}
+    denied_values = {_norm(x) for x in denied_actions}
+    allowed_type_values = {_norm(x) for x in allowed_types}
+    denied_type_values = {_norm(x) for x in denied_types}
+    allow_all_generated_tools = "*" in allowed_values
+
     tools = (tools_index or {}).get("tools", []) if isinstance(tools_index, dict) else []
     for tool in tools:
         if not isinstance(tool, dict) or not _is_opencode_compatible_tool(tool):
@@ -205,10 +258,12 @@ def build_permission(config: dict, skills_index: dict | None = None, tools_index
         if not cap_id or not name or name in RESERVED_PERMISSION_KEYS:
             continue
         tags = {str(x).lower() for x in (tool.get("policy_tags") or [])}
-        if cap_id in denied_actions or name in denied_actions or typ in denied_types or bool(tags & UNSAFE_TAGS):
+        typ_norm = _norm(typ)
+        aliases = _tool_permission_aliases(tool, cap_id, name, typ, tags)
+        if (aliases & denied_values) or typ_norm in denied_type_values or bool(tags & UNSAFE_TAGS):
             permission[name] = "deny"
             continue
-        allowed = cap_id in allowed_ids or name in allowed_actions or cap_id in allowed_actions or typ in allowed_types
+        allowed = allow_all_generated_tools or bool(aliases & allowed_values) or typ_norm in allowed_type_values
         if not allowed:
             continue
         if not _external_system_allowed(_tool_external_systems(tool, tags), allowed_external_systems):
