@@ -196,3 +196,68 @@ async def test_chat_handles_malformed_usage_payload_without_500(tmp_path, monkey
     assert body["usage"]["output_tokens"] == 0
     assert body["usage"]["cost"] == 0.0
     await client.close()
+
+@pytest.mark.asyncio
+async def test_chat_slash_uses_command_api(tmp_path, monkeypatch):
+    class SlashClient(FakeOpenCodeClient):
+        def __init__(self):
+            super().__init__(); self.execute_command_called=0; self.send_message_called=0; self.last_arguments=''
+        async def list_commands(self, timeout_seconds=30):
+            return [{"name": "java-cucumber-generator"}]
+        async def execute_command(self, session_id, *, command, arguments, model, agent, message_id=None):
+            self.execute_command_called += 1; self.last_arguments = arguments
+            assistant = {"id": "a-1", "role": "assistant", "parts": [{"type": "text", "text": "skill command result"}]}
+            self.messages[session_id].append({"id":"u-1","role":"user","parts":[{"type":"text","text":"/x"}]}); self.messages[session_id].append(assistant)
+            return {"message": assistant}
+        async def send_message(self, *args, **kwargs):
+            self.send_message_called += 1
+            raise AssertionError('send_message should not be called')
+
+    state = tmp_path / 'state'; state.mkdir(parents=True)
+    (state / 'skills-index.json').write_text(json.dumps({"skills":[{"efp_name":"java-cucumber-generator","opencode_name":"java-cucumber-generator","description":"Generate Java Cucumber scaffolding","opencode_supported":True,"runtime_equivalence":True,"programmatic":False,"missing_tools":[],"missing_opencode_tools":[]}]}), encoding='utf-8')
+    cfg = tmp_path / 'opencode.json'; cfg.write_text(json.dumps({"permission":{"skill":{"java-cucumber-generator":"allow"}}}), encoding='utf-8')
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('OPENCODE_CONFIG', str(cfg))
+    fake = SlashClient(); app = create_app(Settings.from_env(), opencode_client=fake); client = TestClient(TestServer(app)); await client.start_server()
+    r = await client.post('/api/chat', json={"message":"/java-cucumber-generator hello world","session_id":"s1"}); p = await r.json()
+    assert r.status == 200 and p['response'] == 'skill command result'
+    assert fake.execute_command_called == 1 and fake.send_message_called == 0 and fake.last_arguments == 'hello world'
+    assert any(e['type']=='skill.detected' for e in p['runtime_events']) and any(e['type']=='skill.command.executed' for e in p['runtime_events'])
+    assert p['_llm_debug']['skill_invocation']['used_command_api'] is True
+    await client.close()
+
+@pytest.mark.asyncio
+async def test_chat_slash_blocked_programmatic(tmp_path, monkeypatch):
+    class C(FakeOpenCodeClient):
+        async def list_commands(self, timeout_seconds=30): return []
+        async def execute_command(self, *args, **kwargs): raise AssertionError()
+        async def send_message(self, *args, **kwargs): raise AssertionError()
+    state=tmp_path/'state'; state.mkdir(parents=True)
+    (state/'skills-index.json').write_text(json.dumps({"skills":[{"efp_name":"java-cucumber-generator","opencode_name":"java-cucumber-generator","opencode_supported":True,"runtime_equivalence":False,"programmatic":True,"missing_tools":[],"missing_opencode_tools":[]}]}), encoding='utf-8')
+    cfg=tmp_path/'opencode.json'; cfg.write_text(json.dumps({"permission":{"skill":{"java-cucumber-generator":"allow"}}}), encoding='utf-8')
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('OPENCODE_CONFIG', str(cfg))
+    client=TestClient(TestServer(create_app(Settings.from_env(), opencode_client=C()))); await client.start_server()
+    r=await client.post('/api/chat', json={"message":"/java-cucumber-generator hello","session_id":"s2"}); p=await r.json()
+    assert r.status==200 and 'programmatic_skill_requires_opencode_wrapper' in p['response']
+    assert any(e['type']=='skill.blocked' for e in p['runtime_events'])
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_slash_fallback_prompt(tmp_path, monkeypatch):
+    class C(FakeOpenCodeClient):
+        def __init__(self): super().__init__(); self.parts=None
+        async def list_commands(self, timeout_seconds=30): return []
+        async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+            self.parts=parts
+            return await super().send_message(session_id, parts=parts, model=model, agent=agent, system=system, message_id=message_id, no_reply=no_reply, tools=tools)
+    state=tmp_path/'state'; state.mkdir(parents=True)
+    (state/'skills-index.json').write_text(json.dumps({"skills":[{"efp_name":"java-cucumber-generator","opencode_name":"java-cucumber-generator","opencode_supported":True,"runtime_equivalence":True,"programmatic":False,"missing_tools":[],"missing_opencode_tools":[]}]}), encoding='utf-8')
+    cfg=tmp_path/'opencode.json'; cfg.write_text(json.dumps({"permission":{"skill":{"java-cucumber-generator":"allow"}}}), encoding='utf-8')
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('OPENCODE_CONFIG', str(cfg))
+    fake=C(); client=TestClient(TestServer(create_app(Settings.from_env(), opencode_client=fake))); await client.start_server()
+    r=await client.post('/api/chat', json={"message":"/java-cucumber-generator hello world","session_id":"s3"}); p=await r.json()
+    assert r.status==200
+    assert 'Use the native OpenCode `skill` tool' in fake.parts[0]['text']
+    assert fake.parts[0]['text'] != '/java-cucumber-generator hello world'
+    assert p['response']
+    await client.close()
