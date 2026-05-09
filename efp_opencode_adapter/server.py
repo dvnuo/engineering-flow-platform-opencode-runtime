@@ -18,6 +18,7 @@ from .app_keys import (
     RECOVERY_MANAGER_KEY,
     EVENT_BRIDGE_KEY,
     EVENT_BRIDGE_TASK_KEY,
+    OPENCODE_PROCESS_MANAGER_KEY,
 )
 
 from .capabilities import build_capability_catalog
@@ -45,6 +46,8 @@ from .usage_tracker import UsageTracker
 from .opencode_config import build_opencode_config, normalize_opencode_provider_id, write_main_agent_prompt, write_opencode_config
 from .opencode_auth import build_opencode_auth_from_runtime_config
 from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_status_payload, sanitize_profile_config_for_storage, sanitize_public_secrets
+from .runtime_env import build_runtime_env_from_config, read_runtime_env_file, write_runtime_env_file
+from .opencode_process import OpenCodeProcessManager
 from .session_store import SessionStore
 from .task_store import TaskStore
 from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_handler
@@ -153,26 +156,40 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
         else:
             warnings.append("opencode auth update failed; manual auth or restart may be required")
             auth_update_status = "failed"
-    patch_result: dict = {"success": False, "pending_restart": True}
-    if hasattr(client, "patch_config"):
-        try:
-            patch_result = await client.patch_config(generated_config)
-        except Exception:
-            patch_result = {"success": False, "pending_restart": True}
-        pending_restart = bool(patch_result.get("pending_restart", not patch_result.get("success", False)))
-    if pending_restart:
-        warnings.append("opencode config patch unsupported; restart may be required")
-    if pending_restart:
-        status, applied = "pending_restart", False
-    elif auth_update_status == "failed":
-        status, applied = "partially_applied", False
+    env_result = build_runtime_env_from_config(settings, runtime_config)
+    env_path = write_runtime_env_file(settings, env_result.env)
+    manager = request.app.get(OPENCODE_PROCESS_MANAGER_KEY)
+    restart_performed = False
+    health_ok = None
+    opencode_pid = None
+    restart_meta = {}
+    if manager:
+        restart_meta = await manager.restart(env_result.env, reason="runtime_profile_apply")
+        restart_performed = True
+        health_ok = bool(restart_meta.get("health_ok"))
+        opencode_pid = restart_meta.get("pid")
+        pending_restart = not health_ok
+        if pending_restart:
+            status, applied, last_error = "failed", False, "opencode_restart_failed"
+        else:
+            status, applied = "applied", True
     else:
-        status, applied = "applied", True
-    ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status=status, pending_restart=pending_restart, warnings=warnings, updated_sections=updated_sections, last_apply_error=last_error, applied=applied))
-    response = {"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "updated_sections": updated_sections, "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "patch_config_result": sanitize_public_secrets({"success": patch_result.get("success"), "pending_restart": patch_result.get("pending_restart"), "status": patch_result.get("status")}), "auth_update_status": auth_update_status, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "status_endpoint": "/api/internal/runtime-profile/status"}
+        patch_result: dict = {"success": False, "pending_restart": True}
+        if hasattr(client, "patch_config"):
+            try:
+                patch_result = await client.patch_config(generated_config)
+            except Exception:
+                patch_result = {"success": False, "pending_restart": True}
+            pending_restart = bool(patch_result.get("pending_restart", not patch_result.get("success", False)))
+        if pending_restart:
+            warnings.append("opencode config patch unsupported; restart may be required")
+        status, applied = ("pending_restart", False) if pending_restart else ("applied", True)
+    overlay = ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status=status, pending_restart=pending_restart, warnings=warnings, updated_sections=updated_sections, last_apply_error=last_error, applied=applied, env_hash=env_result.env_hash, env_path=str(env_path), restart_performed=restart_performed, opencode_pid=opencode_pid, last_restart_at=restart_meta.get("last_restart_at") if restart_meta else None, last_restart_reason=restart_meta.get("last_restart_reason") if restart_meta else None, health_ok=health_ok)
+    ProfileOverlayStore(settings).save(overlay)
+    response = {"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "env_written": True, "env_hash": env_result.env_hash, "env_path": str(env_path), "updated_sections": sorted(set(updated_sections + env_result.updated_sections)), "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "auth_update_status": auth_update_status, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "restart_performed": restart_performed, "opencode_pid": opencode_pid, "health_ok": health_ok, "status_endpoint": "/api/internal/runtime-profile/status"}
     if auth_build.warning:
         response["auth_warning"] = auth_build.warning
-    return web.json_response(response)
+    return web.json_response(response, status=500 if manager and pending_restart else 200)
 
 
 async def runtime_profile_status_handler(request: web.Request) -> web.Response:
@@ -200,6 +217,9 @@ async def effective_config_handler(request: web.Request) -> web.Response:
             auth = {}
     auth_obj = auth.get(provider) if isinstance(auth, dict) else None
     overlay = ProfileOverlayStore(settings).load()
+    profile_cfg = overlay.config if overlay else {}
+    github_cfg = profile_cfg.get("github") if isinstance(profile_cfg.get("github"), dict) else {}
+    proxy_cfg = profile_cfg.get("proxy") if isinstance(profile_cfg.get("proxy"), dict) else {}
     return web.json_response(
         {
             "engine": "opencode",
@@ -213,6 +233,11 @@ async def effective_config_handler(request: web.Request) -> web.Response:
                 "runtime_profile_id": overlay.runtime_profile_id if overlay else None,
                 "revision": overlay.revision if overlay else None,
             },
+            "external_tools": {
+                "github": {"enabled": bool(github_cfg), "base_url": github_cfg.get("api_base_url") or "https://api.github.com", "token_present": bool(github_cfg.get("api_token"))},
+                "proxy": {"enabled": bool(proxy_cfg.get("enabled")), "url_present": bool(proxy_cfg.get("url")), "password_present": bool(proxy_cfg.get("password"))},
+                "env_file": {"present": bool(overlay and overlay.env_path), "path": overlay.env_path if overlay else None, "hash": overlay.env_hash if overlay else None},
+            },
         }
     )
 
@@ -225,7 +250,7 @@ async def capabilities_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "capabilities unavailable", "engine": "opencode"}, status=500)
 
 
-def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None, *, start_event_bridge: bool | None = None) -> web.Application:
+def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None, *, start_event_bridge: bool | None = None, opencode_process_manager: OpenCodeProcessManager | None = None) -> web.Application:
     app = web.Application()
     app[SETTINGS_KEY] = settings
     state_paths = ensure_state_dirs(settings)
@@ -239,6 +264,8 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     injected_client = opencode_client is not None
     client = opencode_client or OpenCodeClient(settings)
     app[OPENCODE_CLIENT_KEY] = client
+    if opencode_process_manager is not None:
+        app[OPENCODE_PROCESS_MANAGER_KEY] = opencode_process_manager
     app.on_cleanup.append(cleanup_task_background_tasks)
     app[PORTAL_METADATA_CLIENT_KEY] = PortalMetadataClient(settings, pending_file=state_paths.portal_metadata_pending_file)
     app[RECOVERY_MANAGER_KEY] = RecoveryManager(settings=settings, state_paths=state_paths, session_store=app[SESSION_STORE_KEY], chatlog_store=app[CHATLOG_STORE_KEY], opencode_client=app[OPENCODE_CLIENT_KEY])
@@ -285,6 +312,16 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             print(f"recovery failed: {exc}")
 
     app.on_startup.append(_run_recovery)
+    async def _managed_opencode_startup(app):
+        manager = app.get(OPENCODE_PROCESS_MANAGER_KEY)
+        if manager:
+            env_path = settings.adapter_state_dir / "opencode.env"
+            if env_path.exists():
+                env = read_runtime_env_file(env_path)
+            else:
+                env = build_runtime_env_from_config(settings, {}).env
+            await manager.start(env, reason="startup")
+
     async def _start_event_bridge(app):
         bridge = app.get(EVENT_BRIDGE_KEY)
         if bridge:
@@ -294,9 +331,15 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
         if task:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+    app.on_startup.append(_managed_opencode_startup)
     if should_start_event_bridge:
         app.on_startup.append(_start_event_bridge)
         app.on_cleanup.append(_cleanup_event_bridge)
+    async def _stop_managed_opencode(app):
+        manager = app.get(OPENCODE_PROCESS_MANAGER_KEY)
+        if manager:
+            await manager.stop()
+    app.on_cleanup.append(_stop_managed_opencode)
     return app
 
 
@@ -318,12 +361,19 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--opencode-url", default=None)
+    parser.add_argument("--manage-opencode", action="store_true")
     args = parser.parse_args()
     settings = Settings.from_env(opencode_url=args.opencode_url)
     print(f"adapter listening on {args.host}:{args.port}")
     print(f"opencode url {settings.opencode_url}")
     print(f"configured opencode version {settings.opencode_version or 'not enforced'}")
-    web.run_app(create_app(settings), host=args.host, port=args.port)
+    if args.manage_opencode:
+        client = OpenCodeClient(settings)
+        manager = OpenCodeProcessManager(settings, client)
+        app = create_app(settings, client, opencode_process_manager=manager)
+    else:
+        app = create_app(settings)
+    web.run_app(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

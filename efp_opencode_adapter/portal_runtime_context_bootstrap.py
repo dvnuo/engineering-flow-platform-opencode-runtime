@@ -7,6 +7,7 @@ import aiohttp
 from .opencode_config import build_opencode_config, normalize_opencode_provider_id, write_opencode_config
 from .opencode_auth import build_opencode_auth_from_runtime_config
 from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_profile_config_for_storage
+from .runtime_env import build_runtime_env_from_config, write_runtime_env_file
 from .settings import Settings
 
 
@@ -82,6 +83,8 @@ async def _run(workspace_dir: Path) -> int:
     if auth_build.warning:
         warnings.append(auth_build.warning)
 
+    env_result = build_runtime_env_from_config(settings, runtime_config if isinstance(runtime_config, dict) else {})
+    env_path = write_runtime_env_file(settings, env_result.env)
     ProfileOverlayStore(settings).save(ProfileOverlay(
         runtime_profile_id=runtime_profile_id,
         revision=revision,
@@ -94,9 +97,11 @@ async def _run(workspace_dir: Path) -> int:
         updated_sections=updated_sections,
         last_apply_error=None,
         applied=True,
+        env_hash=env_result.env_hash,
+        env_path=str(env_path),
     ))
 
-    out = {"status": "ok", "runtime_profile_id": runtime_profile_id, "revision": revision, "provider": provider or None, "model": generated.get("agent", {}).get("efp-main", {}).get("model"), "auth_written": auth_written, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "config_written": True, "config_hash": config_hash}
+    out = {"env_written": True, "env_hash": env_result.env_hash}
     if auth_build.warning:
         out["auth_warning"] = auth_build.warning
     print(json.dumps(out))
