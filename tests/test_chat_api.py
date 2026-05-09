@@ -27,6 +27,7 @@ async def test_chat_and_stream(tmp_path, monkeypatch):
     assert p1["assistant_message_id"].startswith("a-")
     assert p1["_llm_debug"]["engine"] == "opencode"
     assert p1["_llm_debug"]["opencode_session_id"]
+    assert p1["_llm_debug"].get("attachments") == []
     tc = p1["_llm_debug"]["trace_context"]
     assert tc["agent_id"] == "agent-obs-1"
     assert tc["runtime_type"] == "opencode"

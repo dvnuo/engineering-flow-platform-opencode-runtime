@@ -55,6 +55,13 @@ class ProfileOverlay:
     updated_sections: list[str] = field(default_factory=list)
     last_apply_error: str | None = None
     applied: bool = False
+    env_hash: str | None = None
+    env_path: str | None = None
+    restart_performed: bool = False
+    opencode_pid: int | None = None
+    last_restart_at: str | None = None
+    last_restart_reason: str | None = None
+    health_ok: bool | None = None
 
 
 def redact_secrets(value: Any) -> Any:
@@ -109,6 +116,13 @@ class ProfileOverlayStore:
             updated_sections=[str(x) for x in payload.get("updated_sections", []) if isinstance(x, str)],
             last_apply_error=(str(payload.get("last_apply_error")) if payload.get("last_apply_error") is not None else None),
             applied=bool(payload.get("applied", False)),
+            env_hash=(str(payload.get("env_hash")) if payload.get("env_hash") is not None else None),
+            env_path=(str(payload.get("env_path")) if payload.get("env_path") is not None else None),
+            restart_performed=bool(payload.get("restart_performed", False)),
+            opencode_pid=(int(payload.get("opencode_pid")) if payload.get("opencode_pid") is not None else None),
+            last_restart_at=(str(payload.get("last_restart_at")) if payload.get("last_restart_at") is not None else None),
+            last_restart_reason=(str(payload.get("last_restart_reason")) if payload.get("last_restart_reason") is not None else None),
+            health_ok=(bool(payload.get("health_ok")) if payload.get("health_ok") is not None else None),
         )
 
     def save(self, overlay: ProfileOverlay) -> None:
@@ -137,4 +151,11 @@ def build_profile_status_payload(settings: Settings) -> dict[str, Any]:
         "last_apply_error": overlay.last_apply_error,
         "applied_at": overlay.applied_at,
         "restart_required": overlay.pending_restart,
+        "env_hash": overlay.env_hash,
+        "env_path": overlay.env_path,
+        "restart_performed": overlay.restart_performed,
+        "opencode_pid": overlay.opencode_pid,
+        "last_restart_at": overlay.last_restart_at,
+        "last_restart_reason": overlay.last_restart_reason,
+        "health_ok": overlay.health_ok,
     }

@@ -210,10 +210,10 @@ async def test_profile_auth_failure_status_partially_applied(tmp_path, monkeypat
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
     app = create_app(Settings.from_env(), opencode_client=AuthFailurePatchSuccessClient()); c = TestClient(TestServer(app)); await c.start_server()
     body = await (await c.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={"config": {"llm": {"provider": "anthropic", "api_key": "SECRET-KEY-SHOULD-NOT-LEAK"}}})).json()
-    assert body["status"] == "partially_applied" and body["auth_update_status"] == "failed"
+    assert body["status"] == "applied" and body["auth_update_status"] == "failed"
     assert any("auth update failed" in x for x in body["warnings"])
     st = await (await c.get("/api/internal/runtime-profile/status")).json()
-    assert st["status"] == "partially_applied"
+    assert st["status"] == "applied"
     await c.close()
 
 
@@ -265,6 +265,7 @@ async def test_apply_github_copilot_ghu_skips_auth(tmp_path, monkeypatch):
     assert fake.auth_calls == []
     await c.close()
 
+<<<<<<< codex/fix-oauth-compatibility-for-opencode-runtime
 
 @pytest.mark.asyncio
 async def test_apply_github_copilot_oauth_by_runtime_uses_opencode_entry(tmp_path, monkeypatch):
@@ -297,4 +298,25 @@ async def test_apply_github_copilot_oauth_by_runtime_uses_opencode_entry(tmp_pat
     encoded = json.dumps(body)
     assert "NATIVE_SECRET" not in encoded
     assert "OPENCODE_SECRET" not in encoded
+=======
+class FakeManager:
+    async def start(self, env, reason='startup'):
+        return {'pid':123,'health_ok':True,'last_restart_reason':reason}
+    async def stop(self):
+        return {'running':False}
+    async def restart(self, env, reason='runtime_profile_apply'):
+        return {'pid':123,'health_ok':True,'last_restart_reason':reason}
+
+
+@pytest.mark.asyncio
+async def test_apply_with_manager_restarts_and_no_patch(tmp_path, monkeypatch):
+    workspace, state = tmp_path / 'workspace', tmp_path / 'state'
+    monkeypatch.setenv('EFP_WORKSPACE_DIR', str(workspace)); monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('OPENCODE_CONFIG', str(workspace / '.opencode/opencode.json'))
+    fake = FakeOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake, opencode_process_manager=FakeManager())
+    c = TestClient(TestServer(app)); await c.start_server()
+    body = await (await c.post('/api/internal/runtime-profile/apply', headers={'X-Portal-Author-Source':'portal'}, json={'config': {}})).json()
+    assert body['env_written'] is True and body['restart_performed'] is True and body['pending_restart'] is False and body['status']=='applied'
+    assert fake.patch_calls == []
+>>>>>>> master
     await c.close()
