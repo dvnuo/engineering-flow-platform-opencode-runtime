@@ -11,6 +11,34 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from .settings import Settings
 
 SECRET_MARKERS = ("TOKEN", "PASSWORD", "SECRET", "API_KEY", "ACCESS", "REFRESH", "AUTHORIZATION")
+MANAGED_EXTERNAL_ENV_KEYS = {
+    "GITHUB_TOKEN", "GITHUB_ACCESS_TOKEN", "GITHUB_API_BASE_URL", "EFP_GITHUB_CONFIG_JSON",
+    "JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_PASSWORD", "JIRA_TOKEN", "JIRA_PROJECT_KEY", "EFP_JIRA_INSTANCES_JSON",
+    "CONFLUENCE_BASE_URL", "CONFLUENCE_USERNAME", "CONFLUENCE_EMAIL", "CONFLUENCE_API_TOKEN", "CONFLUENCE_PASSWORD", "CONFLUENCE_TOKEN", "CONFLUENCE_SPACE_KEY", "EFP_CONFLUENCE_INSTANCES_JSON",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+}
+_REDACTED_VALUES = {"***REDACTED***", "[redacted]", "REDACTED"}
+
+
+def strip_managed_external_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    source = dict(base_env or os.environ)
+    return {k: v for k, v in source.items() if k not in MANAGED_EXTERNAL_ENV_KEYS}
+
+
+def _section_enabled(section: dict) -> bool:
+    if not isinstance(section, dict):
+        return False
+    if section.get("enabled") is False:
+        return False
+    return True
+
+
+def _clean_secret(value) -> str:
+    text = str(value or "").strip()
+    if not text or text in _REDACTED_VALUES:
+        return ""
+    return text
 
 
 @dataclass(frozen=True)
@@ -58,7 +86,7 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
 
     proxy = cfg.get("proxy") if isinstance(cfg.get("proxy"), dict) else {}
     if proxy.get("enabled") and proxy.get("url"):
-        proxy_url = _inject_proxy_auth(str(proxy["url"]), proxy.get("username"), proxy.get("password"))
+        proxy_url = _inject_proxy_auth(str(proxy["url"]), _clean_secret(proxy.get("username")), _clean_secret(proxy.get("password")))
         for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
             env[key] = proxy_url
         no_proxy = str(proxy.get("no_proxy") or "127.0.0.1,localhost")
@@ -67,28 +95,40 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         updated.append("proxy")
 
     github = cfg.get("github") if isinstance(cfg.get("github"), dict) else {}
-    if github:
-        token = github.get("api_token")
+    if _section_enabled(github):
+        token = _clean_secret(github.get("api_token") or github.get("token") or github.get("access_token"))
+        base_url = str(github.get("api_base_url") or github.get("base_url") or "https://api.github.com").strip().rstrip("/")
         if token:
-            env["GITHUB_TOKEN"] = str(token)
-            env["GITHUB_ACCESS_TOKEN"] = str(token)
-        env["GITHUB_API_BASE_URL"] = str(github.get("api_base_url") or "https://api.github.com")
-        env["EFP_GITHUB_CONFIG_JSON"] = json.dumps(github, ensure_ascii=False, separators=(",", ":"))
+            env["GITHUB_TOKEN"] = token
+            env["GITHUB_ACCESS_TOKEN"] = token
+        env["GITHUB_API_BASE_URL"] = base_url
+        normalized_github = dict(github)
+        if token:
+            normalized_github["api_token"] = token
+        normalized_github["base_url"] = base_url
+        normalized_github["api_base_url"] = base_url
+        env["EFP_GITHUB_CONFIG_JSON"] = json.dumps(normalized_github, ensure_ascii=False, separators=(",", ":"))
         updated.append("github")
 
     def _apply_instance(section: str, prefix: str, project_key: str) -> None:
         source = cfg.get(section) if isinstance(cfg.get(section), dict) else {}
+        if not _section_enabled(source):
+            return
         instances = source.get("instances") if isinstance(source.get("instances"), list) else []
         selected = None
         for item in instances:
-            if isinstance(item, dict) and item.get("enabled", True) and item.get("url"):
+            if not isinstance(item, dict):
+                continue
+            if item.get("enabled") is False:
+                continue
+            if item.get("url"):
                 selected = item
                 break
         if not selected:
             return
         env[f"{prefix}_BASE_URL"] = _trim_url(str(selected.get("url")))
-        username = selected.get("username") or selected.get("email")
-        token = selected.get("token") or selected.get("password")
+        username = str(selected.get("username") or selected.get("email") or "").strip()
+        token = _clean_secret(selected.get("token") or selected.get("api_token") or selected.get("password"))
         if username and token:
             env[f"{prefix}_EMAIL"] = str(username)
             env[f"{prefix}_API_TOKEN"] = str(token)
@@ -104,12 +144,15 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
 
     git = cfg.get("git") if isinstance(cfg.get("git"), dict) else {}
     if git:
-        if git.get("author_name"):
-            env["GIT_AUTHOR_NAME"] = str(git["author_name"])
-            env["GIT_COMMITTER_NAME"] = str(git["author_name"])
-        if git.get("author_email"):
-            env["GIT_AUTHOR_EMAIL"] = str(git["author_email"])
-            env["GIT_COMMITTER_EMAIL"] = str(git["author_email"])
+        git_user = git.get("user") if isinstance(git.get("user"), dict) else {}
+        author_name = git.get("author_name") or git_user.get("name")
+        author_email = git.get("author_email") or git_user.get("email")
+        if author_name:
+            env["GIT_AUTHOR_NAME"] = str(author_name)
+            env["GIT_COMMITTER_NAME"] = str(author_name)
+        if author_email:
+            env["GIT_AUTHOR_EMAIL"] = str(author_email)
+            env["GIT_COMMITTER_EMAIL"] = str(author_email)
         updated.append("git")
     debug = cfg.get("debug") if isinstance(cfg.get("debug"), dict) else {}
     if debug.get("enabled"):

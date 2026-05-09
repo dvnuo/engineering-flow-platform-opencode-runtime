@@ -319,8 +319,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             if env_path.exists():
                 env = read_runtime_env_file(env_path)
             else:
-                overlay = ProfileOverlayStore(settings).load()
-                env = build_runtime_env_from_config(settings, overlay.config if overlay else {}).env
+                env = build_runtime_env_from_config(settings, {}).env
             await manager.start(env, reason="startup")
 
     async def _start_event_bridge(app):
