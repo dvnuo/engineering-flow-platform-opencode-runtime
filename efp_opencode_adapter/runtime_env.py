@@ -94,49 +94,71 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         env["no_proxy"] = no_proxy
         updated.append("proxy")
 
-    github = cfg.get("github") if isinstance(cfg.get("github"), dict) else {}
-    if _section_enabled(github):
+    github = cfg.get("github") if isinstance(cfg.get("github"), dict) else None
+    if isinstance(github, dict) and _section_enabled(github):
         token = _clean_secret(github.get("api_token") or github.get("token") or github.get("access_token"))
-        base_url = str(github.get("api_base_url") or github.get("base_url") or "https://api.github.com").strip().rstrip("/")
         if token:
+            base_url = str(github.get("api_base_url") or github.get("base_url") or "https://api.github.com").strip().rstrip("/")
             env["GITHUB_TOKEN"] = token
             env["GITHUB_ACCESS_TOKEN"] = token
-        env["GITHUB_API_BASE_URL"] = base_url
-        normalized_github = dict(github)
-        if token:
-            normalized_github["api_token"] = token
-        normalized_github["base_url"] = base_url
-        normalized_github["api_base_url"] = base_url
-        env["EFP_GITHUB_CONFIG_JSON"] = json.dumps(normalized_github, ensure_ascii=False, separators=(",", ":"))
-        updated.append("github")
+            env["GITHUB_API_BASE_URL"] = base_url
+            normalized_github = {"enabled": True, "api_token": token, "base_url": base_url, "api_base_url": base_url}
+            env["EFP_GITHUB_CONFIG_JSON"] = json.dumps(normalized_github, ensure_ascii=False, separators=(",", ":"))
+            updated.append("github")
 
     def _apply_instance(section: str, prefix: str, project_key: str) -> None:
         source = cfg.get(section) if isinstance(cfg.get(section), dict) else {}
         if not _section_enabled(source):
             return
-        instances = source.get("instances") if isinstance(source.get("instances"), list) else []
-        selected = None
+        instances = source.get("instances") if isinstance(source.get("instances"), list) else None
+        if not isinstance(instances, list):
+            return
+        safe_instances = []
         for item in instances:
             if not isinstance(item, dict):
                 continue
             if item.get("enabled") is False:
                 continue
-            if item.get("url"):
-                selected = item
-                break
-        if not selected:
+            raw_url = str(item.get("url") or "").strip()
+            if not raw_url:
+                continue
+            username = str(item.get("username") or item.get("email") or "").strip()
+            token = _clean_secret(item.get("token") or item.get("api_token") or item.get("password"))
+            if not token:
+                continue
+            safe_item = {
+                "enabled": True,
+                "url": _trim_url(raw_url),
+                "token": token,
+            }
+            if item.get("name"):
+                safe_item["name"] = str(item.get("name"))
+            if username:
+                safe_item["username"] = username
+            if project_key == "project":
+                proj = item.get("project") or item.get("project_key")
+                if proj:
+                    safe_item["project"] = str(proj)
+            else:
+                space = item.get("space") or item.get("space_key")
+                if space:
+                    safe_item["space"] = str(space)
+            safe_instances.append(safe_item)
+        if not safe_instances:
+            warnings.append(f"{section} enabled but no valid instance credential")
             return
-        env[f"{prefix}_BASE_URL"] = _trim_url(str(selected.get("url")))
-        username = str(selected.get("username") or selected.get("email") or "").strip()
-        token = _clean_secret(selected.get("token") or selected.get("api_token") or selected.get("password"))
+        selected = safe_instances[0]
+        env[f"{prefix}_BASE_URL"] = selected["url"]
+        username = str(selected.get("username") or "").strip()
+        token = selected["token"]
         if username and token:
-            env[f"{prefix}_EMAIL"] = str(username)
-            env[f"{prefix}_API_TOKEN"] = str(token)
+            env[f"{prefix}_EMAIL"] = username
+            env[f"{prefix}_API_TOKEN"] = token
         elif token:
-            env[f"{prefix}_TOKEN"] = str(token)
+            env[f"{prefix}_TOKEN"] = token
         if selected.get(project_key):
             env[f"{prefix}_{'PROJECT_KEY' if project_key == 'project' else 'SPACE_KEY'}"] = str(selected.get(project_key))
-        env[f"EFP_{prefix}_INSTANCES_JSON"] = json.dumps(instances, ensure_ascii=False, separators=(",", ":"))
+        env[f"EFP_{prefix}_INSTANCES_JSON"] = json.dumps(safe_instances, ensure_ascii=False, separators=(",", ":"))
         updated.append(section)
 
     _apply_instance("jira", "JIRA", "project")

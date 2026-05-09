@@ -70,6 +70,55 @@ def test_runtime_env_does_not_export_redacted_placeholders(tmp_path, monkeypatch
     assert "JIRA_TOKEN" not in env and "JIRA_API_TOKEN" not in env
 
 
+def test_empty_config_does_not_emit_external_json(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    env = build_runtime_env_from_config(s, {}).env
+    assert "EFP_GITHUB_CONFIG_JSON" not in env
+    assert "GITHUB_API_BASE_URL" not in env
+    assert "EFP_JIRA_INSTANCES_JSON" not in env
+    assert "EFP_CONFLUENCE_INSTANCES_JSON" not in env
+
+
+def test_redacted_github_placeholder_not_in_json_or_env(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    env = build_runtime_env_from_config(s, {"github": {"enabled": True, "api_token": "***REDACTED***", "base_url": "https://ghe"}}).env
+    text = json.dumps(env)
+    assert "GITHUB_TOKEN" not in env
+    assert "EFP_GITHUB_CONFIG_JSON" not in env
+    assert "***REDACTED***" not in text
+
+
+def test_redacted_atlassian_placeholder_not_in_json_or_env(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    cfg = {
+        "jira": {"enabled": True, "instances": [{"url": "https://j", "username": "u", "token": "[redacted]"}]},
+        "confluence": {"enabled": True, "instances": [{"url": "https://c/wiki", "username": "u", "token": "REDACTED"}]},
+    }
+    env = build_runtime_env_from_config(s, cfg).env
+    text = json.dumps(env)
+    assert "JIRA_BASE_URL" not in env
+    assert "EFP_JIRA_INSTANCES_JSON" not in env
+    assert "CONFLUENCE_BASE_URL" not in env
+    assert "EFP_CONFLUENCE_INSTANCES_JSON" not in env
+    assert "[redacted]" not in text
+    assert "REDACTED" not in text
+
+
+def test_atlassian_aliases_still_work(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    cfg = {
+        "jira": {"enabled": True, "instances": [{"url": "https://j/", "email": "j@example.com", "api_token": "jt", "project_key": "PROJ"}]},
+        "confluence": {"enabled": True, "instances": [{"url": "https://c/wiki/", "email": "c@example.com", "api_token": "ct", "space_key": "SPACE"}]},
+    }
+    env = build_runtime_env_from_config(s, cfg).env
+    assert env["JIRA_EMAIL"] == "j@example.com" and env["JIRA_API_TOKEN"] == "jt" and env["JIRA_PROJECT_KEY"] == "PROJ"
+    assert env["CONFLUENCE_EMAIL"] == "c@example.com" and env["CONFLUENCE_API_TOKEN"] == "ct" and env["CONFLUENCE_SPACE_KEY"] == "SPACE"
+    jira_json = json.loads(env["EFP_JIRA_INSTANCES_JSON"])[0]
+    conf_json = json.loads(env["EFP_CONFLUENCE_INSTANCES_JSON"])[0]
+    assert jira_json == {"enabled": True, "url": "https://j", "token": "jt", "username": "j@example.com", "project": "PROJ"}
+    assert conf_json == {"enabled": True, "url": "https://c/wiki", "token": "ct", "username": "c@example.com", "space": "SPACE"}
+
+
 def test_strip_managed_external_env_removes_old_secret_but_keeps_path(monkeypatch):
     monkeypatch.setenv("JIRA_TOKEN", "old")
     monkeypatch.setenv("PATH", "/usr/bin")
