@@ -115,7 +115,7 @@ def test_atlassian_aliases_still_work(tmp_path, monkeypatch):
     assert env["CONFLUENCE_EMAIL"] == "c@example.com" and env["CONFLUENCE_API_TOKEN"] == "ct" and env["CONFLUENCE_SPACE_KEY"] == "SPACE"
     jira_json = json.loads(env["EFP_JIRA_INSTANCES_JSON"])[0]
     conf_json = json.loads(env["EFP_CONFLUENCE_INSTANCES_JSON"])[0]
-    assert jira_json == {"enabled": True, "url": "https://j", "token": "jt", "username": "j@example.com", "project": "PROJ"}
+    assert jira_json == {"enabled": True, "url": "https://j", "token": "jt", "username": "j@example.com", "project": "PROJ", "api_version": "3"}
     assert conf_json == {"enabled": True, "url": "https://c/wiki", "token": "ct", "username": "c@example.com", "space": "SPACE"}
 
 
@@ -136,6 +136,62 @@ def test_uppercase_bracket_redacted_placeholder_not_exported(tmp_path, monkeypat
     assert "EFP_CONFLUENCE_INSTANCES_JSON" not in env
     assert "[REDACTED]" not in text
 
+
+
+def test_jira_username_password_exports_password_not_api_token(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    cfg = {
+        "jira": {
+            "enabled": True,
+            "instances": [{"url": "https://jira.local", "username": "alice", "password": "pw", "project": "ENG"}],
+        }
+    }
+    env = build_runtime_env_from_config(s, cfg).env
+    assert env["JIRA_USERNAME"] == "alice"
+    assert env["JIRA_PASSWORD"] == "pw"
+    assert "JIRA_EMAIL" not in env
+    assert "JIRA_API_TOKEN" not in env
+    jira_json = json.loads(env["EFP_JIRA_INSTANCES_JSON"])[0]
+    assert jira_json["username"] == "alice"
+    assert jira_json["password"] == "pw"
+    assert "token" not in jira_json
+    assert jira_json["api_version"] == "2"
+
+
+def test_jira_username_api_token_exports_email_api_token(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    cfg = {
+        "jira": {
+            "enabled": True,
+            "instances": [{"url": "https://site.atlassian.net", "username": "alice@example.com", "api_token": "api-token", "project_key": "ENG"}],
+        }
+    }
+    env = build_runtime_env_from_config(s, cfg).env
+    assert env["JIRA_EMAIL"] == "alice@example.com"
+    assert env["JIRA_API_TOKEN"] == "api-token"
+    assert "JIRA_PASSWORD" not in env
+    jira_json = json.loads(env["EFP_JIRA_INSTANCES_JSON"])[0]
+    assert jira_json["token"] == "api-token"
+    assert "password" not in jira_json
+    assert jira_json["api_version"] == "3"
+
+
+def test_confluence_username_password_exports_password_not_api_token(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    cfg = {
+        "confluence": {
+            "enabled": True,
+            "instances": [{"url": "https://confluence.local", "username": "alice", "password": "pw", "space": "DOCS"}],
+        }
+    }
+    env = build_runtime_env_from_config(s, cfg).env
+    assert env["CONFLUENCE_USERNAME"] == "alice"
+    assert env["CONFLUENCE_PASSWORD"] == "pw"
+    assert "CONFLUENCE_EMAIL" not in env
+    assert "CONFLUENCE_API_TOKEN" not in env
+    conf_json = json.loads(env["EFP_CONFLUENCE_INSTANCES_JSON"])[0]
+    assert conf_json["password"] == "pw"
+    assert "token" not in conf_json
 
 def test_strip_managed_external_env_removes_old_secret_but_keeps_path(monkeypatch):
     monkeypatch.setenv("JIRA_TOKEN", "old")

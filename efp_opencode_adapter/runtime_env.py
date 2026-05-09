@@ -126,14 +126,19 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
             if not raw_url:
                 continue
             username = str(item.get("username") or item.get("email") or "").strip()
-            token = _clean_secret(item.get("token") or item.get("api_token") or item.get("password"))
-            if not token:
+            api_token = _clean_secret(item.get("api_token") or item.get("token"))
+            password = _clean_secret(item.get("password"))
+            credential_present = bool(api_token or password)
+            if not credential_present:
                 continue
             safe_item = {
                 "enabled": True,
                 "url": _trim_url(raw_url),
-                "token": token,
             }
+            if api_token:
+                safe_item["token"] = api_token
+            if password:
+                safe_item["password"] = password
             if item.get("name"):
                 safe_item["name"] = str(item.get("name"))
             if username:
@@ -146,6 +151,16 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
                 space = item.get("space") or item.get("space_key")
                 if space:
                     safe_item["space"] = str(space)
+            if password and not username and not api_token:
+                continue
+            if section == "jira":
+                api_version_raw = str(item.get("api_version") or "").strip()
+                if api_version_raw in {"2", "3"}:
+                    safe_item["api_version"] = api_version_raw
+                elif username and password and not api_token:
+                    safe_item["api_version"] = "2"
+                else:
+                    safe_item["api_version"] = "3"
             safe_instances.append(safe_item)
         if not safe_instances:
             warnings.append(f"{section} enabled but no valid instance credential")
@@ -153,12 +168,18 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         selected = safe_instances[0]
         env[f"{prefix}_BASE_URL"] = selected["url"]
         username = str(selected.get("username") or "").strip()
-        token = selected["token"]
-        if username and token:
+        api_token = _clean_secret(selected.get("token"))
+        password = _clean_secret(selected.get("password"))
+        if username and api_token:
             env[f"{prefix}_EMAIL"] = username
-            env[f"{prefix}_API_TOKEN"] = token
-        elif token:
-            env[f"{prefix}_TOKEN"] = token
+            env[f"{prefix}_API_TOKEN"] = api_token
+        elif username and password:
+            env[f"{prefix}_USERNAME"] = username
+            env[f"{prefix}_PASSWORD"] = password
+        elif api_token:
+            env[f"{prefix}_TOKEN"] = api_token
+        else:
+            return
         if selected.get(project_key):
             env[f"{prefix}_{'PROJECT_KEY' if project_key == 'project' else 'SPACE_KEY'}"] = str(selected.get(project_key))
         env[f"EFP_{prefix}_INSTANCES_JSON"] = json.dumps(safe_instances, ensure_ascii=False, separators=(",", ":"))
