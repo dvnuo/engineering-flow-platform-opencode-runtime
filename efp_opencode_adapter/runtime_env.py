@@ -18,7 +18,7 @@ MANAGED_EXTERNAL_ENV_KEYS = {
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
     "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
 }
-_REDACTED_VALUES = {"***REDACTED***", "[redacted]", "REDACTED"}
+_REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
 
 
 def strip_managed_external_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
@@ -36,7 +36,10 @@ def _section_enabled(section: dict) -> bool:
 
 def _clean_secret(value) -> str:
     text = str(value or "").strip()
-    if not text or text in _REDACTED_VALUES:
+    if not text:
+        return ""
+    normalized = text.lower()
+    if normalized in _REDACTED_VALUES:
         return ""
     return text
 
