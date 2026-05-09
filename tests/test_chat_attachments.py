@@ -80,3 +80,15 @@ def test_response_payload_redaction():
     assert "data:image/png;base64,AAAA" not in preview_text
     assert "data:application/pdf;base64,BBBB" not in preview_text
     assert "data:<redacted>" in preview_text
+    assert redacted["message"]["parts"][0]["url"] == "data:<redacted>"
+
+
+def test_response_payload_redaction_svg_and_plain_text():
+    payload = {"note": "x data:image/svg+xml;base64,AAAA y"}
+    redacted = _redact_attachment_payloads_for_debug(payload)
+    preview_text = json.dumps(safe_preview(redacted, 2000), ensure_ascii=False)
+    assert "AAAA" not in preview_text
+    assert "data:<redacted>;base64,<redacted>" in preview_text
+
+    plain = {"text": "this is not data url"}
+    assert _redact_attachment_payloads_for_debug(plain) == plain

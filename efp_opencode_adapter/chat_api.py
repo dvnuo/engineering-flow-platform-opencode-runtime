@@ -42,6 +42,8 @@ from .opencode_message_adapter import (
     message_role as adapter_message_role,
 )
 
+DATA_URL_RE = re.compile(r"data:[A-Za-z0-9.+/_-]+(?:;[A-Za-z0-9.+/_=-]+)*;base64,[A-Za-z0-9+/=]+")
+
 
 def _bad_request(error: str) -> web.HTTPBadRequest:
     return web.HTTPBadRequest(text=json.dumps({"error": error}), content_type="application/json")
@@ -156,7 +158,7 @@ def _redact_attachment_payloads_for_debug(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact_attachment_payloads_for_debug(item) for item in value]
     if isinstance(value, str):
-        return re.sub(r"data:[^\\s\"']+;base64,[A-Za-z0-9+/=]+", "data:<redacted>;base64,<redacted>", value)
+        return DATA_URL_RE.sub("data:<redacted>;base64,<redacted>", value)
     return value
 
 
