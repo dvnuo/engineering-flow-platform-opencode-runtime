@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -265,7 +266,7 @@ async def test_apply_github_copilot_ghu_skips_auth(tmp_path, monkeypatch):
     assert fake.auth_calls == []
     await c.close()
 
-<<<<<<< codex/fix-oauth-compatibility-for-opencode-runtime
+
 
 @pytest.mark.asyncio
 async def test_apply_github_copilot_oauth_by_runtime_uses_opencode_entry(tmp_path, monkeypatch):
@@ -298,7 +299,9 @@ async def test_apply_github_copilot_oauth_by_runtime_uses_opencode_entry(tmp_pat
     encoded = json.dumps(body)
     assert "NATIVE_SECRET" not in encoded
     assert "OPENCODE_SECRET" not in encoded
-=======
+    await c.close()
+
+
 class FakeManager:
     async def start(self, env, reason='startup'):
         return {'pid':123,'health_ok':True,'last_restart_reason':reason}
@@ -318,5 +321,11 @@ async def test_apply_with_manager_restarts_and_no_patch(tmp_path, monkeypatch):
     body = await (await c.post('/api/internal/runtime-profile/apply', headers={'X-Portal-Author-Source':'portal'}, json={'config': {}})).json()
     assert body['env_written'] is True and body['restart_performed'] is True and body['pending_restart'] is False and body['status']=='applied'
     assert fake.patch_calls == []
->>>>>>> master
     await c.close()
+
+
+def test_runtime_profile_apply_test_file_has_no_merge_conflict_markers():
+    text = Path(__file__).read_text(encoding="utf-8")
+    assert "<<<" + "<<<<" not in text
+    assert "===" + "====" not in text
+    assert ">>>" + ">>>>" not in text
