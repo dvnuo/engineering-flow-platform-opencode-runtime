@@ -92,8 +92,9 @@ def register_file_routes(app: web.Application) -> None:
             if upload is None:
                 raise ValueError("file is required")
             directory = request.query.get("directory") or request.query.get("path") or fields.get("directory") or fields.get("path") or "."
-            unzip = _truthy(request.query.get("unzip") or fields.get("unzip"))
-            if unzip:
+            unzip_requested = _truthy(request.query.get("unzip") or fields.get("unzip"))
+            is_zip_filename = upload.filename.lower().endswith(".zip")
+            if unzip_requested or is_zip_filename:
                 return web.json_response(file_service.extract_zip_safely(directory, upload.filename, upload.data))
             return web.json_response(file_service.upload_file(directory, upload.filename, upload.data))
         except Exception as exc:
@@ -106,9 +107,20 @@ def register_file_routes(app: web.Application) -> None:
                 payload = await request.json()
             elif request.content_type.startswith("multipart/") or request.content_type.startswith("application/x-www-form-urlencoded"):
                 payload = dict(await request.post())
+            raw_paths = payload.get("paths")
+            if raw_paths is not None:
+                if not isinstance(raw_paths, list) or not raw_paths:
+                    raise ValueError("paths is required")
+                paths = []
+                for item in raw_paths:
+                    if not isinstance(item, str) or not item.strip():
+                        raise ValueError("paths must contain non-empty strings")
+                    paths.append(item.strip())
+                return web.json_response(file_service.delete_paths(paths, recursive=True))
+
             path = payload.get("path") or request.query.get("path")
             if not path:
-                raise ValueError("path is required")
+                raise ValueError("paths is required")
             recursive = _truthy(str(payload.get("recursive") or request.query.get("recursive") or "false"))
             return web.json_response(file_service.delete_path(path, recursive=recursive))
         except PermissionError as exc:
@@ -120,7 +132,17 @@ def register_file_routes(app: web.Application) -> None:
 
     async def server_files_download(request):
         try:
-            file_path, filename, content_type = file_service.prepare_download(request.query.get("path") or ".")
+            paths = request.query.getall("paths", [])
+            if not paths:
+                single = request.query.get("path")
+                if single:
+                    paths = [single]
+            if not paths:
+                paths = ["."]
+            if len(paths) == 1:
+                file_path, filename, content_type = file_service.prepare_download(paths[0])
+            else:
+                file_path, filename, content_type = file_service.prepare_download_many(paths)
             resp = web.FileResponse(file_path)
             resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
             if content_type:
