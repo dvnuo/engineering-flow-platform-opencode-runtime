@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import quote
 
 import aiohttp
 
@@ -15,6 +16,34 @@ class PortalMetadataClient:
         self.pending_file = pending_file
         self._session = session
 
+
+
+    def _headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if self.settings.portal_internal_token:
+            headers["Authorization"] = f"Bearer {self.settings.portal_internal_token}"
+            headers["X-Portal-Internal-Token"] = self.settings.portal_internal_token
+        return headers
+
+    def _metadata_url(self, session_id: str) -> str:
+        base_url = (self.settings.portal_internal_base_url or "").rstrip("/")
+        agent = quote(self.settings.portal_agent_id or "", safe="")
+        sid = quote(session_id, safe="")
+        return f"{base_url}/api/internal/agents/{agent}/sessions/{sid}/metadata"
+
+    async def _parse_delete_response(self, resp) -> dict:
+        payload = None
+        try:
+            payload = await resp.json()
+        except Exception:
+            payload = None
+        if 200 <= resp.status < 300:
+            return {"success": True, "status": resp.status, "payload": payload}
+        if resp.status in {404, 405}:
+            return {"success": False, "skipped": True, "status": resp.status, "reason": "portal_metadata_delete_endpoint_unavailable"}
+        err = await resp.text()
+        return {"success": False, "status": resp.status, "error": safe_preview(err)}
+
     async def publish_session_metadata(self, *, session_id: str, latest_event_type: str, latest_event_state: str, request_id: str | None = None, task_id: str | None = None, summary: str | None = None, runtime_events: list[dict] | None = None, metadata: dict | None = None) -> dict:
         if not self.settings.portal_internal_base_url or not self.settings.portal_agent_id:
             return {"success": False, "skipped": True}
@@ -23,11 +52,8 @@ class PortalMetadataClient:
         safe_runtime_events = safe_preview(runtime_events[-50:], 4000)
         safe_metadata = safe_preview({**md, "latest_summary": summary, "engine": "opencode", "updated_at": utc_now_iso()}, 2000)
         payload = {"latest_event_type": latest_event_type, "latest_event_state": latest_event_state, "last_execution_id": request_id, "current_task_id": task_id or None, "runtime_events_json": json.dumps(safe_runtime_events, ensure_ascii=False), "metadata_json": json.dumps(safe_metadata, ensure_ascii=False)}
-        url = f"{self.settings.portal_internal_base_url.rstrip('/')}/api/internal/agents/{self.settings.portal_agent_id}/sessions/{session_id}/metadata"
-        headers = {}
-        if self.settings.portal_internal_token:
-            headers["Authorization"] = f"Bearer {self.settings.portal_internal_token}"
-            headers["X-Portal-Internal-Token"] = self.settings.portal_internal_token
+        url = self._metadata_url(session_id)
+        headers = self._headers()
         try:
             if self._session is not None:
                 resp = await self._session.put(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=self.settings.portal_metadata_timeout_seconds))
@@ -48,4 +74,23 @@ class PortalMetadataClient:
                 clean = {"url": url, "payload": safe_preview(payload, 4000), "error": safe_preview(str(exc), 1000)}
                 with self.pending_file.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(clean, ensure_ascii=False) + "\n")
+            return {"success": False, "error": safe_preview(str(exc))}
+
+    async def delete_session_metadata(self, session_id: str) -> dict:
+        if not self.settings.portal_internal_base_url or not self.settings.portal_agent_id:
+            return {"success": False, "skipped": True, "reason": "portal_metadata_not_configured"}
+        url = self._metadata_url(session_id)
+        headers = self._headers()
+        timeout = aiohttp.ClientTimeout(total=self.settings.portal_metadata_timeout_seconds)
+        try:
+            if self._session is not None:
+                resp = await self._session.delete(url, headers=headers, timeout=timeout)
+                try:
+                    return await self._parse_delete_response(resp)
+                finally:
+                    resp.release()
+            async with aiohttp.ClientSession() as s:
+                async with s.delete(url, headers=headers, timeout=timeout) as resp:
+                    return await self._parse_delete_response(resp)
+        except Exception as exc:
             return {"success": False, "error": safe_preview(str(exc))}

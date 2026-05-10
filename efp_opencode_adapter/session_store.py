@@ -38,6 +38,10 @@ class SessionRecord:
     partial_recovery: bool = False
 
 
+class SessionDeletedError(RuntimeError):
+    pass
+
+
 class SessionStore:
     def __init__(self, sessions_dir: Path):
         self.sessions_dir = sessions_dir
@@ -164,6 +168,8 @@ class SessionStore:
         agent: str | None,
     ) -> SessionRecord:
         record = self._sessions[portal_session_id]
+        if record.deleted:
+            return record
         updated = SessionRecord(
             **{
                 **asdict(record),
@@ -186,6 +192,8 @@ class SessionStore:
         last_message: str = "",
     ) -> SessionRecord:
         record = self._sessions[portal_session_id]
+        if record.deleted:
+            raise SessionDeletedError("session_deleted")
         updated = SessionRecord(
             portal_session_id=record.portal_session_id,
             opencode_session_id=opencode_session_id,

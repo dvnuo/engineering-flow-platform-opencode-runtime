@@ -81,3 +81,23 @@ def test_session_store_bad_message_count_defaults_to_zero(tmp_path):
     assert rec is not None
     assert rec.message_count == 0
     assert rec.opencode_session_id == "o1"
+
+
+def test_deleted_tombstone_not_revived_by_update(tmp_path):
+    store = SessionStore(tmp_path / "sessions")
+    store.upsert(_rec("p1", "ses-1"))
+    store.mark_deleted("p1")
+    rec = store.update_after_chat("p1", "u", "a", None, None)
+    assert rec.deleted is True
+    assert store.get("p1").deleted is True
+    assert store.list_active() == []
+
+
+def test_replace_mutation_rejects_deleted(tmp_path):
+    from efp_opencode_adapter.session_store import SessionDeletedError
+    store = SessionStore(tmp_path / "sessions")
+    store.upsert(_rec("p1", "ses-1"))
+    store.mark_deleted("p1")
+    import pytest
+    with pytest.raises(SessionDeletedError):
+        store.replace_opencode_session_after_mutation("p1", "ses-2", message_count=0)

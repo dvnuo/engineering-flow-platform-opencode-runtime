@@ -4,10 +4,11 @@ import json
 from typing import Any
 
 from aiohttp import web
-from .app_keys import CHATLOG_STORE_KEY, OPENCODE_CLIENT_KEY, SESSION_STORE_KEY
+from .app_keys import CHATLOG_STORE_KEY, OPENCODE_CLIENT_KEY, PORTAL_METADATA_CLIENT_KEY, SESSION_STORE_KEY
 
 from .opencode_client import OpenCodeClientError
 from .opencode_message_adapter import message_to_visible_text, to_efp_message
+from .thinking_events import safe_preview
 
 
 def _json_bad_request(error: str) -> web.HTTPBadRequest:
@@ -30,6 +31,27 @@ def _opencode_detail(exc: OpenCodeClientError) -> str:
 
 def _unexpected_upstream_detail(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
+
+
+async def _delete_portal_metadata_best_effort(portal_metadata, session_id: str) -> dict[str, Any]:
+    if not portal_metadata:
+        return {"success": False, "skipped": True, "reason": "portal_metadata_not_available"}
+    try:
+        return await portal_metadata.delete_session_metadata(session_id)
+    except Exception as exc:
+        return {"success": False, "error": safe_preview(str(exc), 1000)}
+
+
+
+
+def _delete_chatlog_best_effort(chatlog_store, session_id: str) -> dict[str, Any]:
+    if not chatlog_store or not hasattr(chatlog_store, "delete"):
+        return {"success": False, "skipped": True, "reason": "chatlog_delete_not_supported"}
+    try:
+        deleted = chatlog_store.delete(session_id)
+        return {"success": True, "deleted": bool(deleted)}
+    except Exception as exc:
+        return {"success": False, "error": safe_preview(str(exc), 1000)}
 
 
 async def _read_json_object(request: web.Request, *, error_prefix: str = "payload") -> dict[str, Any]:
@@ -183,26 +205,54 @@ async def delete_session_handler(request: web.Request) -> web.Response:
     sid = request.match_info["session_id"]
     store = request.app[SESSION_STORE_KEY]
     client = request.app[OPENCODE_CLIENT_KEY]
-    record = store.mark_deleted(sid)
-    if record:
-        try:
-            await client.delete_session(record.opencode_session_id)
-        except OpenCodeClientError as exc:
-            if exc.status != 404:
-                pass
-    return web.json_response({"success": True})
+    portal_metadata = request.app.get(PORTAL_METADATA_CLIENT_KEY)
+    chatlog_store = request.app.get(CHATLOG_STORE_KEY)
+    record = store.get(sid)
+    if record is None or record.deleted:
+        metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
+        return web.json_response({"success": True, "session_id": sid, "already_deleted": True, "runtime_deleted": False, "opencode_deleted": False, "opencode_missing": record is None, "metadata_delete": metadata_delete})
+    opencode_deleted = False
+    opencode_missing = False
+    try:
+        await client.delete_session(record.opencode_session_id)
+        opencode_deleted = True
+    except OpenCodeClientError as exc:
+        if exc.status == 404:
+            opencode_missing = True
+        else:
+            return web.json_response({"success": False, "error": "opencode_delete_failed", "session_id": sid, "opencode_session_id": record.opencode_session_id, "opencode_status": exc.status, "detail": str(exc)}, status=502)
+    store.mark_deleted(sid)
+    chatlog_delete = _delete_chatlog_best_effort(chatlog_store, sid)
+    metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
+    return web.json_response({"success": True, "session_id": sid, "opencode_session_id": record.opencode_session_id, "already_deleted": False, "runtime_deleted": True, "opencode_deleted": opencode_deleted, "opencode_missing": opencode_missing, "metadata_delete": metadata_delete, "chatlog_delete": chatlog_delete})
 
 
 async def clear_sessions_handler(request: web.Request) -> web.Response:
     store = request.app[SESSION_STORE_KEY]
     client = request.app[OPENCODE_CLIENT_KEY]
-    cleared = store.clear()
-    for rec in cleared:
+    portal_metadata = request.app.get(PORTAL_METADATA_CLIENT_KEY)
+    chatlog_store = request.app.get(CHATLOG_STORE_KEY)
+    failures = []
+    deleted_count = 0
+    metadata_results = []
+    for rec in store.list_active():
         try:
             await client.delete_session(rec.opencode_session_id)
-        except OpenCodeClientError:
-            pass
-    return web.json_response({"success": True, "cleared": len(cleared)})
+            op_missing = False
+        except OpenCodeClientError as exc:
+            if exc.status == 404:
+                op_missing = True
+            else:
+                failures.append({"session_id": rec.portal_session_id, "opencode_session_id": rec.opencode_session_id, "status": exc.status, "detail": str(exc)})
+                continue
+        store.mark_deleted(rec.portal_session_id)
+        deleted_count += 1
+        chatlog_delete = _delete_chatlog_best_effort(chatlog_store, rec.portal_session_id)
+        metadata = await _delete_portal_metadata_best_effort(portal_metadata, rec.portal_session_id)
+        metadata_results.append({"session_id": rec.portal_session_id, "opencode_missing": op_missing, "metadata_delete": metadata, "chatlog_delete": chatlog_delete})
+    if failures:
+        return web.json_response({"success": False, "deleted_count": deleted_count, "failed_count": len(failures), "failures": failures, "metadata_delete": metadata_results}, status=502)
+    return web.json_response({"success": True, "deleted_count": deleted_count, "failed_count": 0, "metadata_delete": metadata_results})
 
 
 async def _delete_from_here(*, store, client, portal_session_id: str, message_id: str, allow_revert_fallback: bool = False):
