@@ -52,10 +52,11 @@ def test_skill_allow_unknown_deny_and_type_override():
     assert denied["skill"]["alpha"] == "deny"
 
 
-def test_allowed_capability_type_skill_allows_known_skills_only():
+def test_allowed_capability_type_skill_writes_known_skill_allow_while_wildcard_allows_unknown():
     p = build_permission({"allowed_capability_types": ["skill"]}, {"skills": [{"opencode_name": "alpha"}]}, None)
     assert p["skill"]["alpha"] == "allow"
-    assert "beta" not in p["skill"]
+    assert p["skill"]["*"] == "allow"
+    assert skill_permission_state(p, "beta") == "allowed"
 
 
 def test_derived_runtime_rules_denied_actions_override_allow():
