@@ -37,6 +37,7 @@ from .trace_context import add_trace_context, build_trace_context, profile_versi
 from .opencode_config import normalize_opencode_provider_id
 from .opencode_message_adapter import (
     extract_last_assistant_visible_text,
+    find_latest_assistant_completion,
     extract_reasoning_texts_from_parts,
     message_id as adapter_message_id,
     message_role as adapter_message_role,
@@ -147,6 +148,35 @@ def extract_assistant_text(payload: Any) -> str:
     return extract_last_assistant_visible_text(payload)
 
 
+async def _wait_for_assistant_completion(*, client, opencode_session_id: str, response_payload: Any, before_messages: list[dict[str, Any]], timeout_seconds: float, poll_seconds: float, before_snapshot_unreliable: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    before_ids = {adapter_message_id(m) for m in before_messages if adapter_message_id(m)}
+    probe = find_latest_assistant_completion(response_payload, exclude_message_ids=before_ids)
+    if probe.get("completion_state") == "completed":
+        return probe, []
+    timeout = max(0.0, float(timeout_seconds))
+    sleep_for = max(0.1, float(poll_seconds))
+    deadline = asyncio.get_running_loop().time() + timeout
+    after_messages: list[dict[str, Any]] = []
+    listed_once = False
+    while True:
+        if listed_once and asyncio.get_running_loop().time() > deadline:
+            break
+        if listed_once:
+            await asyncio.sleep(sleep_for)
+        after_messages = await client.list_messages(opencode_session_id)
+        listed_once = True
+        probe = find_latest_assistant_completion(after_messages, exclude_message_ids=before_ids)
+        if before_snapshot_unreliable and probe.get("completion_state") == "completed":
+            probe = {"text": "", "message_id": "", "completion_state": "incomplete", "reason": "before_snapshot_unreliable", "diagnostics": {"before_snapshot_unreliable": True}}
+        if probe.get("completion_state") in {"completed", "error", "blocked"}:
+            return probe, after_messages
+    if probe.get("completion_state") in {"blocked", "error"}:
+        return probe, after_messages
+    diagnostics = probe.get("diagnostics") if isinstance(probe.get("diagnostics"), dict) else {}
+    preview = diagnostics.get("text") if isinstance(diagnostics.get("text"), str) else ""
+    return {"text": "", "message_id": probe.get("message_id", ""), "completion_state": "incomplete", "reason": "final_assistant_message_timeout", "diagnostics": {**diagnostics, "progress_preview": safe_preview(preview, 300)}}, after_messages
+
+
 def _redact_attachment_payloads_for_debug(value: Any) -> Any:
     if isinstance(value, dict):
         out = {}
@@ -249,11 +279,14 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         await bus.publish(think)
 
         before_messages: list[dict[str, Any]] = []
+        after_messages: list[dict[str, Any]] = []
         message_id_detection_error_before = ""
+        before_snapshot_unreliable = False
         try:
             before_messages = await client.list_messages(record.opencode_session_id)
         except Exception as exc:
             message_id_detection_error_before = str(exc)
+            before_snapshot_unreliable = True
         parts = [{"type": "text", "text": message}]
         attachment_debug = []
         attachment_service = request.app.get(ATTACHMENT_SERVICE_KEY)
@@ -309,17 +342,19 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                 blocked_evt = add_trace_context({"type": "skill.blocked", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"reason": skill_decision.reason, "permission_state": skill_decision.permission_state}}, trace_context)
                 runtime_events.append(blocked_evt)
                 await bus.publish(blocked_evt)
-                for event in [add_trace_context(assistant_delta_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text), trace_context), add_trace_context(chat_complete_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text), trace_context), add_trace_context(chat_completed_compat_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text), trace_context)]:
+                blocked_chat_evt = add_trace_context({"type": "chat.blocked", "event_type": "chat.blocked", "state": "blocked", "ok": False, "completion_state": "blocked", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"reason": skill_decision.reason, "permission_state": skill_decision.permission_state}}, trace_context)
+                for event in [blocked_chat_evt]:
                     runtime_events.append(event)
                     await bus.publish(event)
                 final_context = {**context_state, "summary": assistant_text[:500], "current_state": "blocked", "next_step": ""}
                 updated = store.update_after_chat(portal_session_id, message, assistant_text, model, agent)
                 usage_record = usage_tracker.record_chat(session_id=portal_session_id, request_id=request_id, model=model, provider=provider_for_trace, response_payload={}, input_text=message, output_text=assistant_text)
                 usage_record["request_id"] = trace_context.get("request_id", usage_record.get("request_id", ""))
-                llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "trace_context": trace_context, "attachments": attachment_debug, "skill_invocation": skill_debug}
+                completion_probe = {"completion_state": "blocked", "reason": "skill_blocked", "diagnostics": {"skill_name": invocation.skill_name, "permission_state": skill_decision.permission_state, "reason": skill_decision.reason}}
+                llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "trace_context": trace_context, "attachments": attachment_debug, "skill_invocation": skill_debug, "completion_probe": completion_probe}
                 chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="blocked", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
                 await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state="blocked", request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "context_state": final_context, "usage": usage_record, "trace_context": trace_context, "skill_invocation": skill_debug})
-                return {"session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": "", "assistant_message_id": "", "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": llm_debug}
+                return {"ok": False, "completion_state": "blocked", "incomplete_reason": skill_decision.reason or "skill_blocked", "session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": "", "assistant_message_id": "", "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": llm_debug}
 
             if not executed_native_command:
                 command_names: set[str] = set()
@@ -348,7 +383,20 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                     await bus.publish(prompt_evt)
         else:
             response_payload = await client.send_message(record.opencode_session_id, parts=parts, model=model, agent=agent, system=system)
-        assistant_text = extract_last_assistant_visible_text(response_payload)
+        completion_probe, waited_messages = await _wait_for_assistant_completion(
+            client=client,
+            opencode_session_id=record.opencode_session_id,
+            response_payload=response_payload,
+            before_messages=before_messages,
+            timeout_seconds=settings.chat_completion_timeout_seconds,
+            poll_seconds=settings.chat_completion_poll_seconds,
+            before_snapshot_unreliable=before_snapshot_unreliable,
+        )
+        completion_state = str(completion_probe.get("completion_state") or "incomplete")
+        assistant_text = str(completion_probe.get("text") or "")
+        incomplete_reason = ""
+        if completion_state != "completed":
+            incomplete_reason = str(completion_probe.get("reason") or "assistant_completion_not_final")
         payload_message = response_payload.get("message") if isinstance(response_payload, dict) else None
         if isinstance(payload_message, dict):
             reasoning_texts = extract_reasoning_texts_from_parts(payload_message.get("parts"))
@@ -359,16 +407,11 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         user_message_id = ""
         assistant_message_id = ""
         try:
-            after_messages = await client.list_messages(record.opencode_session_id)
+            after_messages = waited_messages or await client.list_messages(record.opencode_session_id)
             user_message_id, assistant_message_id = _detect_new_message_ids(before_messages, after_messages)
         except Exception:
             pass
-        if not assistant_text:
-            try:
-                assistant_text = extract_last_assistant_visible_text(after_messages) if "after_messages" in locals() else ""
-            except Exception:
-                assistant_text = ""
-        if not assistant_text:
+        if completion_state == "completed" and not assistant_text:
             assistant_text = ""
         if not assistant_message_id and isinstance(response_payload, dict):
             candidate = response_payload.get("info", {}).get("id") if isinstance(response_payload.get("info"), dict) else ""
@@ -380,16 +423,36 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             runtime_events.append(completed_evt)
             await bus.publish(completed_evt)
 
-        out_events = [
-            assistant_delta_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
-            chat_complete_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
-            chat_completed_compat_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
-        ]
-        if out_events and isinstance(out_events[0], dict):
-            out_events[0]["synthetic_final_delta"] = True
-            if not isinstance(out_events[0].get("data"), dict):
-                out_events[0]["data"] = {}
-            out_events[0]["data"]["synthetic_final_delta"] = True
+        if completion_state == "completed":
+            out_events = [
+                assistant_delta_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
+                chat_complete_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
+                chat_completed_compat_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
+            ]
+            if out_events and isinstance(out_events[0], dict):
+                out_events[0]["synthetic_final_delta"] = True
+                if not isinstance(out_events[0].get("data"), dict):
+                    out_events[0]["data"] = {}
+                out_events[0]["data"]["synthetic_final_delta"] = True
+            status = "success"; latest_state = "success"; ok = True
+            final_context = {**context_state, "summary": assistant_text[:500], "current_state": "completed", "next_step": ""}
+        elif completion_state == "blocked":
+            assistant_text = "OpenCode is blocked waiting for a permission/tool decision before producing a final answer."
+            out_events = [{"type": "chat.blocked", "event_type": "chat.blocked", "state": "blocked", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": completion_probe.get("diagnostics", {})}]
+            status = "blocked"; latest_state = "blocked"; ok = False
+            final_context = {**context_state, "summary": assistant_text[:500], "current_state": "blocked", "next_step": ""}
+        elif completion_state == "error":
+            reason = completion_probe.get("diagnostics", {}).get("error_summary") if isinstance(completion_probe.get("diagnostics"), dict) else ""
+            assistant_text = f"OpenCode tool execution failed before a final answer was produced: {reason or 'unknown tool error'}."
+            out_events = [chat_failed_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, error=assistant_text)]
+            status = "error"; latest_state = "error"; ok = False
+            final_context = {**context_state, "summary": assistant_text[:500], "current_state": "error", "next_step": ""}
+        else:
+            completion_state = "incomplete"
+            assistant_text = "OpenCode stream ended before a final assistant response was available. The last visible text was only an intermediate progress update."
+            out_events = [{"type": "chat.incomplete", "event_type": "chat.incomplete", "state": "incomplete", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": completion_probe.get("diagnostics", {})}]
+            status = "incomplete"; latest_state = "incomplete"; ok = False
+            final_context = {**context_state, "summary": assistant_text[:500], "current_state": "incomplete", "next_step": ""}
         for event in [add_trace_context(x, trace_context) for x in out_events]:
             runtime_events.append(event)
             await bus.publish(event)
@@ -398,18 +461,17 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         provider = provider_for_trace
         usage_record = usage_tracker.record_chat(session_id=portal_session_id, request_id=request_id, model=model, provider=provider, response_payload=response_payload, input_text=message, output_text=assistant_text)
         usage_record["request_id"] = trace_context.get("request_id", usage_record.get("request_id", ""))
-        final_context = {**context_state, "summary": assistant_text[:500], "current_state": "completed", "next_step": ""}
 
         llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(_redact_attachment_payloads_for_debug(response_payload), 2000), "trace_context": trace_context, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or ""}, "attachments": attachment_debug}
         if skill_debug:
             llm_debug["skill_invocation"] = skill_debug
         if message_id_detection_error_before:
             llm_debug["message_id_detection_error_before"] = message_id_detection_error_before
-        chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="success", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
+        chatlog_store.finish_entry(portal_session_id, request_id=request_id, status=status, response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
 
         metadata_model = usage_record.get("model") or model or "unknown"
         metadata_provider = usage_record.get("provider") or provider or "unknown"
-        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state="success", request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "model": metadata_model, "provider": metadata_provider, "context_state": final_context, "usage": usage_record, "trace_context": trace_context})
+        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state=latest_state, request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "model": metadata_model, "provider": metadata_provider, "context_state": final_context, "usage": usage_record, "trace_context": trace_context})
 
     except OpenCodeClientError as exc:
         if not trace_context:
@@ -421,7 +483,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.failed", latest_event_state="error", request_id=request_id, summary=str(exc), runtime_events=runtime_events, metadata={"engine": "opencode", "trace_context": trace_context})
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
 
-    out = {"session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context, "attachments": attachment_debug}}
+    out = {"ok": ok, "completion_state": completion_state, "incomplete_reason": incomplete_reason, "session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context, "attachments": attachment_debug, "completion_probe": completion_probe}}
     if 'skill_debug' in locals() and skill_debug:
         out["_llm_debug"]["skill_invocation"] = skill_debug
     if partial_recovery or getattr(updated, "partial_recovery", False):
@@ -606,7 +668,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             is_real = (
                 event.get("type") == "message.delta"
                 and raw_type == "message.part.delta"
-                and role == "assistant"
+                and (role == "assistant" or bool(data.get("metadata_incomplete")))
             )
             is_synth = event.get("type") == "assistant_delta" and bool(event.get("synthetic_final_delta") or (event.get("data") or {}).get("synthetic_final_delta"))
             if is_real:

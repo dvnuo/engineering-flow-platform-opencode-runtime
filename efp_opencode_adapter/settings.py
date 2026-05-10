@@ -32,6 +32,8 @@ class Settings:
     portal_agent_id: str | None = None
     portal_internal_token: str | None = None
     portal_metadata_timeout_seconds: int = 5
+    chat_completion_timeout_seconds: float = 300.0
+    chat_completion_poll_seconds: float = 1.0
 
     @classmethod
     def from_env(cls, opencode_url: str | None = None) -> "Settings":
@@ -53,4 +55,6 @@ class Settings:
             portal_agent_id=os.getenv("PORTAL_AGENT_ID") or None,
             portal_internal_token=os.getenv("PORTAL_INTERNAL_TOKEN") or None,
             portal_metadata_timeout_seconds=int(os.getenv("PORTAL_METADATA_TIMEOUT_SECONDS", "5")),
+            chat_completion_timeout_seconds=float(os.getenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "300")),
+            chat_completion_poll_seconds=max(0.1, float(os.getenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "1.0"))),
         )

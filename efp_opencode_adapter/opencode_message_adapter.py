@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import re
 from typing import Any
 
 
@@ -167,6 +168,129 @@ def extract_last_assistant_visible_text(payload: Any) -> str:
         if text:
             return text
     return ""
+
+_PROGRESS_PATTERNS = [
+    re.compile(r"^\s*i am fetching\b.*", re.I),
+    re.compile(r"^\s*i'?m fetching\b.*", re.I),
+    re.compile(r"^\s*i am retrieving\b.*", re.I),
+    re.compile(r"^\s*i am reading\b.*", re.I),
+    re.compile(r"^\s*let me fetch\b.*", re.I),
+    re.compile(r"^\s*let me retrieve\b.*", re.I),
+    re.compile(r"^\s*i will summarize\b.*\bonce i have\b.*", re.I),
+]
+
+
+def is_progress_only_assistant_text(text: str) -> bool:
+    normalized = (text or "").strip()
+    if not normalized:
+        return False
+    return any(p.match(normalized) for p in _PROGRESS_PATTERNS)
+
+
+def summarize_message_runtime_state(message: Any) -> dict[str, Any]:
+    nested = message.get("message") if isinstance(message, dict) and isinstance(message.get("message"), dict) else {}
+    msg = message if isinstance(message, dict) else {}
+    role = message_role(msg).lower()
+    text = message_to_visible_text(msg)
+    parts = msg.get("parts") if isinstance(msg.get("parts"), list) else (nested.get("parts") if isinstance(nested.get("parts"), list) else [])
+    finish_reason = ""
+    for source in (msg, nested, msg.get("info") if isinstance(msg.get("info"), dict) else {}, nested.get("info") if isinstance(nested.get("info"), dict) else {}):
+        for key in ("finish_reason", "finish", "stop_reason", "reason"):
+            value = source.get(key) if isinstance(source, dict) else None
+            if isinstance(value, str) and value.strip():
+                finish_reason = value.strip().lower()
+                break
+        if finish_reason:
+            break
+    has_pending_tool = False
+    has_pending_permission = False
+    has_tool_error = False
+    error_summary = ""
+    pending_states = {"", "pending", "running", "started", "queued", "created", "requested", "open"}
+    done_states = {"completed", "complete", "done", "success", "resolved"}
+    error_states = {"failed", "error", "rejected", "denied"}
+    for part in parts if isinstance(parts, list) else []:
+        if not isinstance(part, dict):
+            continue
+        ptype = str(part.get("type") or "").lower()
+        status = str(part.get("status") or part.get("state") or "").lower()
+        is_permission = "permission" in ptype
+        is_tool = ptype in {"tool", "tool_call", "tool-call", "function_call"} or "tool" in ptype
+        if not (is_tool or is_permission):
+            continue
+        if status in error_states:
+            has_tool_error = True
+            if not error_summary:
+                error_summary = str(part.get("error") or part.get("message") or status)
+            continue
+        if status in done_states:
+            continue
+        if is_permission and status in pending_states:
+            has_pending_permission = True
+            continue
+        has_output = bool(part.get("result") or part.get("output"))
+        if status in pending_states or (is_tool and not has_output):
+            has_pending_tool = True
+    progress_only = is_progress_only_assistant_text(text)
+    terminal = (
+        role == "assistant"
+        and bool(text)
+        and not progress_only
+        and not has_pending_tool
+        and not has_pending_permission
+        and not has_tool_error
+        and finish_reason not in {"tool_use", "tool_calls", "tool-call", "function_call", "continue"}
+    )
+    return {
+        "message_id": message_id(msg),
+        "role": role,
+        "text": text,
+        "has_visible_text": bool(text),
+        "has_pending_tool": has_pending_tool,
+        "has_tool_error": has_tool_error,
+        "has_pending_permission": has_pending_permission,
+        "finish_reason": finish_reason,
+        "progress_only": progress_only,
+        "terminal": terminal,
+        "error_summary": error_summary,
+    }
+
+
+def extract_terminal_assistant_visible_text(payload: Any, *, exclude_message_ids: set[str] | None = None) -> str:
+    exclude = exclude_message_ids or set()
+    messages = [m for m in _iter_messages(payload) if message_role(m).lower() == "assistant"]
+    for msg in reversed(messages):
+        state = summarize_message_runtime_state(msg)
+        if state["message_id"] and state["message_id"] in exclude:
+            continue
+        if state["terminal"]:
+            return state["text"]
+    return ""
+
+
+def find_latest_assistant_completion(payload: Any, *, exclude_message_ids: set[str] | None = None) -> dict[str, Any]:
+    exclude = exclude_message_ids or set()
+    states = []
+    for msg in _iter_messages(payload):
+        state = summarize_message_runtime_state(msg)
+        if state["role"] != "assistant":
+            continue
+        if state["message_id"] and state["message_id"] in exclude:
+            continue
+        states.append(state)
+    for state in reversed(states):
+        if state["terminal"]:
+            return {"text": state["text"], "message_id": state["message_id"], "completion_state": "completed", "reason": "terminal_assistant_message", "diagnostics": state}
+    for state in reversed(states):
+        if state["has_pending_permission"]:
+            return {"text": "", "message_id": state["message_id"], "completion_state": "blocked", "reason": "pending_permission", "diagnostics": state}
+    for state in reversed(states):
+        if state["has_tool_error"]:
+            return {"text": "", "message_id": state["message_id"], "completion_state": "error", "reason": "tool_error", "diagnostics": state}
+    for state in reversed(states):
+        if state["has_pending_tool"] or state["progress_only"]:
+            return {"text": "", "message_id": state["message_id"], "completion_state": "pending", "reason": "assistant_in_progress", "diagnostics": state}
+    return {"text": "", "message_id": "", "completion_state": "incomplete", "reason": "no_terminal_assistant_message", "diagnostics": {"states_seen": len(states)}}
 
 
 def to_efp_message(message: dict[str, Any], index: int | None = None) -> dict[str, Any]:

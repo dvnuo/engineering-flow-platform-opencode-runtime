@@ -148,6 +148,27 @@ def test_message_part_delta_user_role_not_streamed(tmp_path, monkeypatch):
     assert not event["data"].get("delta")
 
 
+def test_message_part_delta_with_missing_metadata_still_becomes_message_delta(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    paths = ensure_state_dirs(settings)
+    event = normalize_opencode_event({"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "Agenda"}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="", part_meta={})
+    assert event["type"] == "message.delta"
+    assert event["data"]["metadata_incomplete"] is True
+
+
+def test_message_part_delta_raw_user_role_not_streamed_when_cache_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    paths = ensure_state_dirs(settings)
+    raw_event = {"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-user", "partID": "p1", "field": "text", "delta": "user text", "role": "user"}}
+    event = normalize_opencode_event(raw_event, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="", part_meta={})
+    assert event["type"] != "message.delta"
+    assert not event["data"].get("delta")
+
+
 @pytest.mark.asyncio
 async def test_publish_raw_event_uses_message_and_part_cache_for_delta(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
