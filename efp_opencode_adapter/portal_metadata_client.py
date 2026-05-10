@@ -25,6 +25,12 @@ class PortalMetadataClient:
             headers["X-Portal-Internal-Token"] = self.settings.portal_internal_token
         return headers
 
+    def _metadata_url(self, session_id: str) -> str:
+        base_url = (self.settings.portal_internal_base_url or "").rstrip("/")
+        agent = quote(self.settings.portal_agent_id or "", safe="")
+        sid = quote(session_id, safe="")
+        return f"{base_url}/api/internal/agents/{agent}/sessions/{sid}/metadata"
+
     async def _parse_delete_response(self, resp) -> dict:
         payload = None
         try:
@@ -46,7 +52,7 @@ class PortalMetadataClient:
         safe_runtime_events = safe_preview(runtime_events[-50:], 4000)
         safe_metadata = safe_preview({**md, "latest_summary": summary, "engine": "opencode", "updated_at": utc_now_iso()}, 2000)
         payload = {"latest_event_type": latest_event_type, "latest_event_state": latest_event_state, "last_execution_id": request_id, "current_task_id": task_id or None, "runtime_events_json": json.dumps(safe_runtime_events, ensure_ascii=False), "metadata_json": json.dumps(safe_metadata, ensure_ascii=False)}
-        url = f"{self.settings.portal_internal_base_url.rstrip('/')}/api/internal/agents/{self.settings.portal_agent_id}/sessions/{session_id}/metadata"
+        url = self._metadata_url(session_id)
         headers = self._headers()
         try:
             if self._session is not None:
@@ -73,10 +79,7 @@ class PortalMetadataClient:
     async def delete_session_metadata(self, session_id: str) -> dict:
         if not self.settings.portal_internal_base_url or not self.settings.portal_agent_id:
             return {"success": False, "skipped": True, "reason": "portal_metadata_not_configured"}
-        base_url = self.settings.portal_internal_base_url.rstrip("/")
-        agent = quote(self.settings.portal_agent_id, safe="")
-        sid = quote(session_id, safe="")
-        url = f"{base_url}/api/internal/agents/{agent}/sessions/{sid}/metadata"
+        url = self._metadata_url(session_id)
         headers = self._headers()
         timeout = aiohttp.ClientTimeout(total=self.settings.portal_metadata_timeout_seconds)
         try:
