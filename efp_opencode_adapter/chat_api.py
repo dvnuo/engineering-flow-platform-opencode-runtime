@@ -148,7 +148,7 @@ def extract_assistant_text(payload: Any) -> str:
     return extract_last_assistant_visible_text(payload)
 
 
-async def _wait_for_assistant_completion(*, client, opencode_session_id: str, response_payload: Any, before_messages: list[dict[str, Any]], timeout_seconds: float, poll_seconds: float) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+async def _wait_for_assistant_completion(*, client, opencode_session_id: str, response_payload: Any, before_messages: list[dict[str, Any]], timeout_seconds: float, poll_seconds: float, before_snapshot_unreliable: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     before_ids = {adapter_message_id(m) for m in before_messages if adapter_message_id(m)}
     probe = find_latest_assistant_completion(response_payload, exclude_message_ids=before_ids)
     if probe.get("completion_state") == "completed":
@@ -166,6 +166,8 @@ async def _wait_for_assistant_completion(*, client, opencode_session_id: str, re
         after_messages = await client.list_messages(opencode_session_id)
         listed_once = True
         probe = find_latest_assistant_completion(after_messages, exclude_message_ids=before_ids)
+        if before_snapshot_unreliable and probe.get("completion_state") == "completed":
+            probe = {"text": "", "message_id": "", "completion_state": "incomplete", "reason": "before_snapshot_unreliable", "diagnostics": {"before_snapshot_unreliable": True}}
         if probe.get("completion_state") in {"completed", "error", "blocked"}:
             return probe, after_messages
     if probe.get("completion_state") in {"blocked", "error"}:
@@ -279,10 +281,12 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         before_messages: list[dict[str, Any]] = []
         after_messages: list[dict[str, Any]] = []
         message_id_detection_error_before = ""
+        before_snapshot_unreliable = False
         try:
             before_messages = await client.list_messages(record.opencode_session_id)
         except Exception as exc:
             message_id_detection_error_before = str(exc)
+            before_snapshot_unreliable = True
         parts = [{"type": "text", "text": message}]
         attachment_debug = []
         attachment_service = request.app.get(ATTACHMENT_SERVICE_KEY)
@@ -338,17 +342,19 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                 blocked_evt = add_trace_context({"type": "skill.blocked", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"reason": skill_decision.reason, "permission_state": skill_decision.permission_state}}, trace_context)
                 runtime_events.append(blocked_evt)
                 await bus.publish(blocked_evt)
-                for event in [add_trace_context(assistant_delta_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text), trace_context), add_trace_context(chat_complete_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text), trace_context), add_trace_context(chat_completed_compat_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text), trace_context)]:
+                blocked_chat_evt = add_trace_context({"type": "chat.blocked", "event_type": "chat.blocked", "state": "blocked", "ok": False, "completion_state": "blocked", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"reason": skill_decision.reason, "permission_state": skill_decision.permission_state}}, trace_context)
+                for event in [blocked_chat_evt]:
                     runtime_events.append(event)
                     await bus.publish(event)
                 final_context = {**context_state, "summary": assistant_text[:500], "current_state": "blocked", "next_step": ""}
                 updated = store.update_after_chat(portal_session_id, message, assistant_text, model, agent)
                 usage_record = usage_tracker.record_chat(session_id=portal_session_id, request_id=request_id, model=model, provider=provider_for_trace, response_payload={}, input_text=message, output_text=assistant_text)
                 usage_record["request_id"] = trace_context.get("request_id", usage_record.get("request_id", ""))
-                llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "trace_context": trace_context, "attachments": attachment_debug, "skill_invocation": skill_debug}
+                completion_probe = {"completion_state": "blocked", "reason": "skill_blocked", "diagnostics": {"skill_name": invocation.skill_name, "permission_state": skill_decision.permission_state, "reason": skill_decision.reason}}
+                llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "trace_context": trace_context, "attachments": attachment_debug, "skill_invocation": skill_debug, "completion_probe": completion_probe}
                 chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="blocked", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
                 await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state="blocked", request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "context_state": final_context, "usage": usage_record, "trace_context": trace_context, "skill_invocation": skill_debug})
-                return {"session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": "", "assistant_message_id": "", "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": llm_debug}
+                return {"ok": False, "completion_state": "blocked", "incomplete_reason": skill_decision.reason or "skill_blocked", "session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": "", "assistant_message_id": "", "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": llm_debug}
 
             if not executed_native_command:
                 command_names: set[str] = set()
@@ -384,6 +390,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             before_messages=before_messages,
             timeout_seconds=settings.chat_completion_timeout_seconds,
             poll_seconds=settings.chat_completion_poll_seconds,
+            before_snapshot_unreliable=before_snapshot_unreliable,
         )
         completion_state = str(completion_probe.get("completion_state") or "incomplete")
         assistant_text = str(completion_probe.get("text") or "")

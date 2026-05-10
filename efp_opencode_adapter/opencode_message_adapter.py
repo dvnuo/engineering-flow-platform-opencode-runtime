@@ -232,15 +232,14 @@ def summarize_message_runtime_state(message: Any) -> dict[str, Any]:
         if status in pending_states or (is_tool and not has_output):
             has_pending_tool = True
     progress_only = is_progress_only_assistant_text(text)
-    explicit_terminal = finish_reason in {"stop", "end_turn", "done", "complete", "completed", "length"}
     terminal = (
         role == "assistant"
         and bool(text)
+        and not progress_only
         and not has_pending_tool
         and not has_pending_permission
         and not has_tool_error
-        and (not progress_only or (explicit_terminal and not (has_pending_tool or has_pending_permission)))
-        and (explicit_terminal or not progress_only)
+        and finish_reason not in {"tool_use", "tool_calls", "tool-call", "function_call", "continue"}
     )
     return {
         "message_id": message_id(msg),

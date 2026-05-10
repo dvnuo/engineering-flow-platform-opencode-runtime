@@ -64,3 +64,9 @@ def test_tool_error_returns_error_state():
     out = find_latest_assistant_completion(payload)
     assert out["completion_state"] == "error"
     assert "permission" in str(out["diagnostics"].get("error_summary", "")).lower()
+
+
+def test_progress_text_with_stop_is_not_terminal():
+    payload = {"messages": [{"id": "a1", "role": "assistant", "finish_reason": "stop", "parts": [{"type": "text", "text": "I am fetching the Confluence page now and will summarize the agenda once I have the content"}]}]}
+    out = find_latest_assistant_completion(payload)
+    assert out["completion_state"] != "completed"

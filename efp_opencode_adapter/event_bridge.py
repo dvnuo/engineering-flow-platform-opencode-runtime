@@ -95,6 +95,21 @@ def _status_value(values: dict[str, str]) -> str:
     return _first_string(values, "status", "state", "decision", "resolution", "response", "action", "answer").lower()
 
 
+def _role_candidates(values: dict[str, str], canonical: dict[str, Any], message_role: str | None, part_meta: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for value in (
+        message_role,
+        part_meta.get("role"),
+        values.get("role"),
+        values.get("message_role"),
+        _first_string(values, "info.role"),
+        canonical.get("role") if isinstance(canonical, dict) else "",
+    ):
+        if isinstance(value, str) and value.strip():
+            out.append(value.strip().lower())
+    return out
+
+
 def _tool_name(values: dict[str, str]) -> str:
     return _first_string(values, "tool", "tool_name", "toolName", "name", "command", "callName")
 
@@ -295,13 +310,15 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         delta = delta if isinstance(delta, str) else ""
         normalized_type = "opencode.message.part.delta"
         text = ""
-        role = str(message_role or "").lower()
         pmeta = part_meta if isinstance(part_meta, dict) else {}
+        role_values = _role_candidates(values, canonical, message_role, pmeta)
+        role = next((r for r in role_values if r in {"assistant", "user"}), (role_values[0] if role_values else ""))
         ptype = str(pmeta.get("type") or "").lower()
         ignored = _bool_true(pmeta.get("ignored"))
         synthetic = _bool_true(pmeta.get("synthetic"))
         metadata_incomplete = not role or not ptype
-        if field == "text" and delta and not ignored and not synthetic and role != "user":
+        role_explicit_user = "user" in role_values
+        if field == "text" and delta and not ignored and not synthetic and not role_explicit_user:
             if ptype == "reasoning":
                 normalized_type = "llm_thinking"
                 text = delta
