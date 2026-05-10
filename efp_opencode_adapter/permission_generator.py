@@ -37,7 +37,7 @@ def default_permission_baseline() -> dict[str, Any]:
         "websearch": "ask",
         "todowrite": "ask",
         "question": "ask",
-        "skill": {"*": "deny"},
+        "skill": {"*": "allow"},
     }
 
 
@@ -234,24 +234,65 @@ def build_permission(config: dict, skills_index: dict | None = None, tools_index
     policy_ctx = config.get("policy_context") if isinstance(config.get("policy_context"), dict) else {}
     auto_allow = bool(derived.get("auto_allow_adapter_actions") or derived.get("allow_auto_run") or derived.get("auto_run_adapter_actions") or policy_ctx.get("auto_allow_adapter_actions") or policy_ctx.get("allow_auto_run") or policy_ctx.get("auto_run_adapter_actions"))
 
-    skills = (skills_index or {}).get("skills", []) if isinstance(skills_index, dict) else []
-    known_skills = [i for i in skills if isinstance(i, dict) and i.get("opencode_name")]
-    deny_all_skills = "tool" in denied_types or "skill" in denied_types or "skill" in denied_actions or "opencode.builtin.skill" in denied_actions
-    for skill in known_skills:
-        name = str(skill.get("opencode_name"))
-        efp_name = str(skill.get("efp_name") or "")
-        aliases = {name, efp_name, f"skill:{name}", f"skill:{efp_name}", f"opencode.skill.{name}"}
-        aliases = {a for a in aliases if a}
-        if deny_all_skills or (aliases & denied_actions) or (aliases & denied_skill_names):
-            permission["skill"][name] = "deny"
-            continue
-        if (aliases & (allowed_ids | allowed_actions | allowed_skill_names)) or "skill" in allowed_types:
-            permission["skill"][name] = "allow"
-
     allowed_values = {_norm(x) for x in (allowed_ids | allowed_actions)}
     denied_values = {_norm(x) for x in denied_actions}
     allowed_type_values = {_norm(x) for x in allowed_types}
     denied_type_values = {_norm(x) for x in denied_types}
+    allowed_skill_values = {_norm(x) for x in allowed_skill_names}
+    denied_skill_values = {_norm(x) for x in denied_skill_names}
+
+    skills = (skills_index or {}).get("skills", []) if isinstance(skills_index, dict) else []
+    known_skills = [i for i in skills if isinstance(i, dict) and i.get("opencode_name")]
+    permission_skill = permission.setdefault("skill", {})
+    if not isinstance(permission_skill, dict):
+        permission_skill = {}
+        permission["skill"] = permission_skill
+
+    deny_all_skills = (
+        "tool" in denied_type_values
+        or "skill" in denied_type_values
+        or "skill" in denied_values
+        or "opencode.builtin.skill" in denied_values
+        or "*" in denied_skill_values
+    )
+
+    allow_all_skills = (
+        "*" in allowed_skill_values
+        or "skill" in allowed_type_values
+        or "skill" in allowed_values
+        or "opencode.builtin.skill" in allowed_values
+    )
+
+    if deny_all_skills:
+        permission_skill["*"] = "deny"
+    else:
+        permission_skill["*"] = "allow"
+
+    for skill in known_skills:
+        name = str(skill.get("opencode_name"))
+        efp_name = str(skill.get("efp_name") or "")
+
+        aliases = {
+            name,
+            efp_name,
+            f"skill:{name}",
+            f"skill:{efp_name}",
+            f"opencode.skill.{name}",
+        }
+        aliases_norm = {_norm(a) for a in aliases if _norm(a)}
+
+        if deny_all_skills or (aliases_norm & denied_values) or (aliases_norm & denied_skill_values):
+            permission_skill[name] = "deny"
+            continue
+
+        if (
+            allow_all_skills
+            or (aliases_norm & allowed_values)
+            or (aliases_norm & allowed_skill_values)
+            or permission_skill.get("*") == "allow"
+        ):
+            permission_skill[name] = "allow"
+
     allow_all_generated_tools = "*" in allowed_values or not llm_tools_configured
 
     tools = (tools_index or {}).get("tools", []) if isinstance(tools_index, dict) else []
