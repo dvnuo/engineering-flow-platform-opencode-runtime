@@ -170,8 +170,9 @@ async def _wait_for_assistant_completion(*, client, opencode_session_id: str, re
             probe = {"text": "", "message_id": "", "completion_state": "incomplete", "reason": "before_snapshot_unreliable", "diagnostics": {"before_snapshot_unreliable": True}}
         if probe.get("completion_state") in {"completed", "error", "blocked"}:
             return probe, after_messages
-    if probe.get("completion_state") in {"blocked", "error"}:
-        return probe, after_messages
+        if time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(max(0.1, poll_seconds))
     diagnostics = probe.get("diagnostics") if isinstance(probe.get("diagnostics"), dict) else {}
     preview = diagnostics.get("text") if isinstance(diagnostics.get("text"), str) else ""
     return {"text": "", "message_id": probe.get("message_id", ""), "completion_state": "incomplete", "reason": "final_assistant_message_timeout", "diagnostics": {**diagnostics, "progress_preview": safe_preview(preview, 300)}}, after_messages
@@ -504,8 +505,10 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             user_message_id, assistant_message_id = _detect_new_message_ids(before_messages, after_messages)
         except Exception:
             pass
-        if completion_state == "completed" and not assistant_text:
-            assistant_text = ""
+        if completion_state == "completed" and not assistant_text.strip():
+            completion_state = "empty_final"
+            incomplete_reason = "empty_final_assistant_text"
+            assistant_text = "OpenCode completed without a visible assistant response. The request may have produced tool output only; no empty success message was recorded."
         if not assistant_message_id and isinstance(response_payload, dict):
             candidate = response_payload.get("info", {}).get("id") if isinstance(response_payload.get("info"), dict) else ""
             if not candidate and isinstance(response_payload.get("message"), dict):
@@ -534,6 +537,10 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             out_events = [{"type": "chat.blocked", "event_type": "chat.blocked", "state": "blocked", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": completion_probe.get("diagnostics", {})}]
             status = "blocked"; latest_state = "blocked"; ok = False
             final_context = {**context_state, "summary": assistant_text[:500], "current_state": "blocked", "next_step": ""}
+        elif completion_state == "empty_final":
+            out_events = [{"type": "chat.empty_final", "event_type": "chat.empty_final", "state": "empty_final", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": completion_probe.get("diagnostics", {})}]
+            status = "empty_final"; latest_state = "empty_final"; ok = False
+            final_context = {**context_state, "summary": assistant_text[:500], "current_state": "empty_final", "next_step": ""}
         elif completion_state == "error":
             reason = completion_probe.get("diagnostics", {}).get("error_summary") if isinstance(completion_probe.get("diagnostics"), dict) else ""
             assistant_text = f"OpenCode tool execution failed before a final answer was produced: {reason or 'unknown tool error'}."

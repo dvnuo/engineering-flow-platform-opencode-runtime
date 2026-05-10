@@ -34,6 +34,8 @@ class Settings:
     portal_metadata_timeout_seconds: float = 5.0
     chat_completion_timeout_seconds: float = 300.0
     chat_completion_poll_seconds: float = 1.0
+    opencode_permission_mode: str = "workspace_full_access"
+    opencode_allow_bash_all: bool = True
 
     @classmethod
     def from_env(cls, opencode_url: str | None = None) -> "Settings":
@@ -57,4 +59,6 @@ class Settings:
             portal_metadata_timeout_seconds=float(os.getenv("PORTAL_METADATA_TIMEOUT_SECONDS", "5")),
             chat_completion_timeout_seconds=float(os.getenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "300")),
             chat_completion_poll_seconds=max(0.1, float(os.getenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "1.0"))),
+            opencode_permission_mode=((os.getenv("EFP_OPENCODE_PERMISSION_MODE", "workspace_full_access").strip().lower()) or "workspace_full_access"),
+            opencode_allow_bash_all=_env_bool("EFP_OPENCODE_ALLOW_BASH_ALL", True),
         )

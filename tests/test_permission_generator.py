@@ -388,3 +388,27 @@ def test_external_system_restriction_still_overrides_missing_llm_tools_default_a
         tools_index=TOOLS_INDEX,
     )
     assert permission["jira_read_issue"] == "deny"
+
+
+def test_workspace_full_access_baseline():
+    p = default_permission_baseline(permission_mode="workspace_full_access", allow_bash_all=True)
+    assert p["*"] == "allow"
+    for k in ("read","glob","grep","edit","write","webfetch","websearch","todowrite","question"):
+        assert p[k] == "allow"
+    assert p["bash"] == {"*": "allow"}
+    assert "rm *" not in p["bash"]
+    assert p["skill"]["*"] == "allow"
+    assert p["external_directory"] == "deny"
+
+
+def test_profile_policy_baseline_keeps_old_behavior():
+    p = default_permission_baseline(permission_mode="profile_policy", allow_bash_all=False)
+    assert p["*"] == "ask"
+    assert p["edit"] == "ask"
+    assert p["bash"]["rm *"] == "deny"
+
+
+def test_workspace_full_access_mutation_tool_is_allow():
+    tools = {"tools": [{"capability_id": "tool.upd", "name": "efp_upd", "policy_tags": ["mutation"]}]}
+    p = build_permission({"llm": {"tools": ["tool.upd"]}}, None, tools, permission_mode="workspace_full_access")
+    assert p["efp_upd"] == "allow"

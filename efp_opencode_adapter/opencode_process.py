@@ -51,6 +51,7 @@ class OpenCodeProcessManager:
                 env=child_env,
                 stdout=handle,
                 stderr=handle,
+                cwd=str(self.settings.workspace_dir),
             )
         finally:
             handle.close()

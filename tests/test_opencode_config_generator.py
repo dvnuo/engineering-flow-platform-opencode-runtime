@@ -36,7 +36,7 @@ def test_permission_from_indexes(tmp_path, monkeypatch):
     perm = cfg["permission"]
     assert perm["skill"]["alpha"] == "allow"
     assert perm["efp_read"] == "allow"
-    assert perm["efp_update"] == "ask"
+    assert perm["efp_update"] == "allow"
 
 
 def test_permission_auto_allow_and_secret_not_leaked(tmp_path, monkeypatch):
@@ -65,7 +65,7 @@ def test_write_main_agent_prompt(tmp_path, monkeypatch):
     text = path.read_text(encoding="utf-8")
     assert "This runtime is managed by EFP Portal." in text
     assert "Obey Portal capability/profile/policy metadata." in text
-    assert "Do not write back to external systems unless explicitly allowed." in text
+    assert "create or output files" in text
     assert "Use efp_* tools" in text
 
 
@@ -95,3 +95,25 @@ def test_non_copilot_providers_do_not_include_integration_header(tmp_path, monke
     cfg_anthropic, _, _ = build_opencode_config(Settings.from_env(), {"llm": {"provider": "anthropic", "model": "claude-sonnet-4-5"}})
     assert "copilot-integration-id" not in json.dumps(cfg_openai)
     assert "copilot-integration-id" not in json.dumps(cfg_anthropic)
+
+
+def test_agent_permission_not_empty_object(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    cfg, _, _ = build_opencode_config(Settings.from_env(), None)
+    assert cfg["permission"]["edit"] == "allow"
+    assert cfg["permission"]["write"] == "allow"
+    assert cfg["permission"]["bash"] == {"*": "allow"}
+    assert cfg["agent"]["efp-main"].get("permission") != {}
+
+
+def test_config_hash_changes_with_permission_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_OPENCODE_PERMISSION_MODE", "workspace_full_access")
+    cfg1, h1, _ = build_opencode_config(Settings.from_env(), None)
+    monkeypatch.setenv("EFP_OPENCODE_PERMISSION_MODE", "profile_policy")
+    monkeypatch.setenv("EFP_OPENCODE_ALLOW_BASH_ALL", "false")
+    cfg2, h2, _ = build_opencode_config(Settings.from_env(), None)
+    assert h1 != h2
+    assert cfg1["permission"]["*"] != cfg2["permission"]["*"]
