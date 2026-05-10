@@ -151,3 +151,10 @@ class ChatLogStore:
             except Exception:
                 out.append(p.stem)
         return sorted(set(out))
+
+    def delete(self, session_id: str) -> bool:
+        path = self._path(session_id)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True

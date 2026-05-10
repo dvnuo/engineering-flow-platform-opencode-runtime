@@ -22,7 +22,7 @@ from .app_keys import (
 
 from .opencode_client import OpenCodeClientError
 from .attachment_service import build_opencode_attachment_parts
-from .session_store import SessionRecord
+from .session_store import SessionDeletedError, SessionRecord
 from .thinking_events import (
     assistant_delta_event,
     chat_complete_event,
@@ -246,6 +246,8 @@ def _redact_attachment_payloads_for_debug(value: Any) -> Any:
 
 async def _ensure_record_for_chat(*, client, store, portal_session_id: str, title: str, agent: str | None, model: str | None) -> tuple[SessionRecord, bool]:
     existing = store.get(portal_session_id)
+    if existing is not None and existing.deleted:
+        raise SessionDeletedError("session_deleted")
     if existing is None:
         created = await client.create_session(title=title)
         sid = _require_opencode_session_id(created, action="create_session")
@@ -257,6 +259,12 @@ async def _ensure_record_for_chat(*, client, store, portal_session_id: str, titl
     try:
         await client.get_session(existing.opencode_session_id)
         return existing, bool(existing.partial_recovery)
+    except SessionDeletedError:
+        raise web.HTTPGone(text=json.dumps({"error": "session_deleted", "session_id": portal_session_id, "detail": "Session was deleted"}), content_type="application/json")
+
+    except SessionDeletedError:
+        raise web.HTTPGone(text=json.dumps({"error": "session_deleted", "session_id": portal_session_id, "detail": "Session was deleted"}), content_type="application/json")
+
     except OpenCodeClientError as exc:
         if exc.status != 404:
             raise
@@ -410,7 +418,8 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                 completion_probe = {"completion_state": "blocked", "reason": "skill_blocked", "diagnostics": {"skill_name": invocation.skill_name, "permission_state": skill_decision.permission_state, "reason": skill_decision.reason}}
                 llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "trace_context": trace_context, "attachments": attachment_debug, "skill_invocation": skill_debug, "completion_probe": completion_probe}
                 chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="blocked", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
-                await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state="blocked", request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "context_state": final_context, "usage": usage_record, "trace_context": trace_context, "skill_invocation": skill_debug})
+                if not updated.deleted:
+                    await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state="blocked", request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "context_state": final_context, "usage": usage_record, "trace_context": trace_context, "skill_invocation": skill_debug})
                 return {"ok": False, "completion_state": "blocked", "incomplete_reason": skill_decision.reason or "skill_blocked", "session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": "", "assistant_message_id": "", "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": llm_debug}
 
             if not executed_native_command:
@@ -561,7 +570,8 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
 
         metadata_model = usage_record.get("model") or model or "unknown"
         metadata_provider = usage_record.get("provider") or provider or "unknown"
-        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state=latest_state, request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "model": metadata_model, "provider": metadata_provider, "context_state": final_context, "usage": usage_record, "trace_context": trace_context})
+        if not updated.deleted:
+            await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state=latest_state, request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "model": metadata_model, "provider": metadata_provider, "context_state": final_context, "usage": usage_record, "trace_context": trace_context})
 
     except OpenCodeClientError as exc:
         if not trace_context:

@@ -6,6 +6,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
 from efp_opencode_adapter.settings import Settings
+from efp_opencode_adapter.app_keys import SESSION_STORE_KEY
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -753,3 +754,20 @@ async def test_chat_permission_resolved_then_final_completed(tmp_path, monkeypat
     assert payload["completion_state"] == "completed"
     assert payload["response"] == "Agenda summary ..."
     await client.close()
+
+@pytest.mark.asyncio
+async def test_chat_deleted_session_returns_410_and_no_recovery(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/chat', json={'message':'hello','session_id':'s1'})
+    app[SESSION_STORE_KEY].mark_deleted('s1')
+    before = fake.create_calls
+    r = await c.post('/api/chat', json={'message':'again','session_id':'s1'})
+    body = await r.json()
+    assert r.status == 410
+    assert body['error'] == 'session_deleted'
+    assert fake.create_calls == before
+    assert app[SESSION_STORE_KEY].get('s1').deleted is True
+    await c.close()

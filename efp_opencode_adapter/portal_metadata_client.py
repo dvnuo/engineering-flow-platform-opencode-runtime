@@ -49,3 +49,43 @@ class PortalMetadataClient:
                 with self.pending_file.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(clean, ensure_ascii=False) + "\n")
             return {"success": False, "error": safe_preview(str(exc))}
+
+    async def delete_session_metadata(self, session_id: str) -> dict:
+        if not self.settings.portal_internal_base_url or not self.settings.portal_agent_id:
+            return {"success": False, "skipped": True, "reason": "portal_metadata_not_configured"}
+        url = f"{self.settings.portal_internal_base_url.rstrip('/')}/api/internal/agents/{self.settings.portal_agent_id}/sessions/{session_id}/metadata"
+        headers = {}
+        if self.settings.portal_internal_token:
+            headers["Authorization"] = f"Bearer {self.settings.portal_internal_token}"
+            headers["X-Portal-Internal-Token"] = self.settings.portal_internal_token
+        timeout = aiohttp.ClientTimeout(total=self.settings.portal_metadata_timeout_seconds)
+        try:
+            if self._session is not None:
+                resp = await self._session.delete(url, headers=headers, timeout=timeout)
+                async with resp:
+                    payload = None
+                    try:
+                        payload = await resp.json()
+                    except Exception:
+                        payload = None
+                    if 200 <= resp.status < 300:
+                        return {"success": True, "status": resp.status, "payload": payload}
+                    if resp.status in {404, 405}:
+                        return {"success": False, "skipped": True, "status": resp.status, "reason": "portal_metadata_delete_endpoint_unavailable"}
+                    err = await resp.text()
+                    return {"success": False, "status": resp.status, "error": safe_preview(err)}
+            async with aiohttp.ClientSession() as s:
+                async with s.delete(url, headers=headers, timeout=timeout) as resp:
+                    payload = None
+                    try:
+                        payload = await resp.json()
+                    except Exception:
+                        payload = None
+                    if 200 <= resp.status < 300:
+                        return {"success": True, "status": resp.status, "payload": payload}
+                    if resp.status in {404, 405}:
+                        return {"success": False, "skipped": True, "status": resp.status, "reason": "portal_metadata_delete_endpoint_unavailable"}
+                    err = await resp.text()
+                    return {"success": False, "status": resp.status, "error": safe_preview(err)}
+        except Exception as exc:
+            return {"success": False, "error": safe_preview(str(exc))}

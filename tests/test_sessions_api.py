@@ -285,3 +285,54 @@ async def test_edit_raw_resend_exception_returns_502_json(tmp_path, monkeypatch)
     assert body["error"] == "opencode_edit_resend_failed"
     assert "transport closed" in body["detail"]
     await client.close()
+
+class _DeleteStatusClient(FakeOpenCodeClient):
+    def __init__(self, status):
+        super().__init__(); self.status=status; self.delete_calls=0
+    async def delete_session(self, session_id):
+        self.delete_calls += 1
+        if self.status is None:
+            return await super().delete_session(session_id)
+        raise OpenCodeClientError("delete failed", status=self.status)
+
+
+@pytest.mark.asyncio
+async def test_delete_session_500_returns_502_and_keeps_active(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=_DeleteStatusClient(500))
+    client = TestClient(TestServer(app)); await client.start_server()
+    await client.post('/api/chat', json={'message':'hello','session_id':'s1'})
+    res = await client.delete('/api/sessions/s1'); body = await res.json()
+    assert res.status == 502 and body['error'] == 'opencode_delete_failed'
+    assert app[SESSION_STORE_KEY].get('s1').deleted is False
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_session_404_marks_deleted(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=_DeleteStatusClient(404))
+    client = TestClient(TestServer(app)); await client.start_server()
+    await client.post('/api/chat', json={'message':'hello','session_id':'s1'})
+    res = await client.delete('/api/sessions/s1'); body = await res.json()
+    assert res.status == 200 and body['success'] is True and body['opencode_missing'] is True
+    assert app[SESSION_STORE_KEY].get('s1').deleted is True
+    await client.close()
+
+@pytest.mark.asyncio
+async def test_clear_sessions_partial_failure_returns_502(tmp_path, monkeypatch):
+    class C(FakeOpenCodeClient):
+        async def delete_session(self, session_id):
+            if session_id.endswith('2'):
+                raise OpenCodeClientError('boom', status=500)
+            return await super().delete_session(session_id)
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    app = create_app(Settings.from_env(), opencode_client=C())
+    client = TestClient(TestServer(app)); await client.start_server()
+    await client.post('/api/chat', json={'message':'a','session_id':'s1'})
+    await client.post('/api/chat', json={'message':'b','session_id':'s2'})
+    res = await client.post('/api/clear'); body = await res.json()
+    assert res.status == 502 and body['success'] is False and body['failed_count'] == 1
+    assert app[SESSION_STORE_KEY].get('s1').deleted is True
+    assert app[SESSION_STORE_KEY].get('s2').deleted is False
+    await client.close()
