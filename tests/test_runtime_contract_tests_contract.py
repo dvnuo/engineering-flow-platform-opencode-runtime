@@ -72,3 +72,9 @@ def test_runtime_asset_mapping_contract_checks_capability_tool_surface():
     assert 'tool_mappings' in text
     assert 'opencode_tools' in text
     assert 'tool_cap' in text or 'expected tool capability' in text
+
+
+def test_runtime_contract_docs_cover_empty_final_non_success():
+    text = (ROOT / "docs" / "RUNTIME_CONTRACT.md").read_text(encoding="utf-8")
+    assert "empty_final" in text
+    assert "ok=false" in text

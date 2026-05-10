@@ -50,7 +50,7 @@ def profile_policy_permission_baseline() -> dict[str, Any]:
     }
 
 
-def workspace_full_access_permission_baseline(*, allow_bash_all: bool = False) -> dict[str, Any]:
+def workspace_full_access_permission_baseline(*, allow_bash_all: bool = True) -> dict[str, Any]:
     return {
         "*": "allow",
         "read": "allow",
@@ -68,7 +68,7 @@ def workspace_full_access_permission_baseline(*, allow_bash_all: bool = False) -
     }
 
 
-def default_permission_baseline(*, permission_mode: str = "profile_policy", allow_bash_all: bool = False) -> dict[str, Any]:
+def default_permission_baseline(*, permission_mode: str = "workspace_full_access", allow_bash_all: bool = True) -> dict[str, Any]:
     mode = normalize_permission_mode(permission_mode)
     if mode == "profile_policy":
         return profile_policy_permission_baseline()
@@ -257,7 +257,7 @@ def _llm_tools_configured(config: dict[str, Any]) -> bool:
     return "tools" in llm
 
 
-def build_permission(config: dict, skills_index: dict | None = None, tools_index: dict | None = None, *, permission_mode: str = "profile_policy", allow_bash_all: bool = False) -> dict:
+def build_permission(config: dict, skills_index: dict | None = None, tools_index: dict | None = None, *, permission_mode: str = "workspace_full_access", allow_bash_all: bool = True) -> dict:
     mode = normalize_permission_mode(permission_mode)
     permission = copy.deepcopy(default_permission_baseline(permission_mode=mode, allow_bash_all=allow_bash_all))
     config = config if isinstance(config, dict) else {}

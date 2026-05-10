@@ -70,3 +70,21 @@ def test_progress_text_with_stop_is_not_terminal():
     payload = {"messages": [{"id": "a1", "role": "assistant", "finish_reason": "stop", "parts": [{"type": "text", "text": "I am fetching the Confluence page now and will summarize the agenda once I have the content"}]}]}
     out = find_latest_assistant_completion(payload)
     assert out["completion_state"] != "completed"
+
+
+def test_pending_permission_returns_blocked():
+    payload = {"messages": [{"id":"a1","role":"assistant","parts":[{"type":"permission","status":"pending"}]}]}
+    out = find_latest_assistant_completion(payload)
+    assert out["completion_state"] == "blocked"
+
+
+def test_empty_assistant_is_incomplete():
+    payload = {"messages": [{"id":"a1","role":"assistant","parts":[]}]}
+    out = find_latest_assistant_completion(payload)
+    assert out["completion_state"] == "incomplete"
+
+
+def test_finish_reason_tool_use_is_not_completed():
+    payload = {"messages": [{"id":"a1","role":"assistant","finish_reason":"tool_use","parts":[{"type":"text","text":"final?"}]}]}
+    out = find_latest_assistant_completion(payload)
+    assert out["completion_state"] != "completed"

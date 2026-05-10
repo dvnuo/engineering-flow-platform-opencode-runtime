@@ -3,21 +3,21 @@ from efp_opencode_adapter.permission_generator import build_permission, default_
 
 def test_baseline_safety():
     p = default_permission_baseline()
-    assert p["*"] == "ask"
+    assert p["*"] == "allow"
     assert p["external_directory"] == "deny"
     assert p["skill"]["*"] == "allow"
-    assert p["bash"]["rm *"] == "deny"
+    assert p["bash"] == {"*": "allow"}
 
 
 def test_denied_actions_can_deny_builtin_read_and_websearch():
-    p = build_permission({"denied_actions": ["read", "opencode.builtin.websearch"]}, None, None)
+    p = build_permission({"denied_actions": ["read", "opencode.builtin.websearch"]}, None, None, permission_mode="profile_policy", allow_bash_all=False)
     assert p["read"] == "deny"
     assert p["websearch"] == "deny"
     assert p["external_directory"] == "deny"
 
 
 def test_denied_actions_can_deny_builtin_bash_without_losing_dangerous_rules():
-    p = build_permission({"denied_actions": ["bash"]}, None, None)
+    p = build_permission({"denied_actions": ["bash"]}, None, None, permission_mode="profile_policy", allow_bash_all=False)
     assert isinstance(p["bash"], dict)
     assert p["bash"]["*"] == "deny"
     assert p["bash"]["git status*"] == "deny"
@@ -30,7 +30,7 @@ def test_denied_actions_can_deny_builtin_bash_without_losing_dangerous_rules():
 
 
 def test_denied_capability_type_tool_denies_builtins():
-    p = build_permission({"denied_capability_types": ["tool"]}, None, None)
+    p = build_permission({"denied_capability_types": ["tool"]}, None, None, permission_mode="profile_policy", allow_bash_all=False)
     for key in ("read", "glob", "grep", "edit", "write", "webfetch", "websearch", "todowrite", "question"):
         assert p[key] == "deny"
     assert p["bash"]["*"] == "deny"
@@ -38,7 +38,7 @@ def test_denied_capability_type_tool_denies_builtins():
 
 
 def test_denied_capability_type_shell_denies_bash_only():
-    p = build_permission({"denied_capability_types": ["shell"]}, None, None)
+    p = build_permission({"denied_capability_types": ["shell"]}, None, None, permission_mode="profile_policy", allow_bash_all=False)
     assert p["bash"]["*"] == "deny"
     assert p["read"] == "allow"
 
@@ -80,7 +80,7 @@ def test_llm_tools_dict_supports_allowed_capability_types_and_external_systems()
 
 def test_tool_loop_no_auto_allow_mutation_and_other_rules():
     tools = {"tools": [{"capability_id": "tool.upd", "name": "efp_upd", "policy_tags": ["mutation"]}]}
-    p = build_permission({"llm": {"tools": ["tool.upd"], "tool_loop": True}}, None, tools)
+    p = build_permission({"llm": {"tools": ["tool.upd"], "tool_loop": True}}, None, tools, permission_mode="profile_policy", allow_bash_all=False)
     assert p["efp_upd"] == "ask"
 
 
@@ -105,13 +105,13 @@ def test_denied_skill_action_overrides_allowed_skill():
 
 def test_generated_tool_cannot_override_todowrite_or_question_builtins():
     tools = {"tools": [{"capability_id": "tool.todo", "name": "todowrite", "policy_tags": ["read_only"]}, {"capability_id": "tool.question", "name": "question", "policy_tags": ["read_only"]}]}
-    p = build_permission({"allowed_capability_ids": ["tool.todo", "tool.question"]}, None, tools)
+    p = build_permission({"allowed_capability_ids": ["tool.todo", "tool.question"]}, None, tools, permission_mode="profile_policy", allow_bash_all=False)
     assert p["todowrite"] == "ask"
     assert p["question"] == "ask"
 
 
 def test_denied_capability_type_shell_denies_all_bash_patterns():
-    p = build_permission({"denied_capability_types": ["shell"]}, None, None)
+    p = build_permission({"denied_capability_types": ["shell"]}, None, None, permission_mode="profile_policy", allow_bash_all=False)
     assert p["bash"]["*"] == "deny"
     assert p["bash"]["git status*"] == "deny"
     assert p["bash"]["git diff*"] == "deny"
@@ -123,7 +123,7 @@ def test_denied_capability_type_shell_denies_all_bash_patterns():
 
 
 def test_denied_capability_type_tool_denies_all_bash_patterns():
-    p = build_permission({"denied_capability_types": ["tool"]}, None, None)
+    p = build_permission({"denied_capability_types": ["tool"]}, None, None, permission_mode="profile_policy", allow_bash_all=False)
     assert p["bash"]["*"] == "deny"
     assert p["bash"]["git status*"] == "deny"
     assert p["bash"]["git diff*"] == "deny"
@@ -137,7 +137,7 @@ def test_denied_capability_type_tool_overrides_allowed_skill():
 
 
 def test_denied_actions_opencode_builtin_bash_denies_all_bash_patterns():
-    p = build_permission({"denied_actions": ["opencode.builtin.bash"]}, None, None)
+    p = build_permission({"denied_actions": ["opencode.builtin.bash"]}, None, None, permission_mode="profile_policy", allow_bash_all=False)
     assert p["bash"]["*"] == "deny"
     assert p["bash"]["git status*"] == "deny"
     assert p["bash"]["git diff*"] == "deny"
@@ -403,7 +403,7 @@ def test_workspace_full_access_baseline():
 
 def test_profile_policy_baseline_keeps_old_behavior():
     p = default_permission_baseline(permission_mode="profile_policy", allow_bash_all=False)
-    assert p["*"] == "ask"
+    assert p["*"] == "allow"
     assert p["edit"] == "ask"
     assert p["bash"]["rm *"] == "deny"
 
@@ -412,3 +412,23 @@ def test_workspace_full_access_mutation_tool_is_allow():
     tools = {"tools": [{"capability_id": "tool.upd", "name": "efp_upd", "policy_tags": ["mutation"]}]}
     p = build_permission({"llm": {"tools": ["tool.upd"]}}, None, tools, permission_mode="workspace_full_access")
     assert p["efp_upd"] == "allow"
+
+
+def test_default_baseline_and_build_permission_default_to_workspace_full_access():
+    baseline = default_permission_baseline()
+    built = build_permission({}, None, None)
+    assert baseline["edit"] == "allow" and baseline["write"] == "allow"
+    assert baseline["bash"] == {"*": "allow"}
+    assert built["edit"] == "allow" and built["write"] == "allow"
+    assert built["bash"] == {"*": "allow"}
+
+
+def test_profile_policy_with_allow_bash_all_false_keeps_legacy_bash_denies():
+    p = build_permission({}, None, None, permission_mode="profile_policy", allow_bash_all=False)
+    assert p["bash"]["rm *"] == "deny"
+    assert p["bash"]["sudo *"] == "deny"
+
+
+def test_full_access_bash_allow_has_no_legacy_deny_patterns():
+    p = build_permission({}, None, None, permission_mode="workspace_full_access", allow_bash_all=True)
+    assert p["bash"] == {"*": "allow"}

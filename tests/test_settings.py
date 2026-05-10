@@ -33,5 +33,8 @@ def test_settings_permission_mode_unknown_or_empty_fallback(monkeypatch):
     monkeypatch.setenv("EFP_OPENCODE_PERMISSION_MODE", "")
     assert Settings.from_env().opencode_permission_mode == "workspace_full_access"
     monkeypatch.setenv("EFP_OPENCODE_PERMISSION_MODE", "unknown")
-    from efp_opencode_adapter.permission_generator import normalize_permission_mode
-    assert normalize_permission_mode(Settings.from_env().opencode_permission_mode) == "workspace_full_access"
+    assert Settings.from_env().opencode_permission_mode == "workspace_full_access"
+    monkeypatch.setenv("EFP_OPENCODE_PERMISSION_MODE", "profile-policy")
+    assert Settings.from_env().opencode_permission_mode == "profile_policy"
+    monkeypatch.setenv("EFP_OPENCODE_PERMISSION_MODE", "restricted")
+    assert Settings.from_env().opencode_permission_mode == "profile_policy"

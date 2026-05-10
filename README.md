@@ -50,3 +50,10 @@ Legacy aliases `RUNTIME_CONTRACT_EXPECT_TOOL` and `RUNTIME_CONTRACT_EXPECT_EFP_T
 - runtime contract tests
 - docker smoke asset mapping
 - wrapper/tools-index snapshot tests
+
+## Runtime permission/chat defaults
+- `EFP_OPENCODE_PERMISSION_MODE=workspace_full_access` (default)
+- `EFP_OPENCODE_ALLOW_BASH_ALL=true` (default)
+- Default runtime permission map allows `edit`/`write` and forces `bash: {"*": "allow"}`.
+- Set `profile_policy` to restore legacy ask/deny behavior for tighter environments.
+- Chat final-state contract: `completed` + visible text => `ok=true`; `blocked`/`incomplete`/`error`/`empty_final` => `ok=false`; empty success responses are not allowed.

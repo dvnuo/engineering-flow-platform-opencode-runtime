@@ -11,6 +11,13 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off", ""}
 
 
+def _normalize_opencode_permission_mode(raw: str | None) -> str:
+    value = str(raw or "").strip().lower()
+    if value in {"profile_policy", "profile-policy", "policy", "restricted"}:
+        return "profile_policy"
+    return "workspace_full_access"
+
+
 @dataclass(frozen=True)
 class Settings:
     opencode_url: str
@@ -59,6 +66,6 @@ class Settings:
             portal_metadata_timeout_seconds=float(os.getenv("PORTAL_METADATA_TIMEOUT_SECONDS", "5")),
             chat_completion_timeout_seconds=float(os.getenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "300")),
             chat_completion_poll_seconds=max(0.1, float(os.getenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "1.0"))),
-            opencode_permission_mode=((os.getenv("EFP_OPENCODE_PERMISSION_MODE", "workspace_full_access").strip().lower()) or "workspace_full_access"),
+            opencode_permission_mode=_normalize_opencode_permission_mode(os.getenv("EFP_OPENCODE_PERMISSION_MODE", "workspace_full_access")),
             opencode_allow_bash_all=_env_bool("EFP_OPENCODE_ALLOW_BASH_ALL", True),
         )

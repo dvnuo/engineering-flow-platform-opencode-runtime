@@ -798,3 +798,48 @@ async def test_chat_deleted_session_does_not_send_or_create(tmp_path, monkeypatc
     assert fake.send_calls == before_send
     assert app[SESSION_STORE_KEY].get("s2").deleted is True
     await c.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_completion_pending_then_completed_polls_until_completed():
+    class C:
+        def __init__(self): self.calls=0
+        async def list_messages(self, _sid):
+            self.calls += 1
+            if self.calls == 1:
+                return [{"id":"a1","role":"assistant","parts":[{"type":"text","text":"Creating files..."},{"type":"tool","status":"running"}]}]
+            return [{"id":"a2","role":"assistant","finish_reason":"stop","parts":[{"type":"text","text":"done"}]}]
+    probe, _ = await __import__('efp_opencode_adapter.chat_api', fromlist=['_wait_for_assistant_completion'])._wait_for_assistant_completion(client=C(), opencode_session_id='s', response_payload={}, before_messages=[], timeout_seconds=0.5, poll_seconds=0.01)
+    assert probe["completion_state"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_completion_pending_timeout_has_diagnostics():
+    class C:
+        async def list_messages(self, _sid):
+            return [{"id":"a1","role":"assistant","parts":[{"type":"text","text":"Creating files..."},{"type":"tool","status":"running"}]}]
+    probe, _ = await __import__('efp_opencode_adapter.chat_api', fromlist=['_wait_for_assistant_completion'])._wait_for_assistant_completion(client=C(), opencode_session_id='s', response_payload={}, before_messages=[], timeout_seconds=0.02, poll_seconds=0.01)
+    assert probe["completion_state"] == "incomplete"
+    assert probe["reason"] == "final_assistant_message_timeout"
+    assert "timeout_seconds" in probe["diagnostics"] and "poll_seconds" in probe["diagnostics"] and "progress_preview" in probe["diagnostics"]
+
+
+@pytest.mark.asyncio
+async def test_chat_completed_with_empty_text_returns_empty_final(tmp_path, monkeypatch):
+    class EmptyFinal(FakeOpenCodeClient):
+        async def send_message(self, session_id, **kwargs):
+            msg = {"id":"a1","role":"assistant","finish_reason":"stop","parts":[{"type":"text","text":""}]}
+            self.messages[session_id]=[msg]
+            return {"message": msg}
+        async def list_messages(self, session_id):
+            return list(self.messages[session_id])
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    c = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=EmptyFinal()))); await c.start_server()
+    payload = await (await c.post("/api/chat", json={"message":"q","session_id":"s-empty-final"})).json()
+    assert payload["ok"] is False and payload["completion_state"] == "empty_final"
+    assert payload["incomplete_reason"] == "empty_final_assistant_text"
+    assert "without a visible assistant response" in payload["response"]
+    assert any(e.get("type") == "chat.empty_final" for e in payload["runtime_events"])
+    chatlog = await (await c.get("/api/sessions/s-empty-final/chatlog")).json()
+    assert chatlog["status"] != "success"
+    await c.close()
