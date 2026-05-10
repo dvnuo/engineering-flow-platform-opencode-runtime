@@ -21,10 +21,8 @@ class WorkspaceFileService:
         if raw in {"", ".", "/"}:
             return self.root
         normalized = raw.replace("\\", "/")
-        candidate = PurePosixPath(normalized)
-        if candidate.is_absolute():
-            raise PermissionError("path outside workspace")
-        resolved = (self.root / str(candidate)).resolve()
+        candidate = Path(normalized)
+        resolved = candidate.resolve() if candidate.is_absolute() else (self.root / normalized).resolve()
         try:
             resolved.relative_to(self.root)
         except ValueError as exc:
@@ -51,20 +49,32 @@ class WorkspaceFileService:
             raise ValueError("path must be a directory")
         items = []
         for entry in target.iterdir():
-            if entry.is_symlink():
-                continue
-            stat = entry.stat()
-            items.append(
-                {
+            try:
+                if entry.is_symlink():
+                    continue
+                stat = entry.stat()
+                is_dir = entry.is_dir()
+                is_file = entry.is_file()
+                items.append({
                     "name": entry.name,
-                    "path": self.workspace_relative_path(entry),
-                    "type": "directory" if entry.is_dir() else "file",
-                    "size": 0 if entry.is_dir() else stat.st_size,
+                    "path": str(entry.resolve()),
+                    "relative_path": self.workspace_relative_path(entry),
+                    "is_dir": is_dir,
+                    "is_file": is_file,
+                    "type": "directory" if is_dir else "file",
+                    "size": 0 if is_dir else stat.st_size,
                     "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
-                }
-            )
-        items.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
-        return {"success": True, "path": self.workspace_relative_path(target), "items": items}
+                })
+            except (PermissionError, FileNotFoundError, OSError):
+                continue
+        items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+        return {
+            "success": True,
+            "root_path": str(self.root),
+            "path": str(target.resolve()),
+            "relative_path": self.workspace_relative_path(target),
+            "items": items,
+        }
 
     def read_file(self, user_path: str) -> dict:
         target = self.resolve_workspace_path(user_path)
@@ -103,16 +113,21 @@ class WorkspaceFileService:
     def upload_file(self, directory: str | None, filename: str, data: bytes) -> dict:
         target, name = self._resolve_write_target(directory, filename)
         target.write_bytes(data)
+        relative_path = self.workspace_relative_path(target)
         return {
             "success": True,
             "name": name,
-            "path": self.workspace_relative_path(target),
+            "path": relative_path,
+            "relative_path": relative_path,
+            "target_path": str(target.resolve()),
+            "uploaded_filename": name,
+            "mode": "file_save",
             "size": len(data),
             "content_type": mimetypes.guess_type(name)[0] or "application/octet-stream",
         }
 
     def extract_zip_safely(self, directory: str | None, filename: str, data: bytes) -> dict:
-        _sanitize_filename(filename)
+        clean_name = _sanitize_filename(filename)
         target_dir = self.resolve_workspace_path(directory)
         target_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -122,7 +137,6 @@ class WorkspaceFileService:
 
         with zf:
             members = zf.infolist()
-            extracted_items: list[str] = []
             for info in members:
                 member_name = info.filename.replace("\\", "/")
                 posix = PurePosixPath(member_name)
@@ -137,6 +151,8 @@ class WorkspaceFileService:
                     resolved.relative_to(target_dir.resolve())
                 except ValueError as exc:
                     raise PermissionError("zip entry outside target directory") from exc
+
+            extracted_items: list[str] = []
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_dir = Path(tmp)
                 zf.extractall(tmp_dir)
@@ -149,7 +165,18 @@ class WorkspaceFileService:
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(path, dest)
                         extracted_items.append(self.workspace_relative_path(dest))
-        return {"success": True, "path": self.workspace_relative_path(target_dir), "items": sorted(extracted_items)}
+
+        relative_target = self.workspace_relative_path(target_dir)
+        return {
+            "success": True,
+            "mode": "zip_extract",
+            "uploaded_filename": clean_name,
+            "path": relative_target,
+            "relative_path": relative_target,
+            "target_path": str(target_dir.resolve()),
+            "items": sorted(extracted_items),
+            "extracted_count": len(extracted_items),
+        }
 
     def delete_path(self, user_path: str, recursive: bool = False) -> dict:
         target = self.resolve_workspace_path(user_path)
@@ -165,6 +192,32 @@ class WorkspaceFileService:
             else:
                 target.rmdir()
         return {"success": True, "path": self.workspace_relative_path(target), "deleted": True}
+
+    def delete_paths(self, user_paths: list[str], *, recursive: bool = True) -> dict:
+        if not user_paths:
+            raise ValueError("paths is required")
+
+        resolved_targets: list[tuple[Path, bool, bool, str]] = []
+        for user_path in user_paths:
+            target = self.resolve_workspace_path(user_path)
+            if target == self.root:
+                raise PermissionError("cannot delete workspace root")
+            if not target.exists():
+                raise FileNotFoundError
+            resolved_targets.append((target, target.is_dir(), target.is_file(), self.workspace_relative_path(target)))
+
+        deleted = []
+        for target, is_dir, is_file, rel in resolved_targets:
+            if is_file:
+                target.unlink()
+            elif is_dir:
+                if recursive:
+                    shutil.rmtree(target)
+                else:
+                    target.rmdir()
+            deleted.append({"path": str(target.resolve()), "relative_path": rel, "is_dir": is_dir, "is_file": is_file})
+
+        return {"success": True, "deleted": deleted}
 
     def prepare_download(self, user_path: str) -> tuple[Path, str, str | None]:
         target = self.resolve_workspace_path(user_path)
@@ -185,9 +238,46 @@ class WorkspaceFileService:
                     if not p.is_file():
                         continue
                     resolved = self._ensure_under_workspace(p)
-                    zf.write(resolved, arcname=(Path(rel) / p.relative_to(target)).as_posix() if rel != "." else p.relative_to(target).as_posix())
+                    arc = (Path(rel) / p.relative_to(target)).as_posix() if rel != "." else p.relative_to(target).as_posix()
+                    zf.write(resolved, arcname=arc)
             return tmp_path, archive_name, "application/zip"
         raise ValueError("unsupported path")
+
+    def prepare_download_many(self, user_paths: list[str]) -> tuple[Path, str, str | None]:
+        if not user_paths:
+            raise ValueError("paths is required")
+        if len(user_paths) == 1:
+            return self.prepare_download(user_paths[0])
+
+        targets = []
+        for user_path in user_paths:
+            target = self.resolve_workspace_path(user_path)
+            if not target.exists():
+                raise FileNotFoundError
+            targets.append(target)
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+        tmp_path = Path(tmp.name)
+        tmp.close()
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for target in targets:
+                if target.is_symlink():
+                    raise PermissionError("path outside workspace")
+                rel = self.workspace_relative_path(target)
+                if target.is_file():
+                    zf.write(self._ensure_under_workspace(target), arcname=rel)
+                elif target.is_dir():
+                    for p in target.rglob("*"):
+                        if p.is_symlink():
+                            raise PermissionError("path outside workspace")
+                        if not p.is_file():
+                            continue
+                        resolved = self._ensure_under_workspace(p)
+                        arc = (Path(rel) / p.relative_to(target)).as_posix() if rel != "." else p.relative_to(target).as_posix()
+                        zf.write(resolved, arcname=arc)
+                else:
+                    raise ValueError("unsupported path")
+        return tmp_path, "server-files.zip", "application/zip"
 
 
 def _sanitize_filename(filename: str) -> str:

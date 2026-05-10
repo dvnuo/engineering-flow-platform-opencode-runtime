@@ -25,6 +25,65 @@ def make_settings(tmp_path: Path) -> Settings:
     )
 
 
+def test_list_files_returns_portal_native_shape_for_directories(tmp_path):
+    settings = make_settings(tmp_path)
+    (settings.workspace_dir / ".opencode" / "agents").mkdir(parents=True)
+    (settings.workspace_dir / ".opencode" / "opencode.json").write_text("{}")
+    (settings.workspace_dir / "README.md").write_text("hello")
+    svc = WorkspaceFileService(settings)
+
+    ls = svc.list_files(".")
+    assert ls["success"] is True
+    assert ls["root_path"] == str(settings.workspace_dir.resolve())
+    assert ls["path"] == str(settings.workspace_dir.resolve())
+
+    items = {i["name"]: i for i in ls["items"]}
+    opencode = items[".opencode"]
+    assert opencode["is_dir"] is True
+    assert opencode["is_file"] is False
+    assert opencode["type"] == "directory"
+    assert opencode["path"] == str((settings.workspace_dir / ".opencode").resolve())
+    assert opencode["relative_path"] == ".opencode"
+
+    readme = items["README.md"]
+    assert readme["is_dir"] is False
+    assert readme["is_file"] is True
+    assert readme["type"] == "file"
+
+    names = [i["name"] for i in ls["items"]]
+    assert names.index(".opencode") < names.index("README.md")
+
+
+def test_can_reopen_returned_absolute_directory_path(tmp_path):
+    settings = make_settings(tmp_path)
+    (settings.workspace_dir / ".opencode" / "agents").mkdir(parents=True)
+    (settings.workspace_dir / ".opencode" / "opencode.json").write_text("{}")
+    svc = WorkspaceFileService(settings)
+
+    root = svc.list_files(".")
+    op_path = next(i["path"] for i in root["items"] if i["name"] == ".opencode")
+
+    nested = svc.list_files(op_path)
+    assert nested["success"] is True
+    assert nested["path"] == str((settings.workspace_dir / ".opencode").resolve())
+    children = {i["name"] for i in nested["items"]}
+    assert "agents" in children or "opencode.json" in children
+
+
+def test_absolute_path_inside_workspace_allowed_and_outside_rejected(tmp_path):
+    settings = make_settings(tmp_path)
+    (settings.workspace_dir / ".opencode").mkdir(parents=True)
+    svc = WorkspaceFileService(settings)
+
+    inside = svc.resolve_workspace_path(str(settings.workspace_dir / ".opencode"))
+    assert inside == (settings.workspace_dir / ".opencode").resolve()
+
+    with pytest.raises(PermissionError):
+        svc.resolve_workspace_path("/etc")
+    with pytest.raises(PermissionError):
+        svc.resolve_workspace_path("../secret")
+
+
 def test_workspace_service_core(tmp_path):
     settings = make_settings(tmp_path)
     settings.workspace_dir.mkdir(parents=True)
@@ -48,6 +107,7 @@ def test_workspace_service_core(tmp_path):
 
     up = svc.upload_file("uploads", "hello.txt", b"abc")
     assert up["path"] == "uploads/hello.txt"
+    assert up["mode"] == "file_save"
 
     safe = io.BytesIO()
     with zipfile.ZipFile(safe, "w") as zf:
@@ -67,8 +127,6 @@ def test_workspace_service_core(tmp_path):
     with pytest.raises(OSError):
         svc.delete_path("src")
     assert svc.delete_path("src", recursive=True)["deleted"] is True
-
-
 
 
 def test_upload_refuses_existing_symlink_escape(tmp_path):
@@ -112,6 +170,179 @@ def test_list_files_skips_symlinks(tmp_path):
     assert "real.txt" in names
     assert "link.txt" not in names
 
+
+@pytest.mark.asyncio
+async def test_download_route_accepts_repeated_paths_and_returns_zip(tmp_path):
+    settings = make_settings(tmp_path)
+    (settings.workspace_dir / "dir").mkdir(parents=True)
+    (settings.workspace_dir / "a.txt").write_text("a")
+    (settings.workspace_dir / "dir" / "b.txt").write_text("b")
+
+    class FakeHealthy:
+        async def health(self):
+            return {"healthy": True, "version": "1.14.39"}
+
+    client = TestClient(TestServer(create_app(settings, opencode_client=FakeHealthy())))
+    await client.start_server()
+
+    r = await client.get("/api/server-files/download?paths=a.txt&paths=dir")
+    assert r.status == 200
+    assert "zip" in (r.headers.get("Content-Type", "") + r.headers.get("Content-Disposition", "")).lower()
+    data = await r.read()
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = set(zf.namelist())
+    assert "a.txt" in names
+    assert "dir/b.txt" in names
+
+    r2 = await client.get("/api/server-files/download", params={"path": "a.txt"})
+    assert r2.status == 200
+    assert await r2.read() == b"a"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_route_accepts_paths_list_and_recurses(tmp_path):
+    settings = make_settings(tmp_path)
+    (settings.workspace_dir / "dir").mkdir(parents=True)
+    (settings.workspace_dir / "a.txt").write_text("a")
+    (settings.workspace_dir / "dir" / "b.txt").write_text("b")
+
+    class FakeHealthy:
+        async def health(self):
+            return {"healthy": True, "version": "1.14.39"}
+
+    client = TestClient(TestServer(create_app(settings, opencode_client=FakeHealthy())))
+    await client.start_server()
+
+    r = await client.post("/api/server-files/delete", json={"paths": ["a.txt", "dir"]})
+    assert r.status == 200
+    assert (await r.json())["success"] is True
+    assert not (settings.workspace_dir / "a.txt").exists()
+    assert not (settings.workspace_dir / "dir").exists()
+
+    r2 = await client.post("/api/server-files/delete", json={"paths": ["."]})
+    assert r2.status == 403
+    assert settings.workspace_dir.exists()
+
+    r3 = await client.post("/api/server-files/delete", json={"paths": ["../secret"]})
+    assert r3.status == 403
+
+    r4 = await client.post("/api/server-files/delete", json={"paths": []})
+    assert r4.status == 400
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_route_legacy_path_still_supported(tmp_path):
+    settings = make_settings(tmp_path)
+    (settings.workspace_dir / "src").mkdir(parents=True)
+    (settings.workspace_dir / "src" / "x.txt").write_text("x")
+
+    class FakeHealthy:
+        async def health(self):
+            return {"healthy": True, "version": "1.14.39"}
+
+    client = TestClient(TestServer(create_app(settings, opencode_client=FakeHealthy())))
+    await client.start_server()
+
+    r1 = await client.post("/api/server-files/delete", json={"path": "."})
+    assert r1.status == 403
+
+    r2 = await client.post("/api/server-files/delete", json={"path": "src", "recursive": "true"})
+    assert r2.status == 200
+    assert not (settings.workspace_dir / "src").exists()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_zip_upload_auto_extracts_by_filename_without_unzip_param(tmp_path):
+    settings = make_settings(tmp_path)
+    settings.workspace_dir.mkdir(parents=True)
+
+    class FakeHealthy:
+        async def health(self):
+            return {"healthy": True, "version": "1.14.39"}
+
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as zf:
+        zf.writestr("x.txt", "x")
+        zf.writestr("d/y.txt", "y")
+
+    client = TestClient(TestServer(create_app(settings, opencode_client=FakeHealthy())))
+    await client.start_server()
+
+    form = FormData()
+    form.add_field("file", payload.getvalue(), filename="bundle.zip", content_type="application/zip")
+    form.add_field("directory", "uploads")
+    r = await client.post("/api/server-files/upload", data=form)
+    assert r.status == 200
+    body = await r.json()
+    assert body["success"] is True
+    assert body["mode"] == "zip_extract"
+    assert body["uploaded_filename"] == "bundle.zip"
+    assert body["extracted_count"] == 2
+    assert body["target_path"] == str((settings.workspace_dir / "uploads").resolve())
+    assert (settings.workspace_dir / "uploads" / "x.txt").exists()
+    assert (settings.workspace_dir / "uploads" / "d" / "y.txt").exists()
+    assert not (settings.workspace_dir / "uploads" / "bundle.zip").exists()
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_non_zip_upload_still_file_save(tmp_path):
+    settings = make_settings(tmp_path)
+    settings.workspace_dir.mkdir(parents=True)
+
+    class FakeHealthy:
+        async def health(self):
+            return {"healthy": True, "version": "1.14.39"}
+
+    client = TestClient(TestServer(create_app(settings, opencode_client=FakeHealthy())))
+    await client.start_server()
+
+    form = FormData()
+    form.add_field("file", b"hello", filename="hello.txt", content_type="text/plain")
+    form.add_field("directory", "uploads")
+    r = await client.post("/api/server-files/upload", data=form)
+    assert r.status == 200
+    body = await r.json()
+    assert body["mode"] == "file_save"
+    assert body["uploaded_filename"] == "hello.txt"
+    assert body["path"] == "uploads/hello.txt"
+    assert body["size"] == 5
+    assert body["content_type"] == "text/plain"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_zip_filename_returns_400_without_partial_files(tmp_path):
+    settings = make_settings(tmp_path)
+    settings.workspace_dir.mkdir(parents=True)
+
+    class FakeHealthy:
+        async def health(self):
+            return {"healthy": True, "version": "1.14.39"}
+
+    client = TestClient(TestServer(create_app(settings, opencode_client=FakeHealthy())))
+    await client.start_server()
+
+    form = FormData()
+    form.add_field("file", b"not-a-zip", filename="bad.zip", content_type="application/zip")
+    form.add_field("directory", "uploads")
+    r = await client.post("/api/server-files/upload", data=form)
+    assert r.status == 400
+    body = await r.json()
+    assert body["error"] == "invalid_zip_file"
+    assert not (settings.workspace_dir / "uploads" / "bad.zip").exists()
+
+    await client.close()
+
+
 @pytest.mark.asyncio
 async def test_legacy_alias_routes(tmp_path):
     settings = make_settings(tmp_path)
@@ -133,37 +364,5 @@ async def test_legacy_alias_routes(tmp_path):
     assert r2.status == 200
     p2 = await r2.json()
     assert "hello" in p2["content"]
-
-    form = FormData()
-    form.add_field("file", b"abc", filename="hello.txt")
-    form.add_field("directory", "uploads")
-    r3 = await client.post("/api/server-files/upload", data=form)
-    assert r3.status == 200
-    r3_json = await r3.json()
-    assert r3_json["success"] is True
-    assert r3_json["size"] == 3
-    assert (settings.workspace_dir / "uploads" / "hello.txt").read_bytes() == b"abc"
-
-    r4 = await client.get("/api/server-files/content", params={"path": "README.md"})
-    assert r4.status == 200
-    assert await r4.read() == b"hello"
-
-    r5 = await client.post("/api/server-files/delete", json={"path": "."})
-    assert r5.status == 403
-    d5 = await r5.json()
-    assert d5["success"] is False
-    assert "workspace root" in d5["error"] or "outside workspace" in d5["error"]
-
-    r6 = await client.post("/api/server-files/delete", json={"path": "../secret"})
-    assert r6.status == 403
-
-    badzip = FormData()
-    badzip.add_field("file", b"abc", filename="hello.txt", content_type="text/plain")
-    r7 = await client.post("/api/server-files/upload?unzip=true&directory=badzip", data=badzip)
-    assert r7.status == 400
-    d7 = await r7.json()
-    assert d7["success"] is False
-    assert d7["error"] == "invalid_zip_file"
-    assert not (settings.workspace_dir / "badzip" / "hello.txt").exists()
 
     await client.close()
