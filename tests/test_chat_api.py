@@ -456,3 +456,80 @@ async def test_chat_does_not_use_old_history_when_before_messages_unavailable(tm
     assert payload["completion_state"] == "incomplete"
     assert payload["response"] != "OLD FINAL"
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_permission_pending_returns_blocked(tmp_path, monkeypatch):
+    class PendingPermission(FakeOpenCodeClient):
+        async def send_message(self, session_id, **kwargs):
+            msg = {
+                "id": "a-perm-1",
+                "role": "assistant",
+                "parts": [
+                    {"type": "text", "text": "I need permission to fetch the Confluence page."},
+                    {"type": "permission", "status": "pending", "id": "perm-1", "tool": "efp_confluence_get_page"},
+                ],
+            }
+            self.messages[session_id] = [msg]
+            return {"message": msg}
+        async def list_messages(self, session_id): return list(self.messages[session_id])
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=PendingPermission()))); await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-perm-pending"})).json()
+    assert payload["ok"] is False
+    assert payload["completion_state"] == "blocked"
+    assert payload["response"] != "I need permission to fetch the Confluence page."
+    assert payload["_llm_debug"]["completion_probe"]["reason"] == "pending_permission"
+    assert not any(e.get("type") == "complete" for e in payload["runtime_events"])
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_permission_denied_not_success(tmp_path, monkeypatch):
+    class DeniedPermission(FakeOpenCodeClient):
+        async def send_message(self, session_id, **kwargs):
+            msg = {
+                "id": "a-perm-1",
+                "role": "assistant",
+                "parts": [
+                    {"type": "text", "text": "Permission denied."},
+                    {"type": "permission", "status": "denied", "id": "perm-1", "tool": "efp_confluence_get_page"},
+                ],
+            }
+            self.messages[session_id] = [msg]
+            return {"message": msg}
+        async def list_messages(self, session_id): return list(self.messages[session_id])
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=DeniedPermission()))); await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-perm-denied"})).json()
+    assert payload["ok"] is False
+    assert payload["completion_state"] in {"blocked", "error"}
+    assert "permission" in payload["response"].lower() or "denied" in payload["response"].lower()
+    assert not any(e.get("type") == "complete" for e in payload["runtime_events"])
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_permission_resolved_then_final_completed(tmp_path, monkeypatch):
+    class PermissionResolved(FakeOpenCodeClient):
+        def __init__(self): super().__init__(); self.calls = 0
+        async def send_message(self, session_id, **kwargs):
+            msg = {"id": "a-perm-1", "role": "assistant", "parts": [{"type": "text", "text": "Waiting for permission..."}, {"type": "permission", "status": "pending", "id": "perm-1", "tool": "efp_confluence_get_page"}]}
+            self.messages[session_id] = [msg]
+            return {"message": msg}
+        async def list_messages(self, session_id):
+            self.calls += 1
+            if self.calls == 1:
+                return list(self.messages[session_id])
+            final = {"id": "a-final", "role": "assistant", "finish_reason": "stop", "parts": [{"type": "text", "text": "Agenda summary ..."}]}
+            self.messages[session_id].append(final)
+            return list(self.messages[session_id])
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.2")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=PermissionResolved()))); await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-perm-final"})).json()
+    assert payload["ok"] is True
+    assert payload["completion_state"] == "completed"
+    assert payload["response"] == "Agenda summary ..."
+    await client.close()

@@ -271,6 +271,44 @@ async def test_chat_stream_filters_noise_events_and_keeps_useful_events(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("completion_state", "ok"),
+    [
+        ("completed", True),
+        ("blocked", False),
+        ("error", False),
+        ("incomplete", False),
+    ],
+)
+async def test_chat_stream_final_payload_has_completion_state_contract(tmp_path, monkeypatch, completion_state, ok):
+    import efp_opencode_adapter.chat_api as chat_api
+
+    async def fake_handle_chat_payload(payload, app):
+        return {
+            "ok": ok,
+            "completion_state": completion_state,
+            "response": f"state={completion_state}",
+            "session_id": payload.get("session_id", "s-state"),
+            "request_id": payload.get("request_id", "r-state"),
+            "runtime_events": [],
+        }
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(chat_api, "handle_chat_payload", fake_handle_chat_payload)
+    c = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())))
+    await c.start_server()
+    try:
+        resp = await c.post("/api/chat/stream", json={"message": "m", "session_id": "s-state", "request_id": f"r-{completion_state}"})
+        body = await resp.text()
+        assert "event: final" in body
+        assert f"\"completion_state\": \"{completion_state}\"" in body
+        assert f"\"ok\": {str(ok).lower()}" in body
+        assert f"\"response\": \"state={completion_state}\"" in body
+    finally:
+        await c.close()
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_does_not_duplicate_real_and_synthetic_delta(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
     fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
