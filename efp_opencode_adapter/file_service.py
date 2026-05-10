@@ -210,6 +210,8 @@ class WorkspaceFileService:
             seen.add(target)
             resolved_targets.append((target, target.is_dir(), target.is_file(), self.workspace_relative_path(target)))
 
+        resolved_targets = self._collapse_delete_targets(resolved_targets)
+
         deleted = []
         for target, is_dir, is_file, rel in resolved_targets:
             if is_file:
@@ -222,6 +224,30 @@ class WorkspaceFileService:
             deleted.append({"path": str(target.resolve()), "relative_path": rel, "is_dir": is_dir, "is_file": is_file})
 
         return {"success": True, "deleted": deleted}
+
+    @staticmethod
+    def _is_descendant(child: Path, parent: Path) -> bool:
+        try:
+            child.relative_to(parent)
+            return child != parent
+        except ValueError:
+            return False
+
+    def _collapse_delete_targets(
+        self, targets: list[tuple[Path, bool, bool, str]]
+    ) -> list[tuple[Path, bool, bool, str]]:
+        collapsed: list[tuple[Path, bool, bool, str]] = []
+        for target, is_dir, is_file, rel in targets:
+            if any(existing_is_dir and self._is_descendant(target, existing) for existing, existing_is_dir, _, _ in collapsed):
+                continue
+            if is_dir:
+                collapsed = [
+                    existing_tuple
+                    for existing_tuple in collapsed
+                    if not self._is_descendant(existing_tuple[0], target)
+                ]
+            collapsed.append((target, is_dir, is_file, rel))
+        return collapsed
 
     def prepare_download(self, user_path: str) -> tuple[Path, str, str | None]:
         target = self.resolve_workspace_path(user_path)

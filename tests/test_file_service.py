@@ -283,6 +283,53 @@ async def test_delete_route_deduplicates_duplicate_paths_without_half_success(tm
 
     await client.close()
 
+
+@pytest.mark.asyncio
+async def test_delete_route_collapses_parent_child_paths_without_half_success(tmp_path):
+    settings = make_settings(tmp_path)
+    (settings.workspace_dir / "dir" / "sub").mkdir(parents=True)
+    (settings.workspace_dir / "dir" / "b.txt").write_text("b")
+    (settings.workspace_dir / "dir" / "sub" / "c.txt").write_text("c")
+
+    class FakeHealthy:
+        async def health(self):
+            return {"healthy": True, "version": "1.14.39"}
+
+    client = TestClient(TestServer(create_app(settings, opencode_client=FakeHealthy())))
+    await client.start_server()
+
+    r = await client.post("/api/server-files/delete", json={"paths": ["dir", "dir/b.txt", "dir/sub/c.txt"]})
+    assert r.status == 200
+    body = await r.json()
+    assert body["success"] is True
+    assert not (settings.workspace_dir / "dir").exists()
+    assert len(body["deleted"]) == 1
+    assert body["deleted"][0]["relative_path"] == "dir"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_route_collapses_child_then_parent_without_half_success(tmp_path):
+    settings = make_settings(tmp_path)
+    (settings.workspace_dir / "dir").mkdir(parents=True)
+    (settings.workspace_dir / "dir" / "b.txt").write_text("b")
+
+    class FakeHealthy:
+        async def health(self):
+            return {"healthy": True, "version": "1.14.39"}
+
+    client = TestClient(TestServer(create_app(settings, opencode_client=FakeHealthy())))
+    await client.start_server()
+
+    r = await client.post("/api/server-files/delete", json={"paths": ["dir/b.txt", "dir"]})
+    assert r.status == 200
+    body = await r.json()
+    assert body["success"] is True
+    assert not (settings.workspace_dir / "dir").exists()
+    assert len(body["deleted"]) == 1
+    assert body["deleted"][0]["relative_path"] == "dir"
+    await client.close()
+
 @pytest.mark.asyncio
 async def test_delete_route_legacy_path_still_supported(tmp_path):
     settings = make_settings(tmp_path)

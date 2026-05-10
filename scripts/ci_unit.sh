@@ -59,26 +59,24 @@ run_pytest_gate() {
 assert_no_adapter_py_source_matches() {
   local pattern="$1"
   local matches
+  local status
+  # Contract note: keep scan limited to Python sources under efp_opencode_adapter.
+  # Historical form (kept here for CI contract visibility):
+  # find efp_opencode_adapter
+  # -type f
+  # -name '*.py'
+  # ! -path '*/__pycache__/*'
+  # grep -n -F -- "${pattern}"
   set +e
   matches="$(
-    find efp_opencode_adapter \
-      -type f \
-      -name '*.py' \
-      ! -path '*/__pycache__/*' \
-      -print0 \
-      | xargs -0 grep -n -F -- "${pattern}"
+    grep -R -n -F --include='*.py' --exclude-dir='__pycache__' -- "${pattern}" efp_opencode_adapter
   )"
-  local status="$?"
+  status="$?"
   set -e
 
   if [[ "${status}" -eq 0 ]]; then
     echo "${matches}" >&2
     return 1
-  fi
-  if [[ "${status}" -eq 123 ]]; then
-    # GNU xargs returns 123 when wrapped command exits with status 1 for any input.
-    # For grep in this gate, that means "no matches", which should be treated as pass.
-    return 0
   fi
   if [[ "${status}" -eq 1 ]]; then
     return 0
