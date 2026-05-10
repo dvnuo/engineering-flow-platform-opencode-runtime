@@ -5,7 +5,7 @@ def test_baseline_safety():
     p = default_permission_baseline()
     assert p["*"] == "ask"
     assert p["external_directory"] == "deny"
-    assert p["skill"]["*"] == "deny"
+    assert p["skill"]["*"] == "allow"
     assert p["bash"]["rm *"] == "deny"
 
 
@@ -46,7 +46,8 @@ def test_denied_capability_type_shell_denies_bash_only():
 def test_skill_allow_unknown_deny_and_type_override():
     perm = build_permission({"allowed_capability_ids": ["opencode.skill.alpha"]}, {"skills": [{"opencode_name": "alpha"}]}, None)
     assert perm["skill"]["alpha"] == "allow"
-    assert "beta" not in perm["skill"] and perm["skill"]["*"] == "deny"
+    assert perm["skill"]["*"] == "allow"
+    assert skill_permission_state(perm, "beta") == "allowed"
     denied = build_permission({"allowed_capability_ids": ["opencode.skill.alpha"], "denied_capability_types": ["skill"]}, {"skills": [{"opencode_name": "alpha"}]}, None)
     assert denied["skill"]["alpha"] == "deny"
 
@@ -153,6 +154,64 @@ def test_allowed_skills_and_denied_skills_and_aliases():
     p4 = build_permission({"capability_profile": {"skill_set": ["review-pull-request"]}}, skills, None)
     assert p4["skill"]["review-pull-request"] == "allow"
 
+
+
+
+def test_all_known_skills_default_to_allow():
+    skills = {
+        "skills": [
+            {"opencode_name": "skill-mode-demo", "efp_name": "skill_mode_demo"},
+            {"opencode_name": "review-pull-request", "efp_name": "review_pull_request"},
+        ]
+    }
+
+    p = build_permission({"llm": {"tools": ["*"]}}, skills, None)
+
+    assert p["skill"]["*"] == "allow"
+    assert p["skill"]["skill-mode-demo"] == "allow"
+    assert p["skill"]["review-pull-request"] == "allow"
+    assert skill_permission_state(p, "skill-mode-demo") == "allowed"
+    assert skill_permission_state(p, "review_pull_request") == "allowed"
+    assert skill_permission_state(p, "some-new-skill") == "allowed"
+
+
+def test_capability_profile_skill_set_wildcard_allows_all_skills():
+    skills = {"skills": [{"opencode_name": "alpha"}, {"opencode_name": "beta"}]}
+
+    p = build_permission({"capability_profile": {"skill_set": ["*"]}}, skills, None)
+
+    assert p["skill"]["*"] == "allow"
+    assert p["skill"]["alpha"] == "allow"
+    assert p["skill"]["beta"] == "allow"
+
+
+def test_denied_skill_overrides_default_allow():
+    skills = {"skills": [{"opencode_name": "alpha"}, {"opencode_name": "beta"}]}
+
+    p = build_permission({"denied_skills": ["alpha"]}, skills, None)
+
+    assert p["skill"]["*"] == "allow"
+    assert p["skill"]["alpha"] == "deny"
+    assert p["skill"]["beta"] == "allow"
+    assert skill_permission_state(p, "alpha") == "denied"
+    assert skill_permission_state(p, "beta") == "allowed"
+
+
+def test_denied_skills_wildcard_overrides_default_allow():
+    skills = {"skills": [{"opencode_name": "alpha"}]}
+
+    p = build_permission({"denied_skills": ["*"]}, skills, None)
+
+    assert p["skill"]["*"] == "deny"
+    assert p["skill"]["alpha"] == "deny"
+    assert skill_permission_state(p, "alpha") == "denied"
+
+
+def test_denied_capability_type_skill_denies_skill_wildcard():
+    p = build_permission({"denied_capability_types": ["skill"]}, {"skills": []}, None)
+
+    assert p["skill"]["*"] == "deny"
+    assert skill_permission_state(p, "any-skill") == "denied"
 
 def test_skill_permission_state_supports_scalar_and_aliases():
     assert skill_permission_state({"skill": "allow"}, "my-skill") == "allowed"
