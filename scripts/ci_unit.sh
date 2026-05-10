@@ -59,19 +59,31 @@ run_pytest_gate() {
 assert_no_adapter_py_source_matches() {
   local pattern="$1"
   local matches
+  set +e
   matches="$(
     find efp_opencode_adapter \
       -type f \
       -name '*.py' \
       ! -path '*/__pycache__/*' \
       -print0 \
-      | xargs -0 grep -n "${pattern}" || true
+      | xargs -0 grep -n -F -- "${pattern}"
   )"
+  local status="$?"
+  set -e
 
-  if [[ -n "${matches}" ]]; then
+  if [[ "${status}" -eq 0 ]]; then
     echo "${matches}" >&2
     return 1
   fi
+  if [[ "${status}" -eq 1 ]]; then
+    return 0
+  fi
+
+  echo "AppKey source scan failed for pattern: ${pattern}" >&2
+  if [[ -n "${matches}" ]]; then
+    echo "${matches}" >&2
+  fi
+  return "${status}"
 }
 
 run_pytest_gate "opencode_client leak gate" "${PYTEST_TIMEOUT_SECONDS}" -q tests/test_opencode_client.py
@@ -81,15 +93,15 @@ OPENCODE_CLIENT_LOG="${CI_LOG_DIR}/opencode-client-leak-gate.log"
 ! grep -q "PytestUnraisableExceptionWarning" "${OPENCODE_CLIENT_LOG}"
 
 run_pytest_gate "AppKey static/runtime gate" "${PYTEST_TIMEOUT_SECONDS}" -q tests/test_app_keys.py
-assert_no_adapter_py_source_matches 'from \.app_keys import \*'
+assert_no_adapter_py_source_matches 'from .app_keys import *'
 assert_no_adapter_py_source_matches 'app.get("'
 assert_no_adapter_py_source_matches "app.get('"
 assert_no_adapter_py_source_matches 'request.app.get("'
 assert_no_adapter_py_source_matches "request.app.get('"
-assert_no_adapter_py_source_matches 'app\["'
-assert_no_adapter_py_source_matches "app\['"
-assert_no_adapter_py_source_matches 'request.app\["'
-assert_no_adapter_py_source_matches "request.app\['"
+assert_no_adapter_py_source_matches 'app["'
+assert_no_adapter_py_source_matches "app['"
+assert_no_adapter_py_source_matches 'request.app["'
+assert_no_adapter_py_source_matches "request.app['"
 
 run_pytest_gate "pytest config gate" "${PYTEST_TIMEOUT_SECONDS}" -q tests/test_pytest_config.py tests/test_pytest_plugin_config.py
 run_pytest_gate "runtime contract default skip/import gate" "${PYTEST_TIMEOUT_SECONDS}" -q runtime_contract_tests

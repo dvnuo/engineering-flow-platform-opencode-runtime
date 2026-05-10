@@ -94,6 +94,7 @@ def test_ci_unit_appkey_static_scan_uses_python_source_only_helper_and_keeps_pat
     assert "-type f" in script
     assert "-name '*.py'" in script
     assert "! -path '*/__pycache__/*'" in script
+    assert 'grep -n -F -- "${pattern}"' in script
 
     assert 'grep -R \'app.get("\' -n efp_opencode_adapter' not in script
     assert 'grep -R "app.get(\'" -n efp_opencode_adapter' not in script
@@ -101,15 +102,15 @@ def test_ci_unit_appkey_static_scan_uses_python_source_only_helper_and_keeps_pat
     assert 'grep -R \'app\["\' -n efp_opencode_adapter' not in script
 
     for token in [
-        'from \.app_keys import \*',
+        'from .app_keys import *',
         'app.get("',
         "app.get('",
         'request.app.get("',
         "request.app.get('",
-        'app\["',
-        "app\['",
-        'request.app\["',
-        "request.app\['",
+        'app["',
+        "app['",
+        'request.app["',
+        "request.app['",
     ]:
         assert token in script
 
