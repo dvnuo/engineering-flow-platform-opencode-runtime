@@ -43,7 +43,8 @@ from .portal_metadata_client import PortalMetadataClient
 from .recovery import RecoveryManager
 from .usage_api import usage_handler
 from .usage_tracker import UsageTracker
-from .opencode_config import build_opencode_config, normalize_opencode_provider_id, write_main_agent_prompt, write_opencode_config
+from .agents_md import ensure_default_agents_md
+from .opencode_config import build_opencode_config, normalize_opencode_provider_id, write_opencode_config
 from .opencode_auth import build_opencode_auth_from_runtime_config
 from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_status_payload, sanitize_profile_config_for_storage, sanitize_public_secrets
 from .runtime_env import build_runtime_env_from_config, read_runtime_env_file, write_runtime_env_file
@@ -112,7 +113,7 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     runtime_config = payload["config"]
     runtime_profile_id = payload.get("runtime_profile_id")
     revision = payload.get("revision")
-    write_main_agent_prompt(settings)
+    ensure_default_agents_md(settings)
     generated_config, config_hash, updated_sections = build_opencode_config(settings, runtime_config)
     warnings: list[str] = []
     status = "failed"
