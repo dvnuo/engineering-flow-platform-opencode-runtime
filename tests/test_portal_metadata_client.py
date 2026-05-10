@@ -29,12 +29,13 @@ async def test_delete_session_metadata_skipped_when_not_configured(monkeypatch):
 async def test_delete_session_metadata_2xx_json_and_headers_and_encoding(monkeypatch):
     got = {}
     async def ok(request):
+        got["raw_path"] = request.raw_path
         got["path"] = request.path
         got["auth"] = request.headers.get("Authorization")
         got["token"] = request.headers.get("X-Portal-Internal-Token")
         return web.json_response({"ok": True}, status=200)
     app = web.Application()
-    app.router.add_delete("/api/internal/agents/{agent}/sessions/{sid}/metadata", ok)
+    app.router.add_delete("/{tail:.*}", ok)
     server = TestServer(app); await server.start_server()
     monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", _base(server))
     monkeypatch.setenv("PORTAL_AGENT_ID", "agent 1")
@@ -42,7 +43,7 @@ async def test_delete_session_metadata_2xx_json_and_headers_and_encoding(monkeyp
     out = await PortalMetadataClient(Settings.from_env()).delete_session_metadata("s/1 x%2")
     assert out["success"] is True and out["status"] == 200 and out["payload"] == {"ok": True}
     assert got["auth"] == "Bearer tok" and got["token"] == "tok"
-    assert "/api/internal/agents/agent 1/sessions/s/1 x%2/metadata" == got["path"]
+    assert got["raw_path"] == "/api/internal/agents/agent%201/sessions/s%2F1%20x%252/metadata"
     await server.close()
 
 
@@ -93,4 +94,35 @@ async def test_delete_session_metadata_timeout(monkeypatch):
     monkeypatch.setenv("PORTAL_METADATA_TIMEOUT_SECONDS", "0.01")
     out = await PortalMetadataClient(Settings.from_env()).delete_session_metadata("s1")
     assert out["success"] is False and "error" in out
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_publish_session_metadata_put_uses_quoted_raw_path_and_headers(monkeypatch):
+    got = {}
+
+    async def ok(request):
+        got["raw_path"] = request.raw_path
+        got["path"] = request.path
+        got["auth"] = request.headers.get("Authorization")
+        got["token"] = request.headers.get("X-Portal-Internal-Token")
+        return web.json_response({"ok": True}, status=200)
+
+    app = web.Application()
+    app.router.add_put("/{tail:.*}", ok)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", _base(server))
+    monkeypatch.setenv("PORTAL_AGENT_ID", "agent 1")
+    monkeypatch.setenv("PORTAL_INTERNAL_TOKEN", "tok")
+
+    out = await PortalMetadataClient(Settings.from_env()).publish_session_metadata(
+        session_id="s/1 x%2",
+        latest_event_type="chat.completed",
+        latest_event_state="done",
+    )
+
+    assert out["success"] is True and out["status"] == 200
+    assert got["auth"] == "Bearer tok" and got["token"] == "tok"
+    assert got["raw_path"] == "/api/internal/agents/agent%201/sessions/s%2F1%20x%252/metadata"
     await server.close()

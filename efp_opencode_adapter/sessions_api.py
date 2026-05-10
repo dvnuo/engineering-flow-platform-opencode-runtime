@@ -8,6 +8,7 @@ from .app_keys import CHATLOG_STORE_KEY, OPENCODE_CLIENT_KEY, PORTAL_METADATA_CL
 
 from .opencode_client import OpenCodeClientError
 from .opencode_message_adapter import message_to_visible_text, to_efp_message
+from .thinking_events import safe_preview
 
 
 def _json_bad_request(error: str) -> web.HTTPBadRequest:
@@ -38,7 +39,19 @@ async def _delete_portal_metadata_best_effort(portal_metadata, session_id: str) 
     try:
         return await portal_metadata.delete_session_metadata(session_id)
     except Exception as exc:
-        return {"success": False, "error": str(exc)}
+        return {"success": False, "error": safe_preview(str(exc), 1000)}
+
+
+
+
+def _delete_chatlog_best_effort(chatlog_store, session_id: str) -> dict[str, Any]:
+    if not chatlog_store or not hasattr(chatlog_store, "delete"):
+        return {"success": False, "skipped": True, "reason": "chatlog_delete_not_supported"}
+    try:
+        deleted = chatlog_store.delete(session_id)
+        return {"success": True, "deleted": bool(deleted)}
+    except Exception as exc:
+        return {"success": False, "error": safe_preview(str(exc), 1000)}
 
 
 async def _read_json_object(request: web.Request, *, error_prefix: str = "payload") -> dict[str, Any]:
@@ -209,14 +222,7 @@ async def delete_session_handler(request: web.Request) -> web.Response:
         else:
             return web.json_response({"success": False, "error": "opencode_delete_failed", "session_id": sid, "opencode_session_id": record.opencode_session_id, "opencode_status": exc.status, "detail": str(exc)}, status=502)
     store.mark_deleted(sid)
-    chatlog_delete = {"success": True, "deleted": False}
-    if chatlog_store and hasattr(chatlog_store, "delete"):
-        try:
-            chatlog_delete = {"success": True, "deleted": bool(chatlog_store.delete(sid))}
-        except Exception as exc:
-            chatlog_delete = {"success": False, "error": str(exc)}
-    else:
-        chatlog_delete = {"success": False, "skipped": True, "reason": "chatlog_delete_not_supported"}
+    chatlog_delete = _delete_chatlog_best_effort(chatlog_store, sid)
     metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
     return web.json_response({"success": True, "session_id": sid, "opencode_session_id": record.opencode_session_id, "already_deleted": False, "runtime_deleted": True, "opencode_deleted": opencode_deleted, "opencode_missing": opencode_missing, "metadata_delete": metadata_delete, "chatlog_delete": chatlog_delete})
 
@@ -241,13 +247,9 @@ async def clear_sessions_handler(request: web.Request) -> web.Response:
                 continue
         store.mark_deleted(rec.portal_session_id)
         deleted_count += 1
-        if chatlog_store and hasattr(chatlog_store, "delete"):
-            try:
-                chatlog_store.delete(rec.portal_session_id)
-            except Exception:
-                pass
+        chatlog_delete = _delete_chatlog_best_effort(chatlog_store, rec.portal_session_id)
         metadata = await _delete_portal_metadata_best_effort(portal_metadata, rec.portal_session_id)
-        metadata_results.append({"session_id": rec.portal_session_id, "opencode_missing": op_missing, "metadata_delete": metadata})
+        metadata_results.append({"session_id": rec.portal_session_id, "opencode_missing": op_missing, "metadata_delete": metadata, "chatlog_delete": chatlog_delete})
     if failures:
         return web.json_response({"success": False, "deleted_count": deleted_count, "failed_count": len(failures), "failures": failures, "metadata_delete": metadata_results}, status=502)
     return web.json_response({"success": True, "deleted_count": deleted_count, "failed_count": 0, "metadata_delete": metadata_results})
