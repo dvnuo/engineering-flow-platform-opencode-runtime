@@ -98,3 +98,23 @@ async def test_managed_startup_registry_failure_sets_diagnostics(monkeypatch):
     assert manager.registry_ok is False
     assert "registry failed" in (manager.last_startup_error or "")
     assert "ghu_SECRET" not in (manager.last_startup_error or "")
+
+@pytest.mark.asyncio
+async def test_spawn_uses_workspace_cwd_and_localhost_port(monkeypatch, tmp_path):
+    captured = {}
+
+    async def fake_spawn(*args, **kwargs):
+        captured['args'] = args
+        captured['kwargs'] = kwargs
+        return _FakeProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    async def fake_registry(_settings, _client):
+        return {"status": "ok"}
+    manager = OpenCodeProcessManager(settings, _FakeClient([]), registry_check=fake_registry)
+    await manager.start({}, reason="startup")
+    assert "--hostname" in captured['args'] and "127.0.0.1" in captured['args']
+    assert "--port" in captured['args'] and "4096" in captured['args']
+    assert captured['kwargs']["cwd"] == str(settings.workspace_dir)

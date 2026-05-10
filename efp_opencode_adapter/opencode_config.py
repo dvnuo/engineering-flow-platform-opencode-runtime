@@ -77,7 +77,7 @@ def write_main_agent_prompt(settings: Settings) -> Path:
             [
                 "This runtime is managed by EFP Portal.",
                 "Obey Portal capability/profile/policy metadata.",
-                "Do not write back to external systems unless explicitly allowed.",
+                "When the user asks to create or output files, create them under the workspace directory and then summarize the created/updated paths.",
                 "Use efp_* tools for Jira/GitHub/Confluence rather than raw curl when available.",
                 "",
             ]
@@ -91,7 +91,7 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
     runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
     skills_index = load_skills_index(settings)
     tools_index = load_tools_index(settings)
-    permission = build_permission(runtime_config, skills_index=skills_index, tools_index=tools_index)
+    permission = build_permission(runtime_config, skills_index=skills_index, tools_index=tools_index, permission_mode=settings.opencode_permission_mode, allow_bash_all=settings.opencode_allow_bash_all)
     generated = {
         "$schema": "https://opencode.ai/config.json",
         "autoupdate": False,
@@ -104,7 +104,6 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
                 "mode": "primary",
                 "prompt": "{file:/workspace/.opencode/agents/efp-main.md}",
                 "steps": 40,
-                "permission": {},
             }
         },
     }

@@ -278,6 +278,7 @@ async def test_chat_stream_filters_noise_events_and_keeps_useful_events(tmp_path
         ("blocked", False),
         ("error", False),
         ("incomplete", False),
+        ("empty_final", False),
     ],
 )
 async def test_chat_stream_final_payload_has_completion_state_contract(tmp_path, monkeypatch, completion_state, ok):

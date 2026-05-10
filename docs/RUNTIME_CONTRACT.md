@@ -63,3 +63,19 @@ Legacy tool names map to `efp_*` OpenCode wrapper names and are persisted in `to
 - missing skills dir -> health/capabilities surface degraded signals.
 - missing tools dir -> tools sync/capability mapping warnings.
 - state dir unwritable -> runtime state persistence failures.
+
+## Permission mode contract
+- `EFP_OPENCODE_PERMISSION_MODE=workspace_full_access` (default)
+- `EFP_OPENCODE_ALLOW_BASH_ALL=true` (default)
+- Default: built-in `edit`/`write` are `allow`, bash is `{"*":"allow"}`.
+- `profile_policy` keeps legacy ask/deny semantics for backward compatibility.
+
+## Chat final state contract
+- `completed` requires visible assistant text and returns `ok=true`.
+- `blocked`, `incomplete`, `error`, and `empty_final` must return `ok=false`.
+- `empty_final` must include non-empty diagnostic response text.
+- Runtime must not return an empty assistant response as success.
+
+## Portal/runtime responsibility split
+- Portal injects runtime env values and renders non-success chat outcomes.
+- Runtime generates the OpenCode permission map and determines final completion state.
