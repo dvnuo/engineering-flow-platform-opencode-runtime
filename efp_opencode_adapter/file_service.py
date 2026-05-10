@@ -161,10 +161,10 @@ class WorkspaceFileService:
                     dest = target_dir / rel
                     if path.is_dir():
                         dest.mkdir(parents=True, exist_ok=True)
-                    else:
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(path, dest)
-                        extracted_items.append(self.workspace_relative_path(dest))
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, dest)
+                    extracted_items.append(self.workspace_relative_path(dest))
 
         relative_target = self.workspace_relative_path(target_dir)
         return {
@@ -198,12 +198,16 @@ class WorkspaceFileService:
             raise ValueError("paths is required")
 
         resolved_targets: list[tuple[Path, bool, bool, str]] = []
+        seen: set[Path] = set()
         for user_path in user_paths:
             target = self.resolve_workspace_path(user_path)
             if target == self.root:
                 raise PermissionError("cannot delete workspace root")
             if not target.exists():
                 raise FileNotFoundError
+            if target in seen:
+                continue
+            seen.add(target)
             resolved_targets.append((target, target.is_dir(), target.is_file(), self.workspace_relative_path(target)))
 
         deleted = []

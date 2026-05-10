@@ -129,6 +129,30 @@ def test_workspace_service_core(tmp_path):
     assert svc.delete_path("src", recursive=True)["deleted"] is True
 
 
+
+
+def test_extract_zip_counts_only_files_not_directories(tmp_path):
+    settings = make_settings(tmp_path)
+    settings.workspace_dir.mkdir(parents=True)
+    svc = WorkspaceFileService(settings)
+
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as zf:
+        zf.writestr("x.txt", "x")
+        zf.writestr("d/y.txt", "y")
+        zf.writestr("empty/", "")
+
+    body = svc.extract_zip_safely("uploads", "bundle.zip", payload.getvalue())
+    assert body["mode"] == "zip_extract"
+    assert body["items"] == ["uploads/d/y.txt", "uploads/x.txt"]
+    assert "uploads/d" not in body["items"]
+    assert "uploads/empty" not in body["items"]
+    assert body["extracted_count"] == 2
+    assert (settings.workspace_dir / "uploads" / "x.txt").exists()
+    assert (settings.workspace_dir / "uploads" / "d" / "y.txt").exists()
+    assert (settings.workspace_dir / "uploads" / "empty").exists()
+    assert not (settings.workspace_dir / "uploads" / "bundle.zip").exists()
+
 def test_upload_refuses_existing_symlink_escape(tmp_path):
     settings = make_settings(tmp_path)
     settings.workspace_dir.mkdir(parents=True)
@@ -233,6 +257,31 @@ async def test_delete_route_accepts_paths_list_and_recurses(tmp_path):
 
     await client.close()
 
+
+
+
+@pytest.mark.asyncio
+async def test_delete_route_deduplicates_duplicate_paths_without_half_success(tmp_path):
+    settings = make_settings(tmp_path)
+    settings.workspace_dir.mkdir(parents=True)
+    (settings.workspace_dir / "a.txt").write_text("a")
+
+    class FakeHealthy:
+        async def health(self):
+            return {"healthy": True, "version": "1.14.39"}
+
+    client = TestClient(TestServer(create_app(settings, opencode_client=FakeHealthy())))
+    await client.start_server()
+
+    r = await client.post("/api/server-files/delete", json={"paths": ["a.txt", "a.txt"]})
+    assert r.status == 200
+    body = await r.json()
+    assert body["success"] is True
+    assert not (settings.workspace_dir / "a.txt").exists()
+    assert len(body["deleted"]) == 1
+    assert body["deleted"][0]["relative_path"] == "a.txt"
+
+    await client.close()
 
 @pytest.mark.asyncio
 async def test_delete_route_legacy_path_still_supported(tmp_path):

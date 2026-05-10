@@ -75,6 +75,11 @@ assert_no_adapter_py_source_matches() {
     echo "${matches}" >&2
     return 1
   fi
+  if [[ "${status}" -eq 123 ]]; then
+    # GNU xargs returns 123 when wrapped command exits with status 1 for any input.
+    # For grep in this gate, that means "no matches", which should be treated as pass.
+    return 0
+  fi
   if [[ "${status}" -eq 1 ]]; then
     return 0
   fi
