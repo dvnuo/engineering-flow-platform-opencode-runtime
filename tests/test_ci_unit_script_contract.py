@@ -87,17 +87,35 @@ def test_ci_unit_prints_pytest_commands_for_diagnostics():
     assert 'pytest gate failed or timed out' in script
 
 
-def test_ci_unit_static_grep_covers_single_and_double_quote_app_keys():
+def test_ci_unit_appkey_static_scan_uses_python_source_only_helper_and_keeps_patterns():
     script = _script()
-    assert 'app.get("' in script
-    assert "app.get('" in script
-    assert 'request.app.get("' in script
-    assert "request.app.get('" in script
-    assert 'app\\["' in script
-    assert "app\\['" in script
-    assert 'request.app\\["' in script
-    assert "request.app\\['" in script
+    assert 'assert_no_adapter_py_source_matches()' in script
+    assert 'find efp_opencode_adapter' in script
+    assert "-type f" in script
+    assert "-name '*.py'" in script
+    assert "! -path '*/__pycache__/*'" in script
+    assert 'grep -n -F -- "${pattern}"' in script
 
+    assert 'grep -R \'app.get("\' -n efp_opencode_adapter' not in script
+    assert 'grep -R "app.get(\'" -n efp_opencode_adapter' not in script
+    assert 'grep -R \'request.app.get("\' -n efp_opencode_adapter' not in script
+    assert 'grep -R \'app\["\' -n efp_opencode_adapter' not in script
+
+    for token in [
+        'from .app_keys import *',
+        'app.get("',
+        "app.get('",
+        'request.app.get("',
+        "request.app.get('",
+        'app["',
+        "app['",
+        'request.app["',
+        "request.app['",
+    ]:
+        assert token in script
+
+    assert 'AppKey static/runtime gate' in script
+    assert 'tests/test_app_keys.py' in script
 
 def test_ci_unit_does_not_use_tee_pipeline_for_pytest_gates():
     script = _script()

@@ -260,6 +260,226 @@ async def test_chat_slash_fallback_prompt(tmp_path, monkeypatch):
     assert r.status==200
 
 
+
+
+@pytest.mark.asyncio
+async def test_slash_skill_with_missing_tools_uses_skill_prompt_instead_of_blocking(tmp_path, monkeypatch):
+    class C(FakeOpenCodeClient):
+        def __init__(self):
+            super().__init__()
+            self.parts = None
+            self.execute_command_called = 0
+
+        async def list_commands(self, timeout_seconds=30):
+            return []
+
+        async def execute_command(self, *args, **kwargs):
+            self.execute_command_called += 1
+            raise AssertionError()
+
+        async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+            self.parts = parts
+            return await super().send_message(session_id, parts=parts, model=model, agent=agent, system=system, message_id=message_id, no_reply=no_reply, tools=tools)
+
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    (state / "skills-index.json").write_text(json.dumps({"skills": [{"efp_name": "demo_skill", "opencode_name": "demo-skill", "opencode_supported": True, "runtime_equivalence": True, "programmatic": False, "missing_tools": ["github_review_writeback"], "missing_opencode_tools": []}]}), encoding="utf-8")
+    cfg = tmp_path / "opencode.json"
+    cfg.write_text(json.dumps({"permission": {"skill": {"*": "allow"}}}), encoding="utf-8")
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(cfg))
+
+    fake = C()
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=fake)))
+    await client.start_server()
+    resp = await client.post("/api/chat", json={"message": "/demo-skill review this PR", "session_id": "s-missing-tools"})
+    result = await resp.json()
+
+    assert result["ok"] is True
+    assert result["completion_state"] == "completed"
+    assert "missing_required_tools" not in result["response"]
+    assert "cannot run in OpenCode runtime" not in result["response"]
+
+    skill_debug = result["_llm_debug"]["skill_invocation"]
+    assert skill_debug["reason"] == "allowed_with_missing_tools"
+    assert skill_debug["blocked"] is False
+    assert skill_debug["used_skill_prompt"] is True
+    assert skill_debug["used_command_api"] is False
+
+    sent_text = fake.parts[0]["text"]
+    assert "Compatibility warning" in sent_text
+    assert "github_review_writeback" in sent_text
+    assert "Still load and apply the skill as far as possible" in sent_text
+    assert "Do not replace missing writeback/API tools with raw curl" in sent_text
+
+    event_types = {e.get("type") or e.get("event_type") for e in result["runtime_events"]}
+    assert "skill.blocked" not in event_types
+    assert "skill.prompt_applied" in event_types
+    assert fake.execute_command_called == 0
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_slash_skill_permission_denied_still_blocks(tmp_path, monkeypatch):
+    class C(FakeOpenCodeClient):
+        def __init__(self):
+            super().__init__()
+            self.execute_command_called = 0
+            self.send_message_called = 0
+
+        async def list_commands(self, timeout_seconds=30):
+            return []
+
+        async def execute_command(self, *args, **kwargs):
+            self.execute_command_called += 1
+            raise AssertionError()
+
+        async def send_message(self, *args, **kwargs):
+            self.send_message_called += 1
+            raise AssertionError()
+
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    (state / "skills-index.json").write_text(json.dumps({"skills": [{"efp_name": "demo_skill", "opencode_name": "demo-skill", "opencode_supported": True, "runtime_equivalence": True, "programmatic": False, "missing_tools": [], "missing_opencode_tools": []}]}), encoding="utf-8")
+    cfg = tmp_path / "opencode.json"
+    cfg.write_text(json.dumps({"permission": {"skill": {"*": "deny"}}}), encoding="utf-8")
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(cfg))
+
+    fake = C()
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=fake)))
+    await client.start_server()
+    resp = await client.post("/api/chat", json={"message": "/demo-skill hi", "session_id": "s-denied-skill"})
+    result = await resp.json()
+
+    assert result["ok"] is False
+    assert result["completion_state"] == "blocked"
+    assert result["incomplete_reason"] == "permission_denied"
+    assert "cannot run in OpenCode runtime: permission_denied" in result["response"]
+    event_types = {e.get("type") or e.get("event_type") for e in result["runtime_events"]}
+    assert "skill.blocked" in event_types
+    assert fake.send_message_called == 0
+    assert fake.execute_command_called == 0
+    await client.close()
+
+
+
+@pytest.mark.asyncio
+async def test_chat_slash_known_skill_command_api_failure_falls_back_to_skill_prompt(tmp_path, monkeypatch):
+    class C(FakeOpenCodeClient):
+        def __init__(self):
+            super().__init__()
+            self.execute_command_called = 0
+            self.send_message_called = 0
+            self.parts = None
+
+        async def list_commands(self, timeout_seconds=30):
+            return [{"name": "test-scenarios-design"}]
+
+        async def execute_command(self, *args, **kwargs):
+            self.execute_command_called += 1
+            raise OpenCodeClientError("POST /session/sid/command failed with status 400:", status=400)
+
+        async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+            self.send_message_called += 1
+            self.parts = parts
+            return await super().send_message(session_id, parts=parts, model=model, agent=agent, system=system, message_id=message_id, no_reply=no_reply, tools=tools)
+
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    (state / "skills-index.json").write_text(json.dumps({"skills": [{"efp_name": "test_scenarios_design", "opencode_name": "test-scenarios-design", "opencode_supported": True, "runtime_equivalence": True, "programmatic": False, "missing_tools": [], "missing_opencode_tools": []}]}), encoding="utf-8")
+    cfg = tmp_path / "opencode.json"
+    cfg.write_text(json.dumps({"permission": {"skill": {"*": "allow"}}}), encoding="utf-8")
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(cfg))
+
+    fake = C()
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=fake)))
+    await client.start_server()
+    response = await client.post("/api/chat", json={"message": "/test-scenarios-design HKD to USD", "session_id": "s-command-fallback"})
+    result = await response.json()
+
+    assert response.status == 200
+    assert result["ok"] is True
+    assert result["completion_state"] == "completed"
+    assert "opencode_error" not in json.dumps(result)
+    assert "command failed with status 400" not in result["response"]
+
+    skill_debug = result["_llm_debug"]["skill_invocation"]
+    assert skill_debug["reason"] == "allowed"
+    assert skill_debug["command_api_fallback"] is True
+    assert "command_execution_error" in skill_debug
+    assert skill_debug["used_skill_prompt"] is True
+    assert skill_debug["used_command_api"] is False
+
+    assert fake.execute_command_called == 1
+    assert fake.send_message_called == 1
+    assert "Use the native OpenCode `skill` tool" in fake.parts[0]["text"]
+    assert "test-scenarios-design" in fake.parts[0]["text"]
+    assert "HKD to USD" in fake.parts[0]["text"]
+
+    event_types = {e.get("type") or e.get("event_type") for e in result["runtime_events"]}
+    assert "skill.command.failed" in event_types
+    assert "skill.prompt_applied" in event_types
+    assert "skill.command.executed" not in event_types
+    assert "skill.blocked" not in event_types
+    assert "execution.failed" not in event_types
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_unknown_native_command_execution_failure_returns_blocked_not_bad_gateway(tmp_path, monkeypatch):
+    class C(FakeOpenCodeClient):
+        def __init__(self):
+            super().__init__()
+            self.execute_command_called = 0
+            self.send_message_called = 0
+
+        async def list_commands(self, timeout_seconds=30):
+            return [{"name": "native-command"}]
+
+        async def execute_command(self, *args, **kwargs):
+            self.execute_command_called += 1
+            raise OpenCodeClientError("POST /session/sid/command failed with status 400:", status=400)
+
+        async def send_message(self, *args, **kwargs):
+            self.send_message_called += 1
+            raise AssertionError()
+
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    (state / "skills-index.json").write_text(json.dumps({"skills": []}), encoding="utf-8")
+    cfg = tmp_path / "opencode.json"
+    cfg.write_text(json.dumps({"permission": {"skill": {"*": "allow"}}}), encoding="utf-8")
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(cfg))
+
+    fake = C()
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=fake)))
+    await client.start_server()
+    response = await client.post("/api/chat", json={"message": "/native-command arg", "session_id": "s-native-cmd-fail"})
+    result = await response.json()
+
+    assert response.status == 200
+    assert result["ok"] is False
+    assert result["completion_state"] == "blocked"
+    assert result["incomplete_reason"] == "command_execution_failed"
+    assert "command_execution_failed" in result["response"]
+    assert "opencode_error" not in json.dumps(result)
+    assert fake.send_message_called == 0
+    assert fake.execute_command_called == 1
+
+    skill_debug = result["_llm_debug"]["skill_invocation"]
+    assert skill_debug["kind"] == "command"
+    assert skill_debug["reason"] == "command_execution_failed"
+    assert "command_execution_error" in skill_debug
+    assert skill_debug["blocked"] is True
+
+    event_types = {e.get("type") or e.get("event_type") for e in result["runtime_events"]}
+    assert "skill.blocked" in event_types
+    assert "skill.prompt_applied" not in event_types
+    await client.close()
+
 @pytest.mark.asyncio
 async def test_chat_waits_past_progress_text_for_final_answer(tmp_path, monkeypatch):
     class ProgressThenFinal(FakeOpenCodeClient):

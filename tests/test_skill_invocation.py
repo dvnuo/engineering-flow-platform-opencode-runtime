@@ -1,7 +1,7 @@
 import json
 
 from efp_opencode_adapter.settings import Settings
-from efp_opencode_adapter.skill_invocation import evaluate_skill_invocation, parse_slash_invocation, resolve_skill
+from efp_opencode_adapter.skill_invocation import build_skill_prompt, evaluate_skill_invocation, parse_slash_invocation, resolve_skill
 
 
 def _setup(tmp_path, monkeypatch, skills, permission):
@@ -41,4 +41,18 @@ def test_resolve_and_decisions(tmp_path, monkeypatch):
 
     missing = dict(skill, missing_tools=["x"])
     miss_settings = _setup(tmp_path, monkeypatch, [missing], {"skill": {"java-cucumber-generator": "allow"}})
-    assert evaluate_skill_invocation(miss_settings, inv).reason == "missing_required_tools"
+    decision = evaluate_skill_invocation(miss_settings, inv)
+    assert decision.allowed is True
+    assert decision.reason == "allowed_with_missing_tools"
+
+    missing_op = dict(skill, missing_tools=[], missing_opencode_tools=["efp_missing_wrapper"])
+    miss_op_settings = _setup(tmp_path, monkeypatch, [missing_op], {"skill": {"java-cucumber-generator": "allow"}})
+    decision = evaluate_skill_invocation(miss_op_settings, inv)
+    assert decision.allowed is True
+    assert decision.reason == "allowed_with_missing_tools"
+
+    prompt = build_skill_prompt(missing, inv)
+    assert "Compatibility warning" in prompt
+    assert "x" in prompt
+    assert "Still load and apply the skill as far as possible" in prompt
+    assert "Do not replace missing writeback/API tools with raw curl" in prompt
