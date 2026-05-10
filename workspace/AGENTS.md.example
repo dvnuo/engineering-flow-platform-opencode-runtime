@@ -1,0 +1,11 @@
+# AGENTS.md
+
+This OpenCode runtime is managed by EFP Portal.
+
+## Runtime rules
+
+- Treat this file as the project-level instruction source for OpenCode.
+- Obey Portal capability, runtime profile, and policy metadata.
+- Do not write back to external systems unless explicitly allowed by policy.
+- Prefer EFP-provided tools such as efp_* for GitHub, Jira, Confluence, and other managed integrations when available.
+- When creating or updating files for the user, write them under the workspace directory and summarize the created or updated paths.

@@ -5,16 +5,7 @@ from pathlib import Path
 from .settings import Settings
 
 AGENTS_MD_FILENAME = "AGENTS.md"
-
-DEFAULT_AGENTS_MD = """# AGENTS.md
-This OpenCode runtime is managed by EFP Portal.
-
-## Runtime rules
-- Treat this file as the project-level instruction source for OpenCode.
-- Obey Portal capability, runtime profile, and policy metadata.
-- Do not write back to external systems unless explicitly allowed by policy.
-- Prefer EFP-provided tools such as efp_* for GitHub, Jira, Confluence, and other managed integrations when available.
-"""
+AGENTS_MD_EXAMPLE_FILENAME = "AGENTS.md.example"
 
 
 def agents_md_path(settings: Settings) -> Path:
@@ -25,8 +16,16 @@ def legacy_agents_prompt_path(settings: Settings) -> Path:
     return settings.adapter_state_dir / "system_prompts" / "agents.md"
 
 
-def legacy_efp_main_prompt_path(settings: Settings) -> Path:
-    return settings.workspace_dir / ".opencode" / "agents" / "efp-main.md"
+def example_agents_md_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "workspace" / AGENTS_MD_EXAMPLE_FILENAME
+
+
+def read_default_agents_md_template() -> str:
+    path = example_agents_md_path()
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception as exc:
+        raise RuntimeError(f"Default AGENTS.md template not found or unreadable: {path}") from exc
 
 
 def _write_agents_md(path: Path, content: str) -> Path:
@@ -37,21 +36,25 @@ def _write_agents_md(path: Path, content: str) -> Path:
     return path
 
 
+def _read_legacy_agents_prompt(settings: Settings) -> str | None:
+    path = legacy_agents_prompt_path(settings)
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
 def ensure_default_agents_md(settings: Settings) -> Path:
     settings.workspace_dir.mkdir(parents=True, exist_ok=True)
     path = agents_md_path(settings)
     if path.exists():
         return path
 
-    content = DEFAULT_AGENTS_MD
-    for legacy_path in (legacy_agents_prompt_path(settings), legacy_efp_main_prompt_path(settings)):
-        if not legacy_path.exists():
-            continue
-        try:
-            content = legacy_path.read_text(encoding="utf-8")
-            break
-        except Exception:
-            content = DEFAULT_AGENTS_MD
+    content = _read_legacy_agents_prompt(settings)
+    if content is None:
+        content = read_default_agents_md_template()
 
     return _write_agents_md(path, content)
 

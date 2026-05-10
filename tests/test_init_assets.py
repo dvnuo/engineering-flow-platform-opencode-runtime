@@ -1,3 +1,4 @@
+from pathlib import Path
 import json
 
 import pytest
@@ -201,3 +202,49 @@ Path(a.state_dir).mkdir(parents=True, exist_ok=True)
     assert idx['tool_mappings'][0]['available'] is True
     assert idx['tool_mappings'][0]['capability_id'] == 'efp.tool.github.get_pr'
     assert config.exists()
+
+
+def test_init_assets_uses_example_when_only_legacy_efp_main_exists(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    skills = tmp_path / "skills"
+    tools = tmp_path / "tools"
+    state = tmp_path / "state"
+    config = workspace / ".opencode" / "opencode.json"
+    tools.mkdir(parents=True, exist_ok=True)
+    (tools / "manifest.yaml").write_text("tools: []\n", encoding="utf-8")
+    generator = tools / "adapters" / "opencode" / "generate_tools.py"
+    generator.parent.mkdir(parents=True, exist_ok=True)
+    generator.write_text("import argparse, json\nfrom pathlib import Path\np=argparse.ArgumentParser(); p.add_argument('--tools-dir'); p.add_argument('--opencode-tools-dir'); p.add_argument('--state-dir'); a=p.parse_args()\nPath(a.opencode_tools_dir).mkdir(parents=True, exist_ok=True)\nPath(a.state_dir).mkdir(parents=True, exist_ok=True)\n(Path(a.state_dir)/'tools-index.json').write_text(json.dumps({'generated_at':'now','tools':[]}), encoding='utf-8')\n", encoding="utf-8")
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
+    monkeypatch.setenv("EFP_TOOLS_DIR", str(tools))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(config))
+    legacy = workspace / ".opencode" / "agents" / "efp-main.md"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("legacy-main", encoding="utf-8")
+    init_assets(Settings.from_env())
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == Path("workspace/AGENTS.md.example").read_text(encoding="utf-8")
+
+
+def test_init_assets_migrates_legacy_adapter_agents_prompt(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    skills = tmp_path / "skills"
+    tools = tmp_path / "tools"
+    state = tmp_path / "state"
+    config = workspace / ".opencode" / "opencode.json"
+    tools.mkdir(parents=True, exist_ok=True)
+    (tools / "manifest.yaml").write_text("tools: []\n", encoding="utf-8")
+    generator = tools / "adapters" / "opencode" / "generate_tools.py"
+    generator.parent.mkdir(parents=True, exist_ok=True)
+    generator.write_text("import argparse, json\nfrom pathlib import Path\np=argparse.ArgumentParser(); p.add_argument('--tools-dir'); p.add_argument('--opencode-tools-dir'); p.add_argument('--state-dir'); a=p.parse_args()\nPath(a.opencode_tools_dir).mkdir(parents=True, exist_ok=True)\nPath(a.state_dir).mkdir(parents=True, exist_ok=True)\n(Path(a.state_dir)/'tools-index.json').write_text(json.dumps({'generated_at':'now','tools':[]}), encoding='utf-8')\n", encoding="utf-8")
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
+    monkeypatch.setenv("EFP_TOOLS_DIR", str(tools))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(config))
+    legacy = state / "system_prompts" / "agents.md"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("legacy-adapter", encoding="utf-8")
+    init_assets(Settings.from_env())
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == "legacy-adapter"

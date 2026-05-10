@@ -349,3 +349,22 @@ async def test_apply_does_not_overwrite_existing_agents_md(tmp_path, monkeypatch
     assert resp.status == 200
     assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == "custom"
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_ignores_legacy_efp_main_prompt(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    legacy = workspace / ".opencode" / "agents" / "efp-main.md"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("legacy-main", encoding="utf-8")
+    app = create_app(Settings.from_env(), opencode_client=FakeAuthOnlyClient())
+    client = TestClient(TestServer(app)); await client.start_server()
+    resp = await client.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={"config": {}})
+    assert resp.status == 200
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == Path("workspace/AGENTS.md.example").read_text(encoding="utf-8")
+    payload = json.loads((workspace / ".opencode" / "opencode.json").read_text(encoding="utf-8"))
+    assert "prompt" not in payload["agent"]["efp-main"]
+    await client.close()

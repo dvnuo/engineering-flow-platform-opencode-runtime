@@ -1,3 +1,4 @@
+from pathlib import Path
 from efp_opencode_adapter.app_keys import TASK_STORE_KEY
 import json
 
@@ -64,6 +65,19 @@ async def test_t13_system_prompt_agents_only_and_capabilities(tmp_path, monkeypa
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("EFP_TOOLS_DIR", str(tools)); monkeypatch.setenv("EFP_SKILLS_DIR", str(skills)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
     client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient()))); await client.start_server()
     cfg = await (await client.get('/api/agent/system-prompt/config')).json(); assert cfg['sections'] == ['agents'] and cfg['agents']['can_disable'] is False
+
+    generated = workspace / 'AGENTS.md'
+    assert generated.exists()
+    assert generated.read_text(encoding='utf-8') == Path('workspace/AGENTS.md.example').read_text(encoding='utf-8')
+    legacy_main = workspace / '.opencode' / 'agents' / 'efp-main.md'
+    legacy_main.parent.mkdir(parents=True, exist_ok=True)
+    legacy_main.write_text('legacy-main-should-not-be-used', encoding='utf-8')
+    cfg2 = await (await client.get('/api/agent/system-prompt/config')).json()
+    assert cfg2['sections'] == ['agents']
+    assert generated.read_text(encoding='utf-8') != 'legacy-main-should-not-be-used'
+    bad = await client.put('/api/agent/system-prompt/soul', json={'content':'x'})
+    assert bad.status == 422
+    assert not (state / 'system_prompts' / 'soul.md').exists()
     assert (await client.put('/api/agent/system-prompt/config', json={'agents': {'enabled': True}})).status == 200
     assert (await client.put('/api/agent/system-prompt/config', json={'agents': {'enabled': False}})).status == 422
     assert (await client.put('/api/agent/system-prompt/config', json={'soul': {'enabled': True}})).status == 422
