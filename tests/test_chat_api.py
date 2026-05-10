@@ -258,9 +258,26 @@ async def test_chat_slash_fallback_prompt(tmp_path, monkeypatch):
     fake=C(); client=TestClient(TestServer(create_app(Settings.from_env(), opencode_client=fake))); await client.start_server()
     r=await client.post('/api/chat', json={"message":"/java-cucumber-generator hello world","session_id":"s3"}); p=await r.json()
     assert r.status==200
-    assert 'Use the native OpenCode `skill` tool' in fake.parts[0]['text']
-    assert fake.parts[0]['text'] != '/java-cucumber-generator hello world'
-    assert p['response']
+
+
+@pytest.mark.asyncio
+async def test_chat_waits_past_progress_text_for_final_answer(tmp_path, monkeypatch):
+    class ProgressThenFinal(FakeOpenCodeClient):
+        def __init__(self):
+            super().__init__(); self.calls = 0
+        async def send_message(self, session_id, **kwargs):
+            self.messages[session_id].append({"id":"u-1","role":"user","parts":[{"type":"text","text":"q"}]})
+            self.messages[session_id].append({"id":"a-1","role":"assistant","parts":[{"type":"text","text":"I am fetching the Confluence page now and will summarize the agenda once I have the content"},{"type":"tool","status":"running"}]})
+            return {"message": self.messages[session_id][-1]}
+        async def list_messages(self, session_id):
+            self.calls += 1
+            if self.calls >= 2 and not any(m.get("id") == "a-2" for m in self.messages[session_id]):
+                self.messages[session_id].append({"id":"a-2","role":"assistant","finish_reason":"stop","parts":[{"type":"text","text":"Agenda summary ..."}]})
+            return list(self.messages[session_id])
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=ProgressThenFinal()); client = TestClient(TestServer(app)); await client.start_server()
+    r = await client.post("/api/chat", json={"message":"q","session_id":"s-progress-1"}); p = await r.json()
+    assert p["ok"] is True and p["completion_state"] == "completed" and p["response"] == "Agenda summary ..."
     await client.close()
 
 

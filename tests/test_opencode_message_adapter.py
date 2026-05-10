@@ -1,4 +1,5 @@
 from efp_opencode_adapter.opencode_message_adapter import (
+    find_latest_assistant_completion,
     extract_reasoning_texts_from_parts,
     extract_visible_text_from_parts,
     extract_last_assistant_visible_text,
@@ -37,3 +38,29 @@ def test_message_to_visible_text_prefers_visible_text_part_over_legacy_text_fiel
         "text": "hidden",
     }
     assert message_to_visible_text(msg) == "visible"
+
+
+def test_progress_text_is_not_terminal():
+    payload = {"messages": [{"id": "a1", "role": "assistant", "parts": [{"type": "text", "text": "I am fetching the Confluence page now and will summarize the agenda once I have the content"}, {"type": "tool", "status": "running"}]}]}
+    out = find_latest_assistant_completion(payload)
+    assert out["completion_state"] != "completed"
+
+
+def test_final_text_after_tool_is_terminal():
+    payload = {"messages": [{"id": "a1", "role": "assistant", "parts": [{"type": "text", "text": "I am fetching the Confluence page now and will summarize the agenda once I have the content"}, {"type": "tool", "status": "running"}]}, {"id": "a2", "role": "assistant", "parts": [{"type": "text", "text": "Agenda: kickoff, review, action items"}, {"type": "step-finish", "reason": "stop"}], "finish_reason": "stop"}]}
+    out = find_latest_assistant_completion(payload)
+    assert out["completion_state"] == "completed"
+    assert out["text"].startswith("Agenda:")
+
+
+def test_pending_tool_blocks_terminal():
+    payload = {"messages": [{"id": "a1", "role": "assistant", "parts": [{"type": "text", "text": "Working..."}, {"type": "tool", "status": "running"}]}]}
+    out = find_latest_assistant_completion(payload)
+    assert out["completion_state"] in {"pending", "incomplete"}
+
+
+def test_tool_error_returns_error_state():
+    payload = {"messages": [{"id": "a1", "role": "assistant", "parts": [{"type": "tool", "status": "error", "error": "permission denied"}]}]}
+    out = find_latest_assistant_completion(payload)
+    assert out["completion_state"] == "error"
+    assert "permission" in str(out["diagnostics"].get("error_summary", "")).lower()

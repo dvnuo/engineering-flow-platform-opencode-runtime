@@ -300,18 +300,20 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         ptype = str(pmeta.get("type") or "").lower()
         ignored = _bool_true(pmeta.get("ignored"))
         synthetic = _bool_true(pmeta.get("synthetic"))
-        if field == "text" and delta and role == "assistant" and ptype in {"text", "reasoning"} and not ignored and not synthetic:
-            if ptype == "text":
-                normalized_type = "message.delta"
-                text = delta
-            elif ptype == "reasoning":
+        metadata_incomplete = not role or not ptype
+        if field == "text" and delta and not ignored and not synthetic and role != "user":
+            if ptype == "reasoning":
                 normalized_type = "llm_thinking"
+                text = delta
+            elif ptype in {"", "text"} and role in {"", "assistant"}:
+                normalized_type = "message.delta"
                 text = delta
         values["__part_field"] = field
         values["__part_message_id"] = message_id
         values["__part_id"] = part_id
         values["__message_role"] = role
         values["__part_type"] = ptype
+        values["__metadata_incomplete"] = "true" if metadata_incomplete else "false"
     elif raw_type in {"message.completed", "message.finished"}:
         normalized_type = "message.completed"
     elif raw_type.startswith("session."):
@@ -347,6 +349,7 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     data["message_role"] = _sanitize_event_text(values.get("__message_role") or message_role or "", 100)
     data["part_type"] = _sanitize_event_text(values.get("__part_type") or (part_meta or {}).get("type") or "", 100)
     data["field"] = _sanitize_event_text(values.get("__part_field") or values.get("field") or "", 100)
+    data["metadata_incomplete"] = values.get("__metadata_incomplete") == "true"
     data["message_id"] = _sanitize_event_text(values.get("__part_message_id") or _raw_message_id_from_event(canonical, values), 300)
     data["part_id"] = _sanitize_event_text(values.get("__part_id") or _raw_part_id_from_event(canonical, values), 300)
 
