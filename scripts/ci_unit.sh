@@ -78,6 +78,9 @@ assert_no_adapter_py_source_matches() {
   if [[ "${status}" -eq 1 ]]; then
     return 0
   fi
+  if [[ "${status}" -eq 123 && -z "${matches}" ]]; then
+    return 0
+  fi
 
   echo "AppKey source scan failed for pattern: ${pattern}" >&2
   if [[ -n "${matches}" ]]; then
