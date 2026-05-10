@@ -32,6 +32,15 @@ def _unexpected_upstream_detail(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+async def _delete_portal_metadata_best_effort(portal_metadata, session_id: str) -> dict[str, Any]:
+    if not portal_metadata:
+        return {"success": False, "skipped": True, "reason": "portal_metadata_not_available"}
+    try:
+        return await portal_metadata.delete_session_metadata(session_id)
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
 async def _read_json_object(request: web.Request, *, error_prefix: str = "payload") -> dict[str, Any]:
     try:
         body = await request.json()
@@ -187,7 +196,7 @@ async def delete_session_handler(request: web.Request) -> web.Response:
     chatlog_store = request.app.get(CHATLOG_STORE_KEY)
     record = store.get(sid)
     if record is None or record.deleted:
-        metadata_delete = await portal_metadata.delete_session_metadata(sid) if portal_metadata else {"success": False, "skipped": True, "reason": "portal_metadata_not_available"}
+        metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
         return web.json_response({"success": True, "session_id": sid, "already_deleted": True, "runtime_deleted": False, "opencode_deleted": False, "opencode_missing": record is None, "metadata_delete": metadata_delete})
     opencode_deleted = False
     opencode_missing = False
@@ -208,7 +217,7 @@ async def delete_session_handler(request: web.Request) -> web.Response:
             chatlog_delete = {"success": False, "error": str(exc)}
     else:
         chatlog_delete = {"success": False, "skipped": True, "reason": "chatlog_delete_not_supported"}
-    metadata_delete = await portal_metadata.delete_session_metadata(sid) if portal_metadata else {"success": False, "skipped": True, "reason": "portal_metadata_not_available"}
+    metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
     return web.json_response({"success": True, "session_id": sid, "opencode_session_id": record.opencode_session_id, "already_deleted": False, "runtime_deleted": True, "opencode_deleted": opencode_deleted, "opencode_missing": opencode_missing, "metadata_delete": metadata_delete, "chatlog_delete": chatlog_delete})
 
 
@@ -237,7 +246,7 @@ async def clear_sessions_handler(request: web.Request) -> web.Response:
                 chatlog_store.delete(rec.portal_session_id)
             except Exception:
                 pass
-        metadata = await portal_metadata.delete_session_metadata(rec.portal_session_id) if portal_metadata else {"success": False, "skipped": True, "reason": "portal_metadata_not_available"}
+        metadata = await _delete_portal_metadata_best_effort(portal_metadata, rec.portal_session_id)
         metadata_results.append({"session_id": rec.portal_session_id, "opencode_missing": op_missing, "metadata_delete": metadata})
     if failures:
         return web.json_response({"success": False, "deleted_count": deleted_count, "failed_count": len(failures), "failures": failures, "metadata_delete": metadata_results}, status=502)

@@ -771,3 +771,30 @@ async def test_chat_deleted_session_returns_410_and_no_recovery(tmp_path, monkey
     assert fake.create_calls == before
     assert app[SESSION_STORE_KEY].get('s1').deleted is True
     await c.close()
+
+
+class _TrackSendDeletedClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__(); self.send_calls = 0
+    async def send_message(self, *args, **kwargs):
+        self.send_calls += 1
+        return await super().send_message(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_chat_deleted_session_does_not_send_or_create(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _TrackSendDeletedClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post("/api/chat", json={"message":"hello","session_id":"s2"})
+    app[SESSION_STORE_KEY].mark_deleted("s2")
+    before_create = fake.create_calls
+    before_send = fake.send_calls
+    res = await c.post("/api/chat", json={"message":"again","session_id":"s2"})
+    body = await res.json()
+    assert res.status == 410 and body["error"] == "session_deleted"
+    assert fake.create_calls == before_create
+    assert fake.send_calls == before_send
+    assert app[SESSION_STORE_KEY].get("s2").deleted is True
+    await c.close()

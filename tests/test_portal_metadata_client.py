@@ -9,7 +9,12 @@ from efp_opencode_adapter.settings import Settings
 
 
 def _base(server: TestServer) -> str:
-    return str(server.make_url(""))[:-1]
+    return str(server.make_url("")).rstrip("/")
+
+
+def test_settings_accepts_float_portal_metadata_timeout(monkeypatch):
+    monkeypatch.setenv("PORTAL_METADATA_TIMEOUT_SECONDS", "0.01")
+    assert Settings.from_env().portal_metadata_timeout_seconds == 0.01
 
 
 @pytest.mark.asyncio
@@ -17,30 +22,62 @@ async def test_delete_session_metadata_skipped_when_not_configured(monkeypatch):
     monkeypatch.delenv("PORTAL_INTERNAL_BASE_URL", raising=False)
     monkeypatch.delenv("PORTAL_AGENT_ID", raising=False)
     out = await PortalMetadataClient(Settings.from_env()).delete_session_metadata("s1")
-    assert out["skipped"] is True
+    assert out == {"success": False, "skipped": True, "reason": "portal_metadata_not_configured"}
 
 
 @pytest.mark.asyncio
-async def test_delete_session_metadata_variants(monkeypatch):
+async def test_delete_session_metadata_2xx_json_and_headers_and_encoding(monkeypatch):
+    got = {}
     async def ok(request):
-        assert request.headers.get("X-Portal-Internal-Token") == "tok"
-        return web.json_response({"ok": True})
+        got["path"] = request.path
+        got["auth"] = request.headers.get("Authorization")
+        got["token"] = request.headers.get("X-Portal-Internal-Token")
+        return web.json_response({"ok": True}, status=200)
+    app = web.Application()
+    app.router.add_delete("/api/internal/agents/{agent}/sessions/{sid}/metadata", ok)
+    server = TestServer(app); await server.start_server()
+    monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", _base(server))
+    monkeypatch.setenv("PORTAL_AGENT_ID", "agent 1")
+    monkeypatch.setenv("PORTAL_INTERNAL_TOKEN", "tok")
+    out = await PortalMetadataClient(Settings.from_env()).delete_session_metadata("s/1 x%2")
+    assert out["success"] is True and out["status"] == 200 and out["payload"] == {"ok": True}
+    assert got["auth"] == "Bearer tok" and got["token"] == "tok"
+    assert "/api/internal/agents/agent 1/sessions/s/1 x%2/metadata" == got["path"]
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_session_metadata_2xx_non_json_payload_none(monkeypatch):
+    async def ok(_):
+        return web.Response(text="ok", status=204)
+    app = web.Application(); app.router.add_delete("/api/internal/agents/agent/sessions/s1/metadata", ok)
+    server = TestServer(app); await server.start_server()
+    monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", _base(server)); monkeypatch.setenv("PORTAL_AGENT_ID", "agent")
+    out = await PortalMetadataClient(Settings.from_env()).delete_session_metadata("s1")
+    assert out["success"] is True and out["payload"] is None
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_session_metadata_404_405_and_500(monkeypatch):
     async def missing(_): return web.Response(status=404)
     async def method(_): return web.Response(status=405)
     async def err(_): return web.Response(status=500, text="boom")
     app = web.Application()
-    app.router.add_delete("/ok/api/internal/agents/agent/sessions/s1/metadata", ok)
     app.router.add_delete("/missing/api/internal/agents/agent/sessions/s1/metadata", missing)
     app.router.add_delete("/method/api/internal/agents/agent/sessions/s1/metadata", method)
     app.router.add_delete("/err/api/internal/agents/agent/sessions/s1/metadata", err)
     server = TestServer(app); await server.start_server()
-    monkeypatch.setenv("PORTAL_AGENT_ID", "agent"); monkeypatch.setenv("PORTAL_INTERNAL_TOKEN", "tok")
-    for path, key in [("/ok", "success"), ("/missing", "skipped"), ("/method", "skipped"), ("/err", "success")]:
-        monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", _base(server)+path)
-        out = await PortalMetadataClient(Settings.from_env()).delete_session_metadata("s1")
-        if path == "/ok": assert out["success"] is True
-        elif path in {"/missing", "/method"}: assert out["skipped"] is True
-        else: assert out["success"] is False and out["status"] == 500
+    monkeypatch.setenv("PORTAL_AGENT_ID", "agent")
+    monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", _base(server)+"/missing")
+    out = await PortalMetadataClient(Settings.from_env()).delete_session_metadata("s1")
+    assert out["skipped"] is True and out["reason"] == "portal_metadata_delete_endpoint_unavailable"
+    monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", _base(server)+"/method")
+    out = await PortalMetadataClient(Settings.from_env()).delete_session_metadata("s1")
+    assert out["skipped"] is True and out["status"] == 405
+    monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", _base(server)+"/err")
+    out = await PortalMetadataClient(Settings.from_env()).delete_session_metadata("s1")
+    assert out["success"] is False and out["status"] == 500
     await server.close()
 
 
@@ -55,5 +92,5 @@ async def test_delete_session_metadata_timeout(monkeypatch):
     monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", _base(server))
     monkeypatch.setenv("PORTAL_METADATA_TIMEOUT_SECONDS", "0.01")
     out = await PortalMetadataClient(Settings.from_env()).delete_session_metadata("s1")
-    assert out["success"] is False
+    assert out["success"] is False and "error" in out
     await server.close()

@@ -4,7 +4,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.sessions_api import _extract_opencode_session_id
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
-from efp_opencode_adapter.app_keys import SESSION_STORE_KEY
+from efp_opencode_adapter.app_keys import SESSION_STORE_KEY, PORTAL_METADATA_CLIENT_KEY
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
 
@@ -335,4 +335,40 @@ async def test_clear_sessions_partial_failure_returns_502(tmp_path, monkeypatch)
     assert res.status == 502 and body['success'] is False and body['failed_count'] == 1
     assert app[SESSION_STORE_KEY].get('s1').deleted is True
     assert app[SESSION_STORE_KEY].get('s2').deleted is False
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_session_metadata_exception_does_not_fail_delete(tmp_path, monkeypatch):
+    class PM:
+        async def publish_session_metadata(self, **kwargs): return {"success": True}
+        async def delete_session_metadata(self, session_id): raise RuntimeError("pm down")
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    app[PORTAL_METADATA_CLIENT_KEY] = PM()
+    client = TestClient(TestServer(app)); await client.start_server()
+    await client.post("/api/chat", json={"message":"hello","session_id":"s1"})
+    res = await client.delete("/api/sessions/s1"); body = await res.json()
+    assert res.status == 200 and body["success"] is True
+    assert body["metadata_delete"]["success"] is False
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_session_already_deleted_skips_opencode_calls_metadata_best_effort(tmp_path, monkeypatch):
+    class C(FakeOpenCodeClient):
+        def __init__(self): super().__init__(); self.delete_calls=0
+        async def delete_session(self, session_id): self.delete_calls += 1; return await super().delete_session(session_id)
+    class PM:
+        def __init__(self): self.calls=0
+        async def publish_session_metadata(self, **kwargs): return {"success": True}
+        async def delete_session_metadata(self, session_id): self.calls += 1; return {"success": True}
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    c=C(); pm=PM(); app=create_app(Settings.from_env(), opencode_client=c); app[PORTAL_METADATA_CLIENT_KEY]=pm
+    client = TestClient(TestServer(app)); await client.start_server()
+    await client.post("/api/chat", json={"message":"hello","session_id":"s1"})
+    app[SESSION_STORE_KEY].mark_deleted("s1")
+    res = await client.delete("/api/sessions/s1"); body = await res.json()
+    assert res.status == 200 and body["already_deleted"] is True
+    assert c.delete_calls == 0 and pm.calls == 1
     await client.close()

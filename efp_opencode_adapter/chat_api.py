@@ -259,12 +259,6 @@ async def _ensure_record_for_chat(*, client, store, portal_session_id: str, titl
     try:
         await client.get_session(existing.opencode_session_id)
         return existing, bool(existing.partial_recovery)
-    except SessionDeletedError:
-        raise web.HTTPGone(text=json.dumps({"error": "session_deleted", "session_id": portal_session_id, "detail": "Session was deleted"}), content_type="application/json")
-
-    except SessionDeletedError:
-        raise web.HTTPGone(text=json.dumps({"error": "session_deleted", "session_id": portal_session_id, "detail": "Session was deleted"}), content_type="application/json")
-
     except OpenCodeClientError as exc:
         if exc.status != 404:
             raise
@@ -573,6 +567,8 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         if not updated.deleted:
             await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state=latest_state, request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "model": metadata_model, "provider": metadata_provider, "context_state": final_context, "usage": usage_record, "trace_context": trace_context})
 
+    except SessionDeletedError:
+        raise web.HTTPGone(text=json.dumps({"error": "session_deleted", "session_id": portal_session_id, "detail": "Session was deleted"}), content_type="application/json")
     except OpenCodeClientError as exc:
         if not trace_context:
             trace_context = build_trace_context(settings, request_id=request_id, session_id=portal_session_id, opencode_session_id=opencode_session_id, profile_version=profile_version, runtime_profile_id=runtime_profile_id, model=model or "", provider=provider_for_trace or "")
