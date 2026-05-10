@@ -87,13 +87,33 @@ def evaluate_skill_invocation(settings: Settings, invocation: SlashInvocation) -
     if bool(skill.get("programmatic")) and not bool(skill.get("runtime_equivalence")):
         return SkillDecision(skill=skill, allowed=False, reason="programmatic_skill_requires_opencode_wrapper", permission_state=permission_state)
     if skill.get("missing_tools") or skill.get("missing_opencode_tools"):
-        return SkillDecision(skill=skill, allowed=False, reason="missing_required_tools", permission_state=permission_state)
+        return SkillDecision(
+            skill=skill,
+            allowed=True,
+            reason="allowed_with_missing_tools",
+            permission_state=permission_state,
+        )
     return SkillDecision(skill=skill, allowed=True, reason="allowed", permission_state=permission_state)
 
 
 def build_skill_prompt(skill: dict[str, Any], invocation: SlashInvocation) -> str:
     skill_name = str(skill.get("opencode_name") or invocation.skill_name)
     raw = f"/{invocation.raw_name} {invocation.arguments}".strip()
+    missing_tools = skill.get("missing_tools") if isinstance(skill.get("missing_tools"), list) else []
+    missing_opencode_tools = skill.get("missing_opencode_tools") if isinstance(skill.get("missing_opencode_tools"), list) else []
+
+    compatibility_warning = ""
+    if missing_tools or missing_opencode_tools:
+        compatibility_warning = (
+            "\n\nCompatibility warning:\n"
+            "- This skill has EFP-declared tools that are not currently mapped to OpenCode wrappers.\n"
+            f"- Missing EFP tools: {', '.join(str(tool) for tool in missing_tools) if missing_tools else '(none)'}\n"
+            f"- Missing declared OpenCode tools: {', '.join(str(tool) for tool in missing_opencode_tools) if missing_opencode_tools else '(none)'}\n"
+            "- Still load and apply the skill as far as possible using available OpenCode tools.\n"
+            "- If a specific step requires an unavailable tool, explain the exact blocker and continue with any useful partial result.\n"
+            "- Do not replace missing writeback/API tools with raw curl or ungoverned shell/API calls."
+        )
+
     return (
         f"Run the OpenCode agent skill `{skill_name}`.\n\n"
         "Original user slash command:\n"
@@ -105,4 +125,5 @@ def build_skill_prompt(skill: dict[str, Any], invocation: SlashInvocation) -> st
         f"2. Follow `.opencode/skills/{skill_name}/SKILL.md`.\n"
         "3. Do not claim that the skill is running unless you have actually loaded and applied it.\n"
         "4. If the skill cannot be loaded, or required tools are unavailable, report the exact blocker."
+        f"{compatibility_warning}"
     )
