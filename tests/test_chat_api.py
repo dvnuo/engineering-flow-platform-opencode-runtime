@@ -927,7 +927,9 @@ async def test_chat_response_assistant_message_ids_do_not_include_history_when_b
     app = create_app(Settings.from_env(), opencode_client=BeforeFailHistoryClient())
     client = TestClient(TestServer(app))
     await client.start_server()
-    payload = await (await client.post("/api/chat", json={"message": "hello", "session_id": "s-before-history"})).json()
+    resp = await client.post("/api/chat", json={"message": "hello", "session_id": "s-before-history"})
+    payload = await resp.json()
+    assert resp.status == 200
     assert payload["ok"] is True
     assert payload["completion_state"] == "completed"
     assert payload["response"] == "new" or "new" in payload["response"]
@@ -959,7 +961,7 @@ class BeforeFailNoCurrentCompletionClient(FakeOpenCodeClient):
 
 
 @pytest.mark.asyncio
-async def test_chat_before_snapshot_unreliable_without_current_completion_does_not_use_history_completed_message(tmp_path, monkeypatch):
+async def test_before_snapshot_unreliable_without_response_completion_does_not_trust_after_history(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     app = create_app(Settings.from_env(), opencode_client=BeforeFailNoCurrentCompletionClient())
     client = TestClient(TestServer(app))

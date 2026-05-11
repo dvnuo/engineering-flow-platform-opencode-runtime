@@ -419,6 +419,8 @@ async def test_chat_stream_final_payload_real_path_includes_assistant_message_id
         final_payload = next(payload for event_name, payload in events if event_name == "final")
         done_payload = next(payload for event_name, payload in events if event_name == "done")
         assert final_payload["ok"] is True
+        assert final_payload["completion_state"] == "completed"
+        assert final_payload["response"]
         assert final_payload["assistant_message_ids"] == ["a-frag-1", "a-frag-2"]
         assert final_payload["assistant_message_id"] == "a-frag-2"
         assert done_payload == {"ok": True}
