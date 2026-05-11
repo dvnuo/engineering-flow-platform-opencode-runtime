@@ -1,0 +1,15 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install -e ".[test]"
+      - run: python -m pytest -q
+    env:
+      RUN_RUNTIME_CONTRACT_TESTS: '1'
