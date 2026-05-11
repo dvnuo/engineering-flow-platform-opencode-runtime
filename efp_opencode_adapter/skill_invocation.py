@@ -10,6 +10,7 @@ from .settings import Settings
 from .skill_sync import normalize_skill_name
 
 SLASH_RE = re.compile(r"^/([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+(.*))?$")
+WRITEBACK_TAGS = {"mutation", "write", "comment", "transition", "assign", "delete", "external_writeback", "requires_approval"}
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,19 @@ def evaluate_skill_invocation(settings: Settings, invocation: SlashInvocation) -
     if bool(skill.get("programmatic")) and not bool(skill.get("runtime_equivalence")):
         return SkillDecision(skill=skill, allowed=False, reason="programmatic_skill_requires_opencode_wrapper", permission_state=permission_state)
     if skill.get("missing_tools") or skill.get("missing_opencode_tools"):
+        for mapping in (skill.get("tool_mappings") or []):
+            if not isinstance(mapping, dict):
+                continue
+            if mapping.get("available") is True:
+                continue
+            tags = {str(x).lower() for x in (mapping.get("policy_tags") or [])}
+            if tags & WRITEBACK_TAGS:
+                return SkillDecision(
+                    skill=skill,
+                    allowed=False,
+                    reason="missing_required_writeback_tools",
+                    permission_state=permission_state,
+                )
         return SkillDecision(
             skill=skill,
             allowed=True,
@@ -104,14 +118,22 @@ def build_skill_prompt(skill: dict[str, Any], invocation: SlashInvocation) -> st
 
     compatibility_warning = ""
     if missing_tools or missing_opencode_tools:
+        writeback_blocker = False
+        for mapping in (skill.get("tool_mappings") or []):
+            if not isinstance(mapping, dict) or mapping.get("available") is True:
+                continue
+            tags = {str(x).lower() for x in (mapping.get("policy_tags") or [])}
+            if tags & WRITEBACK_TAGS:
+                writeback_blocker = True
+                break
         compatibility_warning = (
             "\n\nCompatibility warning:\n"
             "- This skill has EFP-declared tools that are not currently mapped to OpenCode wrappers.\n"
             f"- Missing EFP tools: {', '.join(str(tool) for tool in missing_tools) if missing_tools else '(none)'}\n"
             f"- Missing declared OpenCode tools: {', '.join(str(tool) for tool in missing_opencode_tools) if missing_opencode_tools else '(none)'}\n"
-            "- Still load and apply the skill as far as possible using available OpenCode tools.\n"
-            "- If a specific step requires an unavailable tool, explain the exact blocker and continue with any useful partial result.\n"
-            "- Do not replace missing writeback/API tools with raw curl or ungoverned shell/API calls."
+            + ("- Missing tools include required writeback/mutation capability; do not continue with degraded execution.\n" if writeback_blocker else "- Still load and apply the skill as far as possible using available OpenCode tools.\n")
+            + ("- Report the exact blocker and stop.\n" if writeback_blocker else "- If a specific step requires an unavailable tool, explain the exact blocker and continue with any useful partial result.\n")
+            + "- Do not replace missing writeback/API tools with raw curl or ungoverned shell/API calls."
         )
 
     return (

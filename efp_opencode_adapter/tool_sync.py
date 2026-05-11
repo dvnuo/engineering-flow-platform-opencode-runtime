@@ -60,7 +60,35 @@ def _build_tools_index_from_registry(tools_dir_path: Path) -> dict[str, Any] | N
         descriptors = reg.list_descriptors(runtime_type="opencode", enabled_only=True, model_facing_only=True)
         items = []
         for d in descriptors:
-            items.append({"capability_id": d.tool_id, "tool_id": d.tool_id, "name": d.opencode_name, "opencode_name": d.opencode_name, "legacy_name": d.name, "description": d.description, "domain": d.domain, "type": d.type, "runtime_compat": d.runtime_compat, "policy_tags": d.policy_tags, "requires_identity_binding": d.requires_identity_binding, "mutation": d.mutation, "risk_level": d.risk_level, "input_schema": d.input_schema, "output_schema": d.output_schema, "enabled": d.enabled, "source_ref": "tools_repo"})
+            items.append({
+                "capability_id": getattr(d, "capability_id", None) or d.tool_id,
+                "tool_id": d.tool_id,
+                "type": d.type,
+                "name": d.opencode_name,
+                "legacy_name": getattr(d, "name", None),
+                "opencode_name": d.opencode_name,
+                "description": d.description,
+                "domain": d.domain,
+                "runtime_compat": getattr(d, "runtime_compat", None),
+                "policy_tags": getattr(d, "policy_tags", None),
+                "requires_identity_binding": getattr(d, "requires_identity_binding", False),
+                "mutation": getattr(d, "mutation", False),
+                "risk_level": getattr(d, "risk_level", None),
+                "allow_override": getattr(d, "allow_override", None),
+                "implementation_mode": getattr(d, "implementation_mode", None),
+                "external_source": getattr(d, "external_source", None),
+                "enabled": getattr(d, "enabled", True),
+                "input_schema": getattr(d, "input_schema", None),
+                "output_schema": getattr(d, "output_schema", None),
+                "source_ref": "tools_repo",
+                "model_facing": getattr(d, "model_facing", True),
+                "permission_default": getattr(d, "permission_default", None),
+                "dry_run_supported": getattr(d, "dry_run_supported", None),
+                "audit_event": getattr(d, "audit_event", None),
+                "side_effects": getattr(d, "side_effects", None),
+                "idempotency_key_fields": getattr(d, "idempotency_key_fields", None),
+                "governance_reviewed": getattr(d, "governance_reviewed", None),
+            })
         return {"generated_at": _utc_now(), "tools": items, "source": "efp_tools.registry"}
     except Exception:
         return None
@@ -121,6 +149,14 @@ def sync_tools(
         )
 
     index_path = state_dir_path / "tools-index.json"
+    if index_path.exists():
+        try:
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("tools"), list):
+                return payload
+        except json.JSONDecodeError:
+            pass
+
     registry_index = _build_tools_index_from_registry(tools_dir_path)
     if registry_index is not None:
         index_path.write_text(json.dumps(registry_index, ensure_ascii=False, indent=2), encoding="utf-8")

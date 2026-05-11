@@ -84,6 +84,20 @@ def test_tool_loop_no_auto_allow_mutation_and_other_rules():
     assert p["efp_upd"] == "ask"
 
 
+def test_permission_generator_honors_descriptor_permission_default():
+    tools = {"tools": [
+        {"capability_id": "tool.ask", "opencode_name": "efp_ask", "policy_tags": ["mutation"], "permission_default": "ask"},
+        {"capability_id": "tool.deny", "opencode_name": "efp_deny", "policy_tags": ["mutation"], "permission_default": "deny"},
+        {"capability_id": "tool.read", "opencode_name": "efp_read", "policy_tags": ["read_only"]},
+    ]}
+    p = build_permission({"allowed_capability_ids": ["tool.ask", "tool.deny", "tool.read"]}, None, tools, permission_mode="workspace_full_access")
+    assert p["efp_ask"] == "allow"
+    assert p["efp_deny"] == "deny"
+    assert p["efp_read"] == "allow"
+    p2 = build_permission({"denied_actions": ["tool.ask"], "allowed_capability_ids": ["tool.ask"]}, None, tools, permission_mode="workspace_full_access")
+    assert p2["efp_ask"] == "deny"
+
+
 def test_runtime_compat_and_opencode_name_priority():
     tools = {"tools": [{"capability_id": "tool.native", "name": "native_read", "opencode_name": "efp_native_read", "policy_tags": ["read_only"], "runtime_compat": ["native"]}, {"capability_id": "tool.github.get_pr", "name": "github_get_pr", "opencode_name": "efp_github_get_pr", "policy_tags": ["read_only"], "runtime_compat": ["opencode"]}]}
     p = build_permission({"allowed_capability_types": ["adapter_action"], "allowed_capability_ids": ["tool.github.get_pr", "tool.native"]}, None, tools)
@@ -342,20 +356,20 @@ TOOLS_INDEX = {
 def test_missing_llm_tools_defaults_to_all_generated_tools():
     permission = build_permission({}, tools_index=TOOLS_INDEX)
     assert permission["jira_read_issue"] == "allow"
-    assert permission["jira_add_comment"] == "ask"
+    assert permission["jira_add_comment"] == "allow"
     assert permission["jira_dangerous_delete"] == "deny"
 
 
 def test_llm_present_but_missing_tools_key_still_defaults_to_all_generated_tools():
     permission = build_permission({"llm": {}}, tools_index=TOOLS_INDEX)
     assert permission["jira_read_issue"] == "allow"
-    assert permission["jira_add_comment"] == "ask"
+    assert permission["jira_add_comment"] == "allow"
 
 
 def test_llm_tools_wildcard_still_allows_all_generated_tools():
     permission = build_permission({"llm": {"tools": ["*"]}}, tools_index=TOOLS_INDEX)
     assert permission["jira_read_issue"] == "allow"
-    assert permission["jira_add_comment"] == "ask"
+    assert permission["jira_add_comment"] == "allow"
 
 
 def test_explicit_empty_llm_tools_does_not_trigger_missing_fallback():
@@ -403,7 +417,7 @@ def test_workspace_full_access_baseline():
 
 def test_profile_policy_baseline_keeps_old_behavior():
     p = default_permission_baseline(permission_mode="profile_policy", allow_bash_all=False)
-    assert p["*"] == "allow"
+    assert p["*"] == "ask"
     assert p["edit"] == "ask"
     assert p["bash"]["rm *"] == "deny"
 

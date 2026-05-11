@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+
 from .agents_md import ensure_default_agents_md
-from .opencode_config import build_opencode_config, write_opencode_config
+from .index_loader import read_json_file, load_skills_index, load_tools_index
+from .opencode_config import build_opencode_config, merge_with_existing_config, write_opencode_config
 from .settings import Settings
 from .skill_sync import sync_skills
 from .tool_sync import sync_tools
@@ -38,13 +42,25 @@ def init_assets(settings: Settings) -> None:
     )
 
     ensure_default_agents_md(settings)
+    _refresh_managed_opencode_config(settings)
+
+
+def _refresh_managed_opencode_config(settings: Settings) -> None:
     config_path = settings.opencode_config_path
-    if config_path.exists():
-        print(f"{config_path} exists, leaving unchanged")
-        return
-    config, _, _ = build_opencode_config(settings, runtime_config=None)
-    write_opencode_config(settings, config)
-    print(f"Created {config_path}")
+    generated, _, _ = build_opencode_config(settings, runtime_config=None)
+    existing = read_json_file(config_path) if config_path.exists() else None
+    if config_path.exists() and existing is None:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        backup = config_path.with_name(f"{config_path.name}.bak.{ts}")
+        backup.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+    merged = merge_with_existing_config(
+        existing,
+        generated,
+        tools_index=load_tools_index(settings),
+        skills_index=load_skills_index(settings),
+    )
+    write_opencode_config(settings, merged)
+    print(f"Updated managed config in {config_path}")
 
 
 def main() -> None:

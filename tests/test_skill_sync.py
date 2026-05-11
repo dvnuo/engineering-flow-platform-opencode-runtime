@@ -260,3 +260,18 @@ def test_sync_generates_commands_and_preserves_manual(tmp_path):
 
     payload = _parse_frontmatter((opdir / 'a' / 'SKILL.md').read_text(encoding='utf-8'))
     assert all(isinstance(v, str) for v in payload['metadata'].values())
+
+
+def test_skill_sync_create_pr_no_missing_when_all_tools_enabled(tmp_path):
+    skills_dir = tmp_path / "skills"; opdir = tmp_path / "workspace/.opencode/skills"; state = tmp_path / "state"; cmds = tmp_path / "workspace/.opencode/commands"
+    _write_skill(skills_dir / "create-pull-request" / "skill.md", {"name": "create-pull-request", "description": "Create PR", "task_tools": ["run_command", "github_get_default_branch", "github_create_pull_request"]})
+    tools_index = {"tools": [
+        {"legacy_name": "run_command", "opencode_name": "efp_run_command", "enabled": True},
+        {"legacy_name": "github_get_default_branch", "opencode_name": "efp_github_get_default_branch", "enabled": True},
+        {"legacy_name": "github_create_pull_request", "opencode_name": "efp_github_create_pull_request", "enabled": True},
+    ]}
+    res = sync_skills(skills_dir, opdir, state, tools_index=tools_index, opencode_commands_dir=cmds)
+    entry = res.skills[0]
+    assert entry.missing_tools == []
+    assert entry.missing_opencode_tools == []
+    assert (cmds / "create-pull-request.md").exists()
