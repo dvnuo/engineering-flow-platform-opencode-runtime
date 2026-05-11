@@ -1,3 +1,4 @@
+import json
 from efp_opencode_adapter.app_keys import EVENT_BUS_KEY, OPENCODE_CLIENT_KEY
 import asyncio
 import pytest
@@ -382,5 +383,43 @@ async def test_chat_stream_final_payload_includes_assistant_message_ids(tmp_path
         assert '"assistant_message_id": "a-2"' in body
         assert '"assistant_message_ids": ["a-1", "a-2"]' in body
         assert 'event: done\ndata: {"ok": true}' in body
+    finally:
+        await c.close()
+
+
+class FragmentStreamClient(FakeOpenCodeClient):
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        text = parts[0].get("text", "")
+        self.messages[session_id].append({"info": {"id": "u-new", "role": "user"}, "parts": [{"type": "text", "text": text}]})
+        self.messages[session_id].append({"info": {"id": "a-frag-1", "role": "assistant"}, "parts": [{"type": "text", "text": "part 1"}]})
+        self.messages[session_id].append({"info": {"id": "a-frag-2", "role": "assistant"}, "parts": [{"type": "text", "text": "part 2"}]})
+        return {"message": {"info": {"id": "a-frag-2", "role": "assistant"}, "parts": [{"type": "text", "text": "part 2"}]}}
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_final_payload_real_path_includes_assistant_message_ids(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FragmentStreamClient())
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    try:
+        resp = await c.post("/api/chat/stream", json={"message": "hello", "session_id": "s-stream-frag", "request_id": "r-stream-frag"})
+        body = await resp.text()
+        events: list[tuple[str, dict]] = []
+        for chunk in body.strip().split("\n\n"):
+            event_name = ""
+            data = ""
+            for line in chunk.splitlines():
+                if line.startswith("event: "):
+                    event_name = line.removeprefix("event: ")
+                if line.startswith("data: "):
+                    data = line.removeprefix("data: ")
+            if event_name and data:
+                events.append((event_name, json.loads(data)))
+        final_payload = next(payload for event_name, payload in events if event_name == "final")
+        done_payload = next(payload for event_name, payload in events if event_name == "done")
+        assert final_payload["assistant_message_ids"] == ["a-frag-1", "a-frag-2"]
+        assert final_payload["assistant_message_id"] == "a-frag-2"
+        assert done_payload == {"ok": True}
     finally:
         await c.close()

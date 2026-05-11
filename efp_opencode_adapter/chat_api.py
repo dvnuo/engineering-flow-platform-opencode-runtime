@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 import time
-from typing import Any
+from typing import Any, Iterable
 from uuid import uuid4
 
 from aiohttp import web
@@ -141,6 +141,14 @@ def _detect_new_message_ids(before_messages: list[dict[str, Any]], after_message
         elif role == "assistant":
             assistant_message_id = message_id
     return user_message_id, assistant_message_id
+
+
+def _append_unique_message_ids(target: list[str], candidates: Iterable[str]) -> None:
+    seen = set(target)
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            target.append(candidate)
+            seen.add(candidate)
 
 
 
@@ -506,14 +514,20 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         user_message_id = ""
         assistant_message_id = ""
         assistant_message_ids: list[str] = []
-        try:
-            after_messages = waited_messages or await client.list_messages(record.opencode_session_id)
-            user_message_id, assistant_message_id = _detect_new_message_ids(before_messages, after_messages)
-            for mid in extract_assistant_message_ids(after_messages, exclude_message_ids=before_assistant_message_ids):
-                if mid not in assistant_message_ids:
-                    assistant_message_ids.append(mid)
-        except Exception as exc:
-            message_id_detection_error_after = safe_preview(str(exc), 500)
+        if not before_snapshot_unreliable:
+            try:
+                after_messages = waited_messages or await client.list_messages(record.opencode_session_id)
+                user_message_id, assistant_message_id = _detect_new_message_ids(before_messages, after_messages)
+                _append_unique_message_ids(
+                    assistant_message_ids,
+                    [assistant_message_id],
+                )
+                _append_unique_message_ids(
+                    assistant_message_ids,
+                    extract_assistant_message_ids(after_messages, exclude_message_ids=before_assistant_message_ids),
+                )
+            except Exception as exc:
+                message_id_detection_error_after = safe_preview(str(exc), 500)
         if completion_state == "completed" and not assistant_text.strip():
             completion_state = "empty_final"
             incomplete_reason = "empty_final_assistant_text"
@@ -523,14 +537,12 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             if not candidate and isinstance(response_payload.get("message"), dict):
                 candidate = adapter_message_id(response_payload["message"])
             assistant_message_id = str(candidate or "")
-        for mid in extract_assistant_message_ids(response_payload, exclude_message_ids=before_assistant_message_ids):
-            if mid not in assistant_message_ids:
-                assistant_message_ids.append(mid)
+        _append_unique_message_ids(
+            assistant_message_ids,
+            extract_assistant_message_ids(response_payload, exclude_message_ids=before_assistant_message_ids),
+        )
         probe_message_id = str(completion_probe.get("message_id") or "")
-        if probe_message_id and probe_message_id not in assistant_message_ids:
-            assistant_message_ids.append(probe_message_id)
-        if assistant_message_id and assistant_message_id not in assistant_message_ids:
-            assistant_message_ids.append(assistant_message_id)
+        _append_unique_message_ids(assistant_message_ids, [probe_message_id, assistant_message_id])
         if assistant_message_ids:
             assistant_message_id = assistant_message_ids[-1]
         elif assistant_message_id:
