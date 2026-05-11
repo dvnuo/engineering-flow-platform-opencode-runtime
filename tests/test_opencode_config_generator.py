@@ -1,6 +1,6 @@
 import json
 
-from efp_opencode_adapter.opencode_config import build_opencode_config, model_from_runtime_profile, write_main_agent_prompt, normalize_opencode_provider_id
+from efp_opencode_adapter.opencode_config import build_opencode_config, model_from_runtime_profile, normalize_opencode_provider_id
 from efp_opencode_adapter.settings import Settings
 
 
@@ -14,6 +14,8 @@ def test_build_opencode_config_defaults(tmp_path, monkeypatch):
     assert cfg["server"] == {"hostname": "127.0.0.1", "port": 4096}
     assert "permission" in cfg and "efp-main" in cfg["agent"]
     assert "model" not in cfg["agent"]["efp-main"]
+    assert "prompt" not in cfg["agent"]["efp-main"]
+    assert cfg["agent"]["efp-main"]["permission"] == {}
     assert "permission" in updated and "agent" in updated
 
 
@@ -59,16 +61,6 @@ def test_provider_base_url_mapping(tmp_path, monkeypatch):
     assert "api_key" not in json.dumps(cfg).lower()
 
 
-def test_write_main_agent_prompt(tmp_path, monkeypatch):
-    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
-    path = write_main_agent_prompt(Settings.from_env())
-    text = path.read_text(encoding="utf-8")
-    assert "This runtime is managed by EFP Portal." in text
-    assert "Obey Portal capability/profile/policy metadata." in text
-    assert "create or output files" in text
-    assert "Use efp_* tools" in text
-
-
 def test_copilot_provider_config_does_not_include_integration_header(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
@@ -104,7 +96,7 @@ def test_agent_permission_not_empty_object(tmp_path, monkeypatch):
     assert cfg["permission"]["edit"] == "allow"
     assert cfg["permission"]["write"] == "allow"
     assert cfg["permission"]["bash"] == {"*": "allow"}
-    assert cfg["agent"]["efp-main"].get("permission") != {}
+    assert cfg["agent"]["efp-main"].get("permission") == {}
 
 
 def test_config_hash_changes_with_permission_mode(tmp_path, monkeypatch):
@@ -117,3 +109,12 @@ def test_config_hash_changes_with_permission_mode(tmp_path, monkeypatch):
     cfg2, h2, _ = build_opencode_config(Settings.from_env(), None)
     assert h1 != h2
     assert cfg1["permission"]["*"] != cfg2["permission"]["*"]
+
+
+def test_config_hash_deterministic(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    s = Settings.from_env()
+    _, h1, _ = build_opencode_config(s, {"llm": {"provider": "openai", "model": "gpt-5"}})
+    _, h2, _ = build_opencode_config(s, {"llm": {"provider": "openai", "model": "gpt-5"}})
+    assert h1 == h2

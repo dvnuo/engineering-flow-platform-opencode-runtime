@@ -52,9 +52,11 @@ async def test_apply_contract(tmp_path, monkeypatch):
     assert r.status == 200 and body["success"] is True
     assert secret not in json.dumps(body)
     cfg = json.loads((workspace / ".opencode/opencode.json").read_text())
+    assert (workspace / "AGENTS.md").exists()
+    assert "prompt" not in cfg["agent"]["efp-main"]
     assert cfg["permission"]["skill"]["alpha"] == "allow"
     assert cfg["permission"]["efp_read"] == "allow"
-    assert cfg["permission"]["efp_update"] == "ask"
+    assert cfg["permission"]["efp_update"] == "allow"
 
     payload["config"]["policy_context"] = {"allow_auto_run": True}
     r2 = await client.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json=payload)
@@ -232,6 +234,8 @@ async def test_apply_allowed_skills_reflects_capability_state(tmp_path, monkeypa
     resp = await client.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={"config": {"allowed_skills": ["my-skill"]}})
     assert resp.status == 200
     cfg = json.loads((workspace / ".opencode/opencode.json").read_text())
+    assert (workspace / "AGENTS.md").exists()
+    assert "prompt" not in cfg["agent"]["efp-main"]
     assert cfg["permission"]["skill"]["my-skill"] == "allow"
     caps = await (await client.get("/api/capabilities")).json()
     skill = next(c for c in caps["capabilities"] if c.get("type") == "skill" and c.get("name") == "my-skill")
@@ -329,3 +333,19 @@ def test_runtime_profile_apply_test_file_has_no_merge_conflict_markers():
     assert "<<<" + "<<<<" not in text
     assert "===" + "====" not in text
     assert ">>>" + ">>>>" not in text
+
+
+@pytest.mark.asyncio
+async def test_apply_does_not_overwrite_existing_agents_md(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    (workspace).mkdir(parents=True, exist_ok=True)
+    (workspace / "AGENTS.md").write_text("custom", encoding="utf-8")
+    app = create_app(Settings.from_env(), opencode_client=FakeAuthOnlyClient())
+    client = TestClient(TestServer(app)); await client.start_server()
+    resp = await client.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={"config": {}})
+    assert resp.status == 200
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == "custom"
+    await client.close()

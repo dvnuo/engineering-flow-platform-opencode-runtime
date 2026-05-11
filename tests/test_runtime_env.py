@@ -199,3 +199,11 @@ def test_strip_managed_external_env_removes_old_secret_but_keeps_path(monkeypatc
     stripped = strip_managed_external_env(os.environ)
     assert "JIRA_TOKEN" not in stripped
     assert stripped["PATH"] == "/usr/bin"
+
+
+def test_runtime_env_sets_disable_claude_prompt_default(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    env = build_runtime_env_from_config(s, {}).env
+    assert env["OPENCODE_DISABLE_CLAUDE_CODE_PROMPT"] == "1"
+
+

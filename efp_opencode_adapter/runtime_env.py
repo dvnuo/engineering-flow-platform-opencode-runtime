@@ -200,6 +200,7 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
             env["GIT_AUTHOR_EMAIL"] = str(author_email)
             env["GIT_COMMITTER_EMAIL"] = str(author_email)
         updated.append("git")
+    env.setdefault("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT", "1")
     debug = cfg.get("debug") if isinstance(cfg.get("debug"), dict) else {}
     if debug.get("enabled"):
         env["EFP_DEBUG"] = "1"
