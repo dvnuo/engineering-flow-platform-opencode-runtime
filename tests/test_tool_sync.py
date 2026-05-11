@@ -119,3 +119,36 @@ def load_registry(tools_dir):
     assert index['tools'][0]['policy_tags'] == ['context', 'read_only']
     assert index['tools'][0]['input_schema']['type'] == 'object'
     assert index['source'] == 'efp_tools.registry'
+
+
+def test_tool_sync_preserves_generator_governance_metadata(tmp_path):
+    tools_dir = tmp_path / "tools"; tools_dir.mkdir(parents=True)
+    (tools_dir / "manifest.yaml").write_text("tools: []\n", encoding="utf-8")
+    gen = tools_dir / "adapters/opencode/generate_tools.py"; gen.parent.mkdir(parents=True, exist_ok=True)
+    gen.write_text(
+        """import argparse,json\nfrom pathlib import Path\np=argparse.ArgumentParser();p.add_argument('--tools-dir');p.add_argument('--opencode-tools-dir');p.add_argument('--state-dir');a=p.parse_args();Path(a.opencode_tools_dir).mkdir(parents=True, exist_ok=True);Path(a.state_dir).mkdir(parents=True, exist_ok=True);(Path(a.state_dir)/'tools-index.json').write_text(json.dumps({'tools':[{'capability_id':'tool.mut','opencode_name':'efp_mut','permission_default':'ask','dry_run_supported':True,'audit_event':'x','side_effects':['remote_write'],'idempotency_key_fields':['id'],'governance_reviewed':True}]}), encoding='utf-8')""",
+        encoding="utf-8",
+    )
+    out = sync_tools(tools_dir, tmp_path / "workspace/.opencode/tools", tmp_path / "state")
+    tool = out["tools"][0]
+    assert tool["permission_default"] == "ask"
+    assert tool["dry_run_supported"] is True
+    assert tool["audit_event"] == "x"
+    assert tool["idempotency_key_fields"] == ["id"]
+
+
+def test_tool_sync_registry_fallback_has_rich_metadata(tmp_path):
+    tools_dir = tmp_path / "tools"; tools_dir.mkdir(parents=True)
+    (tools_dir / "manifest.yaml").write_text("tools: []\n", encoding="utf-8")
+    gen = tools_dir / "adapters/opencode/generate_tools.py"; gen.parent.mkdir(parents=True, exist_ok=True)
+    gen.write_text("""import argparse;from pathlib import Path\np=argparse.ArgumentParser();p.add_argument('--tools-dir');p.add_argument('--output-dir');a=p.parse_args();Path(a.output_dir).mkdir(parents=True, exist_ok=True)""", encoding="utf-8")
+    pkg = tools_dir / "python/efp_tools"; pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "registry.py").write_text(
+        """class D:\n tool_id='tool.mut'; type='adapter_action'; name='mut'; opencode_name='efp_mut'; description='d'; domain='github'; runtime_compat=['opencode']; policy_tags=['mutation']; requires_identity_binding=False; mutation=True; risk_level='high'; allow_override=False; implementation_mode='wrapper'; external_source='github'; enabled=True; input_schema={}; output_schema={}; model_facing=True; permission_default='ask'; dry_run_supported=True; audit_event='evt'; side_effects=['write']; idempotency_key_fields=['k']; governance_reviewed=True\nclass R:\n def list_descriptors(self, **kwargs): return [D()]\ndef load_registry(_): return R()""",
+        encoding="utf-8",
+    )
+    out = sync_tools(tools_dir, tmp_path / "workspace/.opencode/tools", tmp_path / "state")
+    t = out["tools"][0]
+    for k in ("permission_default", "dry_run_supported", "audit_event", "side_effects", "idempotency_key_fields", "governance_reviewed"):
+        assert k in t

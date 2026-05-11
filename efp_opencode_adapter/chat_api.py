@@ -44,6 +44,7 @@ from .opencode_message_adapter import (
     message_role as adapter_message_role,
 )
 from .skill_invocation import build_skill_prompt, evaluate_skill_invocation, parse_slash_invocation
+from .repository_workspace import ensure_repo_checkout, parse_create_pr_repo_request
 
 DATA_URL_RE = re.compile(r"data:[A-Za-z0-9.+/_-]+(?:;[A-Za-z0-9.+/_=-]+)*;base64,[A-Za-z0-9+/=]+")
 
@@ -212,8 +213,18 @@ async def _send_skill_prompt(
     portal_session_id: str,
     request_id: str,
     command_error: str | None = None,
+    repository_context: Any | None = None,
 ) -> Any:
-    parts[0]["text"] = build_skill_prompt(skill_decision.skill or {}, invocation)
+    prompt = build_skill_prompt(skill_decision.skill or {}, invocation)
+    if repository_context is not None:
+        prompt += (
+            f"\n\nRepository has been prepared at: {repository_context.path}\n"
+            "All local git inspection commands must run from that directory\n"
+            f"Use base branch: {repository_context.base_branch}\n"
+            f"Use head branch: {repository_context.head_branch}\n"
+            "Do not run git inspection from /workspace unless /workspace/.git exists"
+        )
+    parts[0]["text"] = prompt
     skill_debug["used_skill_prompt"] = True
     if command_error:
         skill_debug["command_execution_error"] = command_error
@@ -415,8 +426,42 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             elif not skill_decision.allowed:
                 pass
 
+            repository_context = None
+            repo_request = None
+            if skill_decision.allowed and invocation.skill_name == "create-pull-request":
+                repo_request = parse_create_pr_repo_request(invocation.arguments)
+                if repo_request is not None:
+                    checkout_result = ensure_repo_checkout(settings, repo_request)
+                    skill_debug["repository_preflight"] = {
+                        "attempted": True,
+                        "success": checkout_result.success,
+                        "path": checkout_result.path,
+                        "owner": checkout_result.owner,
+                        "repo": checkout_result.repo,
+                        "head_branch": checkout_result.head_branch,
+                        "base_branch": checkout_result.base_branch,
+                        "error": checkout_result.error,
+                    }
+                    evt_type = "skill.repository_checkout.completed" if checkout_result.success else "skill.repository_checkout.failed"
+                    repo_evt = add_trace_context({"type": evt_type, "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"path": checkout_result.path, "owner": checkout_result.owner, "repo": checkout_result.repo, "head_branch": checkout_result.head_branch, "base_branch": checkout_result.base_branch, "error": checkout_result.error}}, trace_context)
+                    runtime_events.append(repo_evt)
+                    await bus.publish(repo_evt)
+                    if checkout_result.success:
+                        repository_context = checkout_result
+                    else:
+                        skill_decision = type(skill_decision)(skill=skill_decision.skill, allowed=False, reason="repository_checkout_failed", permission_state=skill_decision.permission_state)
+                        skill_debug["reason"] = "repository_checkout_failed"
+
             if (not skill_decision.allowed) and (not executed_native_command):
                 assistant_text = f"Skill `{invocation.skill_name}` cannot run in OpenCode runtime: {skill_decision.reason}."
+                if skill_decision.reason == "missing_required_writeback_tools":
+                    assistant_text = "Skill create-pull-request cannot run because required writeback tool github_create_pull_request / efp_github_create_pull_request is unavailable."
+                elif skill_decision.reason == "repository_checkout_failed" and repo_request is not None:
+                    preflight = skill_debug.get("repository_preflight", {})
+                    assistant_text = (
+                        f"Repository checkout failed for {repo_request.repo_url} to {preflight.get('path', '')} "
+                        f"(head: {repo_request.head_branch}, base: {repo_request.base_branch}, failure: {preflight.get('error')})."
+                    )
                 skill_debug["blocked"] = True
                 skill_debug["kind"] = "command" if skill_decision.reason in {"unknown_skill_or_command", "command_lookup_failed", "command_execution_failed"} else "skill"
                 blocked_evt = add_trace_context({"type": "skill.blocked", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"reason": skill_decision.reason, "permission_state": skill_decision.permission_state}}, trace_context)
@@ -477,6 +522,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                             portal_session_id=portal_session_id,
                             request_id=request_id,
                             command_error=error_preview,
+                            repository_context=repository_context,
                         )
                 else:
                     response_payload = await _send_skill_prompt(
@@ -494,6 +540,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                         trace_context=trace_context,
                         portal_session_id=portal_session_id,
                         request_id=request_id,
+                        repository_context=repository_context,
                     )
         else:
             response_payload = await client.send_message(record.opencode_session_id, parts=parts, model=model, agent=agent, system=system)
@@ -647,7 +694,7 @@ async def chat_handler(request: web.Request) -> web.Response:
 
 
 STREAM_HEARTBEAT_SECONDS = 15.0
-BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.delta", "llm_thinking", "opencode.reasoning", "provider.retry", "provider.status", "execution.started", "execution.completed", "execution.failed", "complete", "final", "error", "skill.detected", "skill.blocked", "skill.command.executed", "skill.command.failed", "skill.prompt_applied", "skill.completed"}
+BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.delta", "llm_thinking", "opencode.reasoning", "provider.retry", "provider.status", "execution.started", "execution.completed", "execution.failed", "complete", "final", "error", "skill.detected", "skill.blocked", "skill.command.executed", "skill.command.failed", "skill.prompt_applied", "skill.completed", "skill.repository_checkout.completed", "skill.repository_checkout.failed"}
 
 
 class SSEClientDisconnected(Exception):
