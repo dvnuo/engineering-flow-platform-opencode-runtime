@@ -40,6 +40,13 @@ RUNTIME_BASE_URL=http://localhost:8000 python -m pytest -q runtime_contract_test
 Legacy aliases `RUNTIME_CONTRACT_EXPECT_TOOL` and `RUNTIME_CONTRACT_EXPECT_EFP_TOOL` remain supported for backward compatibility. Default contract runs do not enable live chat/task LLM checks.
 
 
+
+## CI note
+
+GitHub Actions CI is intentionally disabled for now. Local validation remains available through `python -m pytest -q`, `bash scripts/ci_unit.sh`, and `bash scripts/smoke.sh`.
+
+Do not recreate `.github/workflows/ci.yml` unless CI ownership and stable gates are reintroduced.
+
 ## Docs
 - [docs/RUNTIME_CONTRACT.md](docs/RUNTIME_CONTRACT.md)
 - [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)
