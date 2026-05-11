@@ -24,6 +24,8 @@ class Settings:
     adapter_state_dir: Path
     workspace_dir: Path
     skills_dir: Path
+    workspace_repos_dir: Path
+    git_checkout_timeout_seconds: float
     tools_dir: Path
     opencode_data_dir: Path
     opencode_config_path: Path
@@ -51,6 +53,8 @@ class Settings:
             adapter_state_dir=Path(os.getenv("EFP_ADAPTER_STATE_DIR", "/root/.local/share/efp-compat")),
             workspace_dir=Path(os.getenv("EFP_WORKSPACE_DIR", "/workspace")),
             skills_dir=Path(os.getenv("EFP_SKILLS_DIR", "/app/skills")),
+            workspace_repos_dir=Path(os.getenv("EFP_WORKSPACE_REPOS_DIR", str(Path(os.getenv("EFP_WORKSPACE_DIR", "/workspace")) / "repos"))),
+            git_checkout_timeout_seconds=float(os.getenv("EFP_GIT_CHECKOUT_TIMEOUT_SECONDS", "120")),
             tools_dir=Path(os.getenv("EFP_TOOLS_DIR", "/app/tools")),
             opencode_data_dir=Path(os.getenv("OPENCODE_DATA_DIR", "/root/.local/share/opencode")),
             opencode_config_path=Path(os.getenv("OPENCODE_CONFIG", "/workspace/.opencode/opencode.json")),

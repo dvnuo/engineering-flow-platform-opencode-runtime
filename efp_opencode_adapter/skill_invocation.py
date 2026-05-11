@@ -11,6 +11,29 @@ from .skill_sync import normalize_skill_name
 
 SLASH_RE = re.compile(r"^/([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+(.*))?$")
 
+_WRITEBACK_TOOL_NAMES = {"github_create_pull_request", "efp_github_create_pull_request"}
+_WRITEBACK_POLICY_TAGS = {"mutation", "write", "requires_approval"}
+
+
+def _missing_required_writeback_tools(skill: dict[str, Any]) -> bool:
+    missing_tools = {str(x) for x in (skill.get("missing_tools") or []) if isinstance(x, str)}
+    missing_opencode_tools = {str(x) for x in (skill.get("missing_opencode_tools") or []) if isinstance(x, str)}
+    if _WRITEBACK_TOOL_NAMES & (missing_tools | missing_opencode_tools):
+        return True
+    mappings = skill.get("tool_mappings") if isinstance(skill.get("tool_mappings"), list) else []
+    for mapping in mappings:
+        if not isinstance(mapping, dict) or mapping.get("available") is not False:
+            continue
+        efp_name = str(mapping.get("efp_name") or "")
+        opencode_name = str(mapping.get("opencode_name") or "")
+        if efp_name in _WRITEBACK_TOOL_NAMES or opencode_name in _WRITEBACK_TOOL_NAMES:
+            return True
+        tags = mapping.get("policy_tags") if isinstance(mapping.get("policy_tags"), list) else []
+        if {str(t).lower() for t in tags} & _WRITEBACK_POLICY_TAGS:
+            return True
+    skill_tags = skill.get("policy_tags") if isinstance(skill.get("policy_tags"), list) else []
+    return bool({str(t).lower() for t in skill_tags} & _WRITEBACK_POLICY_TAGS and (missing_tools or missing_opencode_tools))
+
 
 @dataclass(frozen=True)
 class SlashInvocation:
@@ -87,6 +110,8 @@ def evaluate_skill_invocation(settings: Settings, invocation: SlashInvocation) -
     if bool(skill.get("programmatic")) and not bool(skill.get("runtime_equivalence")):
         return SkillDecision(skill=skill, allowed=False, reason="programmatic_skill_requires_opencode_wrapper", permission_state=permission_state)
     if skill.get("missing_tools") or skill.get("missing_opencode_tools"):
+        if _missing_required_writeback_tools(skill):
+            return SkillDecision(skill=skill, allowed=False, reason="missing_required_writeback_tools", permission_state=permission_state)
         return SkillDecision(
             skill=skill,
             allowed=True,

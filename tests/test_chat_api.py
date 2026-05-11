@@ -843,3 +843,45 @@ async def test_chat_completed_with_empty_text_returns_empty_final(tmp_path, monk
     chatlog = await (await c.get("/api/sessions/s-empty-final/chatlog")).json()
     assert chatlog["status"] != "success"
     await c.close()
+
+@pytest.mark.asyncio
+async def test_create_pr_repository_preflight_success_in_prompt(tmp_path, monkeypatch):
+    class C(FakeOpenCodeClient):
+        def __init__(self): super().__init__(); self.parts=None
+        async def list_commands(self, timeout_seconds=30): return []
+        async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+            self.parts = parts
+            return await super().send_message(session_id, parts=parts, model=model, agent=agent, system=system, message_id=message_id, no_reply=no_reply, tools=tools)
+
+    state=tmp_path/'state'; state.mkdir(parents=True)
+    skill={"efp_name":"create_pull_request","opencode_name":"create-pull-request","opencode_supported":True,"runtime_equivalence":True,"programmatic":False,"missing_tools":[],"missing_opencode_tools":[]}
+    (state/'skills-index.json').write_text(json.dumps({"skills":[skill]}), encoding='utf-8')
+    cfg=tmp_path/'opencode.json'; cfg.write_text(json.dumps({"permission":{"skill":{"*":"allow"}}}), encoding='utf-8')
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('OPENCODE_CONFIG', str(cfg)); monkeypatch.setenv('EFP_WORKSPACE_REPOS_DIR', str(tmp_path/'repos'))
+    import efp_opencode_adapter.chat_api as chat_api
+    monkeypatch.setattr(chat_api, 'ensure_repo_checkout', lambda settings, repo_request: __import__('efp_opencode_adapter.repository_workspace', fromlist=['RepoCheckoutResult']).RepoCheckoutResult(True, repo_request.repo_url, repo_request.owner, repo_request.repo, str(tmp_path/'repos'/repo_request.owner/repo_request.repo), repo_request.head_branch, repo_request.base_branch, 'ok'))
+    fake=C(); client=TestClient(TestServer(create_app(Settings.from_env(), opencode_client=fake))); await client.start_server()
+    msg='/create-pull-request in git repo https://github.com/dvnuo/engineering-flow-platform-portal from branch feature/20260504-opencode-integrated to develop'
+    r=await client.post('/api/chat', json={"message":msg,"session_id":"s-preflight"}); p=await r.json()
+    sent = fake.parts[0]['text']
+    assert 'Repository has been prepared at:' in sent and 'Use base branch: develop' in sent
+    assert 'Do not run git inspection from /workspace unless /workspace/.git exists' in sent
+    assert any(e['type']=='skill.repository_checkout.completed' for e in p['runtime_events'])
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_pr_missing_writeback_tool_blocks_without_send_message(tmp_path, monkeypatch):
+    class C(FakeOpenCodeClient):
+        async def list_commands(self, timeout_seconds=30): return []
+        async def send_message(self, *args, **kwargs): raise AssertionError()
+    state=tmp_path/'state'; state.mkdir(parents=True)
+    skill={"efp_name":"create_pull_request","opencode_name":"create-pull-request","opencode_supported":True,"runtime_equivalence":True,"programmatic":False,"missing_tools":["efp_github_create_pull_request"],"missing_opencode_tools":[]}
+    (state/'skills-index.json').write_text(json.dumps({"skills":[skill]}), encoding='utf-8')
+    cfg=tmp_path/'opencode.json'; cfg.write_text(json.dumps({"permission":{"skill":{"*":"allow"}}}), encoding='utf-8')
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('OPENCODE_CONFIG', str(cfg))
+    client=TestClient(TestServer(create_app(Settings.from_env(), opencode_client=C()))); await client.start_server()
+    r=await client.post('/api/chat', json={"message":"/create-pull-request in git repo https://github.com/a/b from branch h to d","session_id":"s-block"}); p=await r.json()
+    assert p['completion_state']=='blocked'
+    assert 'required writeback tool github_create_pull_request / efp_github_create_pull_request is unavailable' in p['response']
+    await client.close()
