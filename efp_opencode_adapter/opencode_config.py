@@ -69,24 +69,6 @@ def provider_config_from_runtime_profile(runtime_config: dict) -> dict:
     return {"provider": {provider: {"options": options}}}
 
 
-def write_main_agent_prompt(settings: Settings) -> Path:
-    path = settings.workspace_dir / ".opencode" / "agents" / "efp-main.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                "This runtime is managed by EFP Portal.",
-                "Obey Portal capability/profile/policy metadata.",
-                "When the user asks to create or output files, create them under the workspace directory and then summarize the created/updated paths.",
-                "Use efp_* tools for Jira/GitHub/Confluence rather than raw curl when available.",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    return path
-
-
 def build_opencode_config(settings: Settings, runtime_config: dict | None = None) -> tuple[dict, str, list[str]]:
     runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
     skills_index = load_skills_index(settings)
@@ -102,8 +84,8 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
             "efp-main": {
                 "description": "Portal managed OpenCode primary agent",
                 "mode": "primary",
-                "prompt": "{file:/workspace/.opencode/agents/efp-main.md}",
                 "steps": 40,
+                "permission": {},
             }
         },
     }

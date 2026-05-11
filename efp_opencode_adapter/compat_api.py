@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
@@ -8,47 +7,55 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import web
+
+from .agents_md import AGENTS_MD_FILENAME, ensure_default_agents_md, read_agents_md, write_agents_md
 from .app_keys import SETTINGS_KEY, SESSION_STORE_KEY, TASK_STORE_KEY
-
-from .index_loader import load_skills_index
+from .index_loader import load_skills_index, read_json_file
 from .permission_generator import default_permission_baseline, skill_permission_state
-from .index_loader import read_json_file
 
-ALLOWED_PROMPT_SECTIONS = {"soul", "user", "agents", "tools", "memory", "daily_notes"}
-
-
-def _default_prompt_config() -> dict[str, dict[str, bool]]:
-    return {k: {"enabled": True} for k in sorted(ALLOWED_PROMPT_SECTIONS)}
+SUPPORTED_SYSTEM_PROMPT_SECTION = "agents"
+UNSUPPORTED_SYSTEM_PROMPT_SECTIONS = ["soul", "user", "tools", "memory", "daily_notes"]
 
 
-def _config_path(settings) -> Path:
-    return settings.adapter_state_dir / "system_prompt_config.json"
+def _is_supported_system_prompt_section(name: str) -> bool:
+    return name == SUPPORTED_SYSTEM_PROMPT_SECTION
 
 
-def _prompt_path(settings, name: str) -> Path:
-    return settings.adapter_state_dir / "system_prompts" / f"{name}.md"
+def _unsupported_system_prompt_response(name: str) -> web.Response:
+    return web.json_response(
+        {
+            "error": "OpenCode runtime only supports AGENTS.md",
+            "engine": "opencode",
+            "runtime_type": "opencode",
+            "section": name,
+            "supported_sections": [SUPPORTED_SYSTEM_PROMPT_SECTION],
+        },
+        status=422,
+    )
 
 
-def _valid_name(name: str) -> bool:
-    return name in ALLOWED_PROMPT_SECTIONS
+def _agents_metadata() -> dict[str, object]:
+    return {
+        "enabled": True,
+        "editable": True,
+        "label": AGENTS_MD_FILENAME,
+        "filename": AGENTS_MD_FILENAME,
+        "path": AGENTS_MD_FILENAME,
+        "can_disable": False,
+    }
 
 
-def _load_prompt_config(settings) -> dict[str, dict[str, bool]]:
-    data = _default_prompt_config()
-    path = _config_path(settings)
-    if not path.exists():
-        return data
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return data
-    if not isinstance(payload, dict):
-        return data
-    for section, value in payload.items():
-        if section in ALLOWED_PROMPT_SECTIONS and isinstance(value, dict) and isinstance(value.get("enabled"), bool):
-            data[section]["enabled"] = value["enabled"]
-    return data
+def _agents_md_config_payload(settings) -> dict:
+    ensure_default_agents_md(settings)
+    return {
+        "engine": "opencode",
+        "runtime_type": "opencode",
+        "sections": [SUPPORTED_SYSTEM_PROMPT_SECTION],
+        "agents": _agents_metadata(),
+        "unsupported_sections": UNSUPPORTED_SYSTEM_PROMPT_SECTIONS,
+    }
 
+# ... unchanged helper funcs
 
 def _clean_repo_url(url: str | None) -> str | None:
     if not url:
@@ -56,26 +63,17 @@ def _clean_repo_url(url: str | None) -> str | None:
     raw = str(url).strip()
     if not raw:
         return raw
-
-    # Handle scp-like git remotes such as:
-    #   git@github.com:org/repo.git
-    # This is not a URL with a scheme, but it still contains a username.
     if "://" not in raw:
         return re.sub(r"^[^/@:]+@([^:]+):", r"\1:", raw)
-
     try:
         parts = urlsplit(raw)
     except Exception:
         return re.sub(r"^(https?://)[^/@]+@", r"\1", raw)
-
     if parts.scheme.lower() in {"http", "https", "ssh"}:
-        # Drop username/password, port, query and fragment.
-        # Keep only scheme + hostname + path.
         host = parts.hostname or ""
         if not host:
             return raw
         return urlunsplit((parts.scheme, host, parts.path, "", ""))
-
     return raw
 
 
@@ -109,32 +107,7 @@ async def skills_handler(request: web.Request) -> web.Response:
         supported = bool(item.get("opencode_supported", True))
         callable_flag = state in {"allowed", "ask"} and supported
         blocked_reason = "skill is not supported for OpenCode runtime" if not supported else ("skill denied by current OpenCode permission profile" if state == "denied" else None)
-        skills.append(
-            {
-                "name": item["opencode_name"],
-                "opencode_name": item["opencode_name"],
-                "efp_name": item.get("efp_name"),
-                "description": item.get("description", ""),
-                "tools": item.get("tools", []),
-                "task_tools": item.get("task_tools", []),
-                "risk_level": item.get("risk_level"),
-                "source_path": item.get("source_path"),
-                "runtime_type": "opencode",
-                "engine": "opencode",
-                "permission_state": state,
-                "callable": callable_flag,
-                "blocked_reason": blocked_reason,
-                "opencode_compatibility": item.get("opencode_compatibility", "prompt_only"),
-                "runtime_equivalence": bool(item.get("runtime_equivalence", True)),
-                "programmatic": bool(item.get("programmatic", False)),
-                "opencode_supported": supported,
-                "compatibility_warnings": item.get("compatibility_warnings", []),
-                "tool_mappings": item.get("tool_mappings", []),
-                "opencode_tools": item.get("opencode_tools", []),
-                "missing_tools": item.get("missing_tools", []),
-                "missing_opencode_tools": item.get("missing_opencode_tools", []),
-            }
-        )
+        skills.append({"name": item["opencode_name"], "opencode_name": item["opencode_name"], "efp_name": item.get("efp_name"), "description": item.get("description", ""), "tools": item.get("tools", []), "task_tools": item.get("task_tools", []), "risk_level": item.get("risk_level"), "source_path": item.get("source_path"), "runtime_type": "opencode", "engine": "opencode", "permission_state": state, "callable": callable_flag, "blocked_reason": blocked_reason, "opencode_compatibility": item.get("opencode_compatibility", "prompt_only"), "runtime_equivalence": bool(item.get("runtime_equivalence", True)), "programmatic": bool(item.get("programmatic", False)), "opencode_supported": supported, "compatibility_warnings": item.get("compatibility_warnings", []), "tool_mappings": item.get("tool_mappings", []), "opencode_tools": item.get("opencode_tools", []), "missing_tools": item.get("missing_tools", []), "missing_opencode_tools": item.get("missing_opencode_tools", [])})
     return web.json_response({"skills": skills, "engine": "opencode", "count": len(skills), "warnings": data.get("warnings", []) if isinstance(data, dict) else []})
 
 
@@ -168,7 +141,7 @@ async def skill_git_info_handler(request: web.Request) -> web.Response:
 
 
 async def system_prompt_config_get_handler(request: web.Request) -> web.Response:
-    return web.json_response(_load_prompt_config(request.app[SETTINGS_KEY]))
+    return web.json_response(_agents_md_config_payload(request.app[SETTINGS_KEY]))
 
 
 async def system_prompt_config_put_handler(request: web.Request) -> web.Response:
@@ -176,60 +149,51 @@ async def system_prompt_config_put_handler(request: web.Request) -> web.Response
     try:
         payload = await request.json()
     except Exception:
-        return web.json_response({"error": "Invalid payload"}, status=400)
+        return web.json_response({"error": "Invalid payload", "engine": "opencode"}, status=400)
     if not isinstance(payload, dict):
-        return web.json_response({"error": "Invalid payload"}, status=400)
-    current = _load_prompt_config(settings)
-    for section, value in payload.items():
-        if section not in ALLOWED_PROMPT_SECTIONS or not isinstance(value, dict):
-            return web.json_response({"error": "Invalid section"}, status=400)
-        if "enabled" in value and not isinstance(value["enabled"], bool):
-            return web.json_response({"error": "Invalid enabled"}, status=400)
-        if "enabled" in value:
-            current[section]["enabled"] = value["enabled"]
-    path = _config_path(settings)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
-    return web.json_response({"status": "ok", "engine": "opencode"})
+        return web.json_response({"error": "Invalid payload", "engine": "opencode"}, status=400)
+    for section in payload:
+        if section != SUPPORTED_SYSTEM_PROMPT_SECTION:
+            return _unsupported_system_prompt_response(section)
+    section_payload = payload.get(SUPPORTED_SYSTEM_PROMPT_SECTION, {})
+    if not isinstance(section_payload, dict):
+        return web.json_response({"error": "Invalid section payload", "engine": "opencode"}, status=400)
+    if "enabled" in section_payload and not isinstance(section_payload["enabled"], bool):
+        return web.json_response({"error": "Invalid enabled", "engine": "opencode"}, status=400)
+    if section_payload.get("enabled") is False:
+        return web.json_response({"error": "OpenCode AGENTS.md cannot be disabled", "engine": "opencode", "runtime_type": "opencode", "section": "agents", "supported_sections": ["agents"]}, status=422)
+    ensure_default_agents_md(settings)
+    return web.json_response({"status": "ok", "engine": "opencode", "runtime_type": "opencode", "sections": ["agents"], "agents": _agents_metadata()})
 
 
 async def system_prompt_get_handler(request: web.Request) -> web.Response:
     settings = request.app[SETTINGS_KEY]
     name = request.match_info.get("name", "")
-    if not _valid_name(name):
-        return web.json_response({"error": "Invalid name"}, status=400)
-    config = _load_prompt_config(settings)
-    content = ""
-    if name != "daily_notes":
-        path = _prompt_path(settings, name)
-        if path.exists():
-            content = path.read_text(encoding="utf-8")
-    return web.json_response({"enabled": config[name]["enabled"], "content": content, "engine": "opencode"})
+    if not _is_supported_system_prompt_section(name):
+        return _unsupported_system_prompt_response(name)
+    content = read_agents_md(settings)
+    return web.json_response({"enabled": True, "content": content, "engine": "opencode", "runtime_type": "opencode", "section": "agents", "label": AGENTS_MD_FILENAME, "filename": AGENTS_MD_FILENAME, "path": AGENTS_MD_FILENAME, "can_disable": False})
 
 
 async def system_prompt_put_handler(request: web.Request) -> web.Response:
     settings = request.app[SETTINGS_KEY]
     name = request.match_info.get("name", "")
-    if not _valid_name(name):
-        return web.json_response({"error": "Invalid name"}, status=400)
+    if not _is_supported_system_prompt_section(name):
+        return _unsupported_system_prompt_response(name)
     try:
         payload = await request.json()
     except Exception:
-        return web.json_response({"error": "Invalid payload"}, status=400)
+        return web.json_response({"error": "Invalid payload", "engine": "opencode"}, status=400)
     if not isinstance(payload, dict):
-        return web.json_response({"error": "Invalid payload"}, status=400)
+        return web.json_response({"error": "Invalid payload", "engine": "opencode"}, status=400)
     if "enabled" in payload and not isinstance(payload["enabled"], bool):
-        return web.json_response({"error": "Invalid enabled"}, status=400)
+        return web.json_response({"error": "Invalid enabled", "engine": "opencode"}, status=400)
     if "content" in payload and not isinstance(payload["content"], str):
-        return web.json_response({"error": "Invalid content"}, status=400)
-    if "enabled" in payload:
-        current = _load_prompt_config(settings)
-        current[name]["enabled"] = payload["enabled"]
-        path = _config_path(settings)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
-    if name != "daily_notes" and "content" in payload:
-        path = _prompt_path(settings, name)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(payload["content"], encoding="utf-8")
-    return web.json_response({"status": "ok", "engine": "opencode"})
+        return web.json_response({"error": "Invalid content", "engine": "opencode"}, status=400)
+    if payload.get("enabled") is False:
+        return web.json_response({"error": "OpenCode AGENTS.md cannot be disabled", "engine": "opencode", "runtime_type": "opencode", "section": "agents", "supported_sections": ["agents"]}, status=422)
+    if "content" in payload:
+        write_agents_md(settings, payload["content"])
+    else:
+        ensure_default_agents_md(settings)
+    return web.json_response({"status": "ok", "engine": "opencode", "runtime_type": "opencode", "section": "agents", "enabled": True, "path": AGENTS_MD_FILENAME})

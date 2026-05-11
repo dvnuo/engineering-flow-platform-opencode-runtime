@@ -69,6 +69,7 @@ if (actual !== process.env.OPENCODE_VERSION) {\
 WORKDIR /app/runtime
 COPY pyproject.toml README.md package*.json ./
 COPY efp_opencode_adapter ./efp_opencode_adapter
+COPY workspace ./workspace
 RUN python3 -m venv /opt/venv \
   && /opt/venv/bin/pip install --upgrade pip \
   && /opt/venv/bin/pip install -e .

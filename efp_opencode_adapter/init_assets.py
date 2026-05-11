@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from .opencode_config import build_opencode_config, write_main_agent_prompt, write_opencode_config
+from .agents_md import ensure_default_agents_md
+from .opencode_config import build_opencode_config, write_opencode_config
 from .settings import Settings
 from .skill_sync import sync_skills
 from .tool_sync import sync_tools
@@ -36,7 +37,7 @@ def init_assets(settings: Settings) -> None:
         opencode_commands_dir=settings.workspace_dir / ".opencode" / "commands",
     )
 
-    write_main_agent_prompt(settings)
+    ensure_default_agents_md(settings)
     config_path = settings.opencode_config_path
     if config_path.exists():
         print(f"{config_path} exists, leaving unchanged")
