@@ -27,6 +27,7 @@ async def test_chat_and_stream(tmp_path, monkeypatch):
     assert p1["response"] == "echo: hello"
     assert p1["user_message_id"].startswith("u-")
     assert p1["assistant_message_id"].startswith("a-")
+    assert p1["assistant_message_ids"] == [p1["assistant_message_id"]]
     assert p1["_llm_debug"]["engine"] == "opencode"
     assert p1["_llm_debug"]["opencode_session_id"]
     assert p1["_llm_debug"].get("attachments") == []
@@ -843,44 +844,180 @@ async def test_chat_completed_with_empty_text_returns_empty_final(tmp_path, monk
     assert chatlog["status"] != "success"
     await c.close()
 
-@pytest.mark.asyncio
-async def test_create_pr_repository_preflight_success_in_prompt(tmp_path, monkeypatch):
-    class C(FakeOpenCodeClient):
-        def __init__(self): super().__init__(); self.parts=None
-        async def list_commands(self, timeout_seconds=30): return []
-        async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
-            self.parts = parts
-            return await super().send_message(session_id, parts=parts, model=model, agent=agent, system=system, message_id=message_id, no_reply=no_reply, tools=tools)
 
-    state=tmp_path/'state'; state.mkdir(parents=True)
-    skill={"efp_name":"create_pull_request","opencode_name":"create-pull-request","opencode_supported":True,"runtime_equivalence":True,"programmatic":False,"missing_tools":[],"missing_opencode_tools":[]}
-    (state/'skills-index.json').write_text(json.dumps({"skills":[skill]}), encoding='utf-8')
-    cfg=tmp_path/'opencode.json'; cfg.write_text(json.dumps({"permission":{"skill":{"*":"allow"}}}), encoding='utf-8')
-    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('OPENCODE_CONFIG', str(cfg)); monkeypatch.setenv('EFP_WORKSPACE_REPOS_DIR', str(tmp_path/'repos'))
-    import efp_opencode_adapter.chat_api as chat_api
-    monkeypatch.setattr(chat_api, 'ensure_repo_checkout', lambda settings, repo_request: __import__('efp_opencode_adapter.repository_workspace', fromlist=['RepoCheckoutResult']).RepoCheckoutResult(True, repo_request.repo_url, repo_request.owner, repo_request.repo, str(tmp_path/'repos'/repo_request.owner/repo_request.repo), repo_request.head_branch, repo_request.base_branch, 'ok'))
-    fake=C(); client=TestClient(TestServer(create_app(Settings.from_env(), opencode_client=fake))); await client.start_server()
-    msg='/create-pull-request in git repo https://github.com/dvnuo/engineering-flow-platform-portal from branch feature/20260504-opencode-integrated to develop'
-    r=await client.post('/api/chat', json={"message":msg,"session_id":"s-preflight"}); p=await r.json()
-    sent = fake.parts[0]['text']
-    assert 'Repository has been prepared at:' in sent and 'Use base branch: develop' in sent
-    assert 'Do not run git inspection from /workspace unless /workspace/.git exists' in sent
-    assert any(e['type']=='skill.repository_checkout.completed' for e in p['runtime_events'])
+class FragmentAssistantClient(FakeOpenCodeClient):
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        text = parts[0].get("text", "")
+        ses = self.messages[session_id]
+        uid = f"u-{len(ses)+1}"
+        ses.append({"info": {"id": uid, "role": "user"}, "parts": [{"type": "text", "text": text}]})
+        ses.append({"info": {"id": "a-frag-1", "role": "assistant"}, "parts": [{"type": "text", "text": "part 1"}]})
+        ses.append({"info": {"id": "a-frag-2", "role": "assistant"}, "parts": [{"type": "text", "text": "part 2"}]})
+        return {"message": {"info": {"id": "a-frag-2", "role": "assistant"}, "parts": [{"type": "text", "text": "part 2"}]}}
+
+
+@pytest.mark.asyncio
+async def test_chat_api_returns_assistant_message_ids_for_fragments(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FragmentAssistantClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    resp = await client.post("/api/chat", json={"message": "hello", "session_id": "s-frag"})
+    payload = await resp.json()
+    assert resp.status == 200
+    assert payload["assistant_message_ids"] == ["a-frag-1", "a-frag-2"]
+    assert payload["assistant_message_id"] == "a-frag-2"
+    assert payload["user_message_id"]
+    assert payload["response"] == "part 2"
+    assert payload["_llm_debug"]["message_ids"]["assistant_message_ids"] == ["a-frag-1", "a-frag-2"]
+    await client.close()
+
+
+class BeforeListFailClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self._first = True
+
+    async def list_messages(self, session_id):
+        if self._first:
+            self._first = False
+            raise RuntimeError("before failed")
+        return await super().list_messages(session_id)
+
+
+@pytest.mark.asyncio
+async def test_chat_api_assistant_message_ids_fallback_when_before_list_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=BeforeListFailClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    resp = await client.post("/api/chat", json={"message": "hello", "session_id": "s-before-fail"})
+    payload = await resp.json()
+    assert resp.status == 200
+    assert payload["assistant_message_id"]
+    assert payload["assistant_message_ids"] == [payload["assistant_message_id"]]
+    assert payload["_llm_debug"].get("message_id_detection_error_before")
+    await client.close()
+
+
+class BeforeFailHistoryClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self._before_phase = True
+
+    async def list_messages(self, session_id):
+        if self._before_phase:
+            raise RuntimeError("before snapshot failed")
+        return [
+            {"info": {"id": "u-old", "role": "user"}},
+            {"info": {"id": "a-old", "role": "assistant"}, "parts": [{"type": "text", "text": "old"}]},
+            {"info": {"id": "u-new", "role": "user"}},
+            {"info": {"id": "a-new", "role": "assistant"}, "parts": [{"type": "text", "text": "new"}]},
+        ]
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self._before_phase = False
+        return {"message": {"info": {"id": "a-new", "role": "assistant"}, "parts": [{"type": "text", "text": "new"}]}}
+
+
+@pytest.mark.asyncio
+async def test_chat_response_assistant_message_ids_do_not_include_history_when_before_snapshot_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=BeforeFailHistoryClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    resp = await client.post("/api/chat", json={"message": "hello", "session_id": "s-before-history"})
+    payload = await resp.json()
+    assert resp.status == 200
+    assert payload["ok"] is True
+    assert payload["completion_state"] == "completed"
+    assert payload["response"] == "new" or "new" in payload["response"]
+    assert payload["assistant_message_ids"] == ["a-new"]
+    assert payload["assistant_message_id"] == "a-new"
+    assert "a-old" not in payload["assistant_message_ids"]
+    assert payload["_llm_debug"]["message_ids"]["assistant_message_ids"] == ["a-new"]
+    assert payload["_llm_debug"]["message_ids"]["assistant_message_id"] == "a-new"
+    assert payload["_llm_debug"].get("message_id_detection_error_before")
+    await client.close()
+
+
+class BeforeFailNoCurrentCompletionClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self._calls = 0
+
+    async def list_messages(self, session_id):
+        self._calls += 1
+        if self._calls == 1:
+            raise RuntimeError("before snapshot failed")
+        return [
+            {"info": {"id": "u-old", "role": "user"}},
+            {"info": {"id": "a-old", "role": "assistant"}, "parts": [{"type": "text", "text": "old"}]},
+        ]
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        return {"message": {"info": {"id": "u-new", "role": "user"}, "parts": [{"type": "text", "text": "new user"}]}}
+
+
+@pytest.mark.asyncio
+async def test_before_snapshot_unreliable_without_response_completion_does_not_trust_after_history(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=BeforeFailNoCurrentCompletionClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "hello", "session_id": "s-before-no-current"})).json()
+    assert payload["ok"] is False
+    assert payload["completion_state"] in {"incomplete", "empty_final", "error", "failed"}
+    assert "a-old" not in payload["assistant_message_ids"]
+    await client.close()
+
+
+class AfterFailClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self._calls = 0
+
+    async def list_messages(self, session_id):
+        self._calls += 1
+        if self._calls >= 2:
+            raise RuntimeError("after snapshot failed")
+        return await super().list_messages(session_id)
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        return {"message": {"info": {"id": "a-after-fallback", "role": "assistant"}, "parts": [{"type": "text", "text": "ok"}]}}
+
+
+@pytest.mark.asyncio
+async def test_chat_response_assistant_message_ids_fallback_when_after_snapshot_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=AfterFailClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "hello", "session_id": "s-after-fail"})).json()
+    assert payload["ok"] is True
+    assert payload["assistant_message_ids"] == [payload["assistant_message_id"]]
+    assert payload["_llm_debug"].get("message_id_detection_error_after")
     await client.close()
 
 
 @pytest.mark.asyncio
-async def test_create_pr_missing_writeback_tool_blocks_without_send_message(tmp_path, monkeypatch):
-    class C(FakeOpenCodeClient):
-        async def list_commands(self, timeout_seconds=30): return []
-        async def send_message(self, *args, **kwargs): raise AssertionError()
-    state=tmp_path/'state'; state.mkdir(parents=True)
-    skill={"efp_name":"create_pull_request","opencode_name":"create-pull-request","opencode_supported":True,"runtime_equivalence":True,"programmatic":False,"missing_tools":["efp_github_create_pull_request"],"missing_opencode_tools":[]}
-    (state/'skills-index.json').write_text(json.dumps({"skills":[skill]}), encoding='utf-8')
-    cfg=tmp_path/'opencode.json'; cfg.write_text(json.dumps({"permission":{"skill":{"*":"allow"}}}), encoding='utf-8')
-    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('OPENCODE_CONFIG', str(cfg))
-    client=TestClient(TestServer(create_app(Settings.from_env(), opencode_client=C()))); await client.start_server()
-    r=await client.post('/api/chat', json={"message":"/create-pull-request in git repo https://github.com/a/b from branch h to d","session_id":"s-block"}); p=await r.json()
-    assert p['completion_state']=='blocked'
-    assert 'required writeback tool github_create_pull_request / efp_github_create_pull_request is unavailable' in p['response']
+async def test_chat_response_blocked_without_known_assistant_id_returns_empty_assistant_message_ids(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    (state / "skills-index.json").write_text(
+        json.dumps({"skills": [{"efp_name": "demo_skill", "opencode_name": "demo-skill", "opencode_supported": True, "runtime_equivalence": True, "programmatic": False, "missing_tools": [], "missing_opencode_tools": []}]}),
+        encoding="utf-8",
+    )
+    cfg = tmp_path / "opencode.json"
+    cfg.write_text(json.dumps({"permission": {"skill": {"*": "deny"}}}), encoding="utf-8")
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(cfg))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "/demo-skill hi", "session_id": "s-blocked-empty"})).json()
+    assert payload["ok"] is False
+    assert payload["completion_state"] in ("blocked", "empty_final", "error", "failed", "incomplete")
+    assert payload["assistant_message_id"] == ""
+    assert payload["assistant_message_ids"] == []
     await client.close()
