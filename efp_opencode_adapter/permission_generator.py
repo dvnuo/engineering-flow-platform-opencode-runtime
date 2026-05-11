@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-MUTATION_TAGS = {"write", "mutation", "update", "delete", "comment", "transition", "assign", "external_writeback"}
+MUTATION_TAGS = {"write", "mutation", "update", "delete", "comment", "transition", "assign", "external_writeback", "execute"}
 READ_TAGS = {"read_only", "read"}
 UNSAFE_TAGS = {"unsafe", "dangerous", "destructive", "credential_exfiltration"}
 RESERVED_PERMISSION_KEYS = {"*", "read", "glob", "grep", "edit", "write", "bash", "external_directory", "webfetch", "websearch", "skill", "todowrite", "question"}
@@ -352,12 +352,24 @@ def build_permission(config: dict, skills_index: dict | None = None, tools_index
         if not _external_system_allowed(_tool_external_systems(tool, tags), allowed_external_systems):
             permission[name] = "deny"
             continue
+        permission_default = _norm(tool.get("permission_default"))
+        explicit_allow = bool(aliases & allowed_values) or typ_norm in allowed_type_values or cap_id in allowed_ids
         if tags & READ_TAGS:
             permission[name] = "allow"
         elif tags & MUTATION_TAGS:
-            permission[name] = "allow" if (mode == "workspace_full_access" or auto_allow) else "ask"
+            if permission_default == "deny":
+                permission[name] = "deny"
+            elif permission_default == "ask":
+                permission[name] = "allow" if explicit_allow else "ask"
+            else:
+                permission[name] = "allow" if mode == "workspace_full_access" else "ask"
         else:
-            permission[name] = "allow" if mode == "workspace_full_access" else "ask"
+            if permission_default == "deny":
+                permission[name] = "deny"
+            elif permission_default == "ask":
+                permission[name] = "allow" if explicit_allow else "ask"
+            else:
+                permission[name] = "allow" if mode == "workspace_full_access" else "ask"
 
     if allow_bash_all:
         permission["bash"] = {"*": "allow"}

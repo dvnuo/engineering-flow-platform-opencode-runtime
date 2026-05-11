@@ -68,9 +68,31 @@ def normalize_tool_descriptor(raw: dict) -> dict[str, Any] | None:
         "native_name": raw.get("native_name"),
         "tool_id": raw.get("tool_id"),
     }
-    for key in ("input_schema", "output_schema", "requires_identity_binding", "domain", "runtime_compat", "external_system", "system_type", "mutation", "risk_level"):
+    for key in (
+        "input_schema",
+        "output_schema",
+        "requires_identity_binding",
+        "domain",
+        "runtime_compat",
+        "external_system",
+        "system_type",
+        "mutation",
+        "risk_level",
+        "permission_default",
+        "dry_run_supported",
+        "audit_event",
+        "side_effects",
+        "idempotency_key_fields",
+        "governance_reviewed",
+        "allow_override",
+        "implementation_mode",
+        "external_source",
+    ):
         if key in raw:
             descriptor[key] = raw[key]
+    for key, value in raw.items():
+        if key not in descriptor:
+            descriptor[key] = value
     return descriptor
 
 

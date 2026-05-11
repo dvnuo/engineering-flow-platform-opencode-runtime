@@ -50,7 +50,7 @@ def test_init_assets_creates_dirs_and_config(tmp_path, monkeypatch):
     assert "efp-main" in payload["agent"]
 
 
-def test_init_assets_does_not_overwrite_existing_config(tmp_path, monkeypatch):
+def test_init_assets_refreshes_managed_config_when_tools_change(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     skills = tmp_path / "skills"
     tools = tmp_path / "tools"
@@ -69,7 +69,7 @@ def test_init_assets_does_not_overwrite_existing_config(tmp_path, monkeypatch):
     config = workspace / ".opencode" / "opencode.json"
 
     config.parent.mkdir(parents=True, exist_ok=True)
-    sentinel = {"existing": True, "permission": {"*": "deny"}}
+    sentinel = {"existing": True, "permission": {"*": "deny", "efp_old_tool": "allow"}}
     config.write_text(json.dumps(sentinel), encoding="utf-8")
 
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
@@ -82,14 +82,30 @@ def test_init_assets_does_not_overwrite_existing_config(tmp_path, monkeypatch):
     (skills / "existing-sync" / "skill.md").write_text("---\nname: existing-sync\ndescription: Existing\n---\n\nBody\n", encoding="utf-8")
 
     init_assets(Settings.from_env())
-
-    assert json.loads(config.read_text(encoding="utf-8")) == sentinel
+    updated = json.loads(config.read_text(encoding="utf-8"))
+    assert updated["existing"] is True
+    assert "_efp_managed" in updated
     assert (workspace / ".opencode" / "skills" / "existing-sync" / "SKILL.md").exists()
     assert (state / "skills-index.json").exists()
     assert (workspace / ".opencode" / "skills").exists()
     assert (workspace / ".opencode" / "tools").exists()
     assert (workspace / ".opencode" / "agents").exists()
     assert (workspace / "AGENTS.md").exists()
+
+    generator.write_text(
+        "import argparse, json\nfrom pathlib import Path\n"
+        "p=argparse.ArgumentParser(); p.add_argument('--tools-dir'); p.add_argument('--opencode-tools-dir'); p.add_argument('--state-dir'); a=p.parse_args()\n"
+        "Path(a.opencode_tools_dir).mkdir(parents=True, exist_ok=True)\n"
+        "(Path(a.state_dir)/'tools-index.json').write_text(json.dumps({'generated_at':'now','tools':[{'capability_id':'tool.pr','opencode_name':'efp_github_create_pull_request','policy_tags':['mutation'],'permission_default':'ask'}]}), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    init_assets(Settings.from_env())
+    updated2 = json.loads(config.read_text(encoding="utf-8"))
+    assert "efp_github_create_pull_request" in updated2["permission"]
+
+    config.write_text("{invalid", encoding="utf-8")
+    init_assets(Settings.from_env())
+    assert any(p.name.startswith("opencode.json.bak.") for p in config.parent.iterdir())
 
 
 def test_init_assets_syncs_tools_with_generator(tmp_path, monkeypatch):

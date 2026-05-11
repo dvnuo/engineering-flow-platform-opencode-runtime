@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .index_loader import load_skills_index, load_tools_index
 from .permission_generator import build_permission
 from .settings import Settings
+
+MANAGED_TOP_LEVEL_KEYS = {"permission", "agent", "server", "autoupdate", "share", "provider", "_efp_managed"}
 
 
 def normalize_opencode_provider_id(provider: str | None) -> str:
@@ -108,3 +111,21 @@ def write_opencode_config(settings: Settings, config: dict) -> None:
     tmp_path = Path(f"{path}.tmp")
     tmp_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp_path.replace(path)
+
+
+def _hash_index_payload(payload: dict) -> str:
+    src = json.dumps(payload if isinstance(payload, dict) else {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(src.encode("utf-8")).hexdigest()
+
+
+def merge_with_existing_config(existing: dict | None, generated: dict, *, tools_index: dict, skills_index: dict) -> dict:
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    for key, value in generated.items():
+        if key in MANAGED_TOP_LEVEL_KEYS:
+            merged[key] = value
+    merged["_efp_managed"] = {
+        "tools_index_hash": _hash_index_payload(tools_index),
+        "skills_index_hash": _hash_index_payload(skills_index),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return merged
