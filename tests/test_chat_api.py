@@ -904,11 +904,10 @@ async def test_chat_api_assistant_message_ids_fallback_when_before_list_fails(tm
 class BeforeFailHistoryClient(FakeOpenCodeClient):
     def __init__(self):
         super().__init__()
-        self._calls = 0
+        self._before_phase = True
 
     async def list_messages(self, session_id):
-        self._calls += 1
-        if self._calls == 1:
+        if self._before_phase:
             raise RuntimeError("before snapshot failed")
         return [
             {"info": {"id": "u-old", "role": "user"}},
@@ -918,6 +917,7 @@ class BeforeFailHistoryClient(FakeOpenCodeClient):
         ]
 
     async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self._before_phase = False
         return {"message": {"info": {"id": "a-new", "role": "assistant"}, "parts": [{"type": "text", "text": "new"}]}}
 
 
@@ -928,12 +928,46 @@ async def test_chat_response_assistant_message_ids_do_not_include_history_when_b
     client = TestClient(TestServer(app))
     await client.start_server()
     payload = await (await client.post("/api/chat", json={"message": "hello", "session_id": "s-before-history"})).json()
+    assert payload["ok"] is True
+    assert payload["completion_state"] == "completed"
+    assert payload["response"] == "new" or "new" in payload["response"]
     assert payload["assistant_message_ids"] == ["a-new"]
     assert payload["assistant_message_id"] == "a-new"
     assert "a-old" not in payload["assistant_message_ids"]
     assert payload["_llm_debug"]["message_ids"]["assistant_message_ids"] == ["a-new"]
     assert payload["_llm_debug"]["message_ids"]["assistant_message_id"] == "a-new"
     assert payload["_llm_debug"].get("message_id_detection_error_before")
+    await client.close()
+
+
+class BeforeFailNoCurrentCompletionClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self._calls = 0
+
+    async def list_messages(self, session_id):
+        self._calls += 1
+        if self._calls == 1:
+            raise RuntimeError("before snapshot failed")
+        return [
+            {"info": {"id": "u-old", "role": "user"}},
+            {"info": {"id": "a-old", "role": "assistant"}, "parts": [{"type": "text", "text": "old"}]},
+        ]
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        return {"message": {"info": {"id": "u-new", "role": "user"}, "parts": [{"type": "text", "text": "new user"}]}}
+
+
+@pytest.mark.asyncio
+async def test_chat_before_snapshot_unreliable_without_current_completion_does_not_use_history_completed_message(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=BeforeFailNoCurrentCompletionClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "hello", "session_id": "s-before-no-current"})).json()
+    assert payload["ok"] is False
+    assert payload["completion_state"] in {"incomplete", "empty_final", "error", "failed"}
+    assert "a-old" not in payload["assistant_message_ids"]
     await client.close()
 
 
@@ -959,6 +993,7 @@ async def test_chat_response_assistant_message_ids_fallback_when_after_snapshot_
     client = TestClient(TestServer(app))
     await client.start_server()
     payload = await (await client.post("/api/chat", json={"message": "hello", "session_id": "s-after-fail"})).json()
+    assert payload["ok"] is True
     assert payload["assistant_message_ids"] == [payload["assistant_message_id"]]
     assert payload["_llm_debug"].get("message_id_detection_error_after")
     await client.close()

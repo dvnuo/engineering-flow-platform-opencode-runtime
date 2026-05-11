@@ -160,7 +160,9 @@ def extract_assistant_text(payload: Any) -> str:
 async def _wait_for_assistant_completion(*, client, opencode_session_id: str, response_payload: Any, before_messages: list[dict[str, Any]], timeout_seconds: float, poll_seconds: float, before_snapshot_unreliable: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     before_ids = {adapter_message_id(m) for m in before_messages if adapter_message_id(m)}
     probe = find_latest_assistant_completion(response_payload, exclude_message_ids=before_ids)
-    if probe.get("completion_state") == "completed" and not before_snapshot_unreliable:
+    if probe.get("completion_state") == "completed":
+        return probe, []
+    if probe.get("completion_state") in {"error", "failed"}:
         return probe, []
 
     loop = asyncio.get_running_loop()
@@ -173,9 +175,14 @@ async def _wait_for_assistant_completion(*, client, opencode_session_id: str, re
     while True:
         after_messages = await client.list_messages(opencode_session_id)
         last_probe = find_latest_assistant_completion(after_messages, exclude_message_ids=before_ids)
-
         if before_snapshot_unreliable and last_probe.get("completion_state") == "completed":
-            last_probe = {"text": "", "message_id": "", "completion_state": "incomplete", "reason": "before_snapshot_unreliable", "diagnostics": {"before_snapshot_unreliable": True}}
+            last_probe = {
+                "text": "",
+                "message_id": "",
+                "completion_state": "incomplete",
+                "reason": "before_snapshot_unreliable",
+                "diagnostics": {"before_snapshot_unreliable": True},
+            }
 
         if last_probe.get("completion_state") in {"completed", "error", "blocked"}:
             return last_probe, after_messages
@@ -520,10 +527,6 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                 user_message_id, assistant_message_id = _detect_new_message_ids(before_messages, after_messages)
                 _append_unique_message_ids(
                     assistant_message_ids,
-                    [assistant_message_id],
-                )
-                _append_unique_message_ids(
-                    assistant_message_ids,
                     extract_assistant_message_ids(after_messages, exclude_message_ids=before_assistant_message_ids),
                 )
             except Exception as exc:
@@ -622,6 +625,10 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
 
     out = {"ok": ok, "completion_state": completion_state, "incomplete_reason": incomplete_reason, "session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids, "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context, "attachments": attachment_debug, "completion_probe": completion_probe, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids}}}
+    if message_id_detection_error_before:
+        out["_llm_debug"]["message_id_detection_error_before"] = message_id_detection_error_before
+    if message_id_detection_error_after:
+        out["_llm_debug"]["message_id_detection_error_after"] = message_id_detection_error_after
     if 'skill_debug' in locals() and skill_debug:
         out["_llm_debug"]["skill_invocation"] = skill_debug
     if partial_recovery or getattr(updated, "partial_recovery", False):
