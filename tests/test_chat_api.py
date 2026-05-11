@@ -27,6 +27,7 @@ async def test_chat_and_stream(tmp_path, monkeypatch):
     assert p1["response"] == "echo: hello"
     assert p1["user_message_id"].startswith("u-")
     assert p1["assistant_message_id"].startswith("a-")
+    assert p1["assistant_message_ids"] == [p1["assistant_message_id"]]
     assert p1["_llm_debug"]["engine"] == "opencode"
     assert p1["_llm_debug"]["opencode_session_id"]
     assert p1["_llm_debug"].get("attachments") == []
@@ -843,3 +844,58 @@ async def test_chat_completed_with_empty_text_returns_empty_final(tmp_path, monk
     chatlog = await (await c.get("/api/sessions/s-empty-final/chatlog")).json()
     assert chatlog["status"] != "success"
     await c.close()
+
+
+class FragmentAssistantClient(FakeOpenCodeClient):
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        text = parts[0].get("text", "")
+        ses = self.messages[session_id]
+        uid = f"u-{len(ses)+1}"
+        ses.append({"info": {"id": uid, "role": "user"}, "parts": [{"type": "text", "text": text}]})
+        ses.append({"info": {"id": "a-frag-1", "role": "assistant"}, "parts": [{"type": "text", "text": "part 1"}]})
+        ses.append({"info": {"id": "a-frag-2", "role": "assistant"}, "parts": [{"type": "text", "text": "part 2"}]})
+        return {"message": {"info": {"id": "a-frag-2", "role": "assistant"}, "parts": [{"type": "text", "text": "part 2"}]}}
+
+
+@pytest.mark.asyncio
+async def test_chat_api_returns_assistant_message_ids_for_fragments(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FragmentAssistantClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    resp = await client.post("/api/chat", json={"message": "hello", "session_id": "s-frag"})
+    payload = await resp.json()
+    assert resp.status == 200
+    assert payload["assistant_message_ids"] == ["a-frag-1", "a-frag-2"]
+    assert payload["assistant_message_id"] == "a-frag-2"
+    assert payload["user_message_id"]
+    assert payload["response"] == "part 2"
+    assert payload["_llm_debug"]["message_ids"]["assistant_message_ids"] == ["a-frag-1", "a-frag-2"]
+    await client.close()
+
+
+class BeforeListFailClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self._first = True
+
+    async def list_messages(self, session_id):
+        if self._first:
+            self._first = False
+            raise RuntimeError("before failed")
+        return await super().list_messages(session_id)
+
+
+@pytest.mark.asyncio
+async def test_chat_api_assistant_message_ids_fallback_when_before_list_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=BeforeListFailClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    resp = await client.post("/api/chat", json={"message": "hello", "session_id": "s-before-fail"})
+    payload = await resp.json()
+    assert resp.status == 200
+    assert payload["assistant_message_id"]
+    assert payload["assistant_message_ids"] == [payload["assistant_message_id"]]
+    assert payload["_llm_debug"].get("message_id_detection_error_before")
+    await client.close()

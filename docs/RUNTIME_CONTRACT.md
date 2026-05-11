@@ -79,3 +79,10 @@ Legacy tool names map to `efp_*` OpenCode wrapper names and are persisted in `to
 ## Portal/runtime responsibility split
 - Portal injects runtime env values and renders non-success chat outcomes.
 - Runtime generates the OpenCode permission map and determines final completion state.
+
+
+## Chat response id compatibility
+- `/api/chat` keeps `assistant_message_id` (string) for backward compatibility; it is the last id in `assistant_message_ids` when available.
+- `/api/chat` adds `assistant_message_ids` (string array) for all assistant message ids produced by the current request, in session order.
+- If runtime cannot reliably collect multiple ids, it may return `[assistant_message_id]` or `[]` without failing chat.
+- `/api/chat/stream` SSE `final` payload is aligned with `/api/chat` JSON response and includes the same id fields.

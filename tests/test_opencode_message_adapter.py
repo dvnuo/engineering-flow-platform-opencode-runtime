@@ -1,5 +1,6 @@
 from efp_opencode_adapter.opencode_message_adapter import (
     find_latest_assistant_completion,
+    extract_assistant_message_ids,
     extract_reasoning_texts_from_parts,
     extract_visible_text_from_parts,
     extract_last_assistant_visible_text,
@@ -88,3 +89,18 @@ def test_finish_reason_tool_use_is_not_completed():
     payload = {"messages": [{"id":"a1","role":"assistant","finish_reason":"tool_use","parts":[{"type":"text","text":"final?"}]}]}
     out = find_latest_assistant_completion(payload)
     assert out["completion_state"] != "completed"
+
+
+def test_extract_assistant_message_ids_filters_roles_and_preserves_order():
+    payload = {
+        "messages": [
+            {"info": {"role": "user", "id": "u1"}},
+            {"info": {"role": "assistant", "id": "a1"}},
+            {"info": {"role": "tool", "id": "t1"}},
+            {"info": {"role": "assistant", "id": "a2"}},
+            {"message": {"info": {"role": "assistant", "id": "a3"}}},
+            {"info": {"role": "assistant", "id": "a2"}},
+        ]
+    }
+    assert extract_assistant_message_ids(payload) == ["a1", "a2", "a3"]
+    assert extract_assistant_message_ids(payload, exclude_message_ids={"a1", "a3"}) == ["a2"]

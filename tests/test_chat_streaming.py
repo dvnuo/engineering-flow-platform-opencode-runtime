@@ -351,3 +351,36 @@ async def test_chat_stream_blocks_message_part_delta_without_assistant_role(tmp_
         assert 'event: delta\ndata: {"delta": "hi"' not in body
     finally:
         await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_final_payload_includes_assistant_message_ids(tmp_path, monkeypatch):
+    import efp_opencode_adapter.chat_api as chat_api
+
+    async def fake_handle_chat_payload(request, payload):
+        return {
+            "ok": True,
+            "completion_state": "completed",
+            "response": "done",
+            "session_id": "s-final",
+            "request_id": "r-final",
+            "assistant_message_id": "a-2",
+            "assistant_message_ids": ["a-1", "a-2"],
+            "runtime_events": [],
+            "events": [],
+            "user_message_id": "u-1",
+        }
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(chat_api, "handle_chat_payload", fake_handle_chat_payload)
+    c = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())))
+    await c.start_server()
+    try:
+        resp = await c.post("/api/chat/stream", json={"message": "m", "session_id": "s-final", "request_id": "r-final"})
+        body = await resp.text()
+        assert 'event: final' in body
+        assert '"assistant_message_id": "a-2"' in body
+        assert '"assistant_message_ids": ["a-1", "a-2"]' in body
+        assert 'event: done\ndata: {"ok": true}' in body
+    finally:
+        await c.close()

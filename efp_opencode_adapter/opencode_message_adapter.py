@@ -161,6 +161,28 @@ def _iter_messages(payload: Any):
                     yield msg
 
 
+
+
+def extract_assistant_message_ids(
+    payload: Any,
+    *,
+    exclude_message_ids: set[str] | None = None,
+) -> list[str]:
+    exclude = exclude_message_ids or set()
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for msg in _iter_messages(payload):
+        if message_role(msg).lower() != "assistant":
+            continue
+        mid = message_id(msg)
+        if not mid or mid in exclude or mid in seen:
+            continue
+        seen.add(mid)
+        out.append(mid)
+
+    return out
+
 def extract_last_assistant_visible_text(payload: Any) -> str:
     messages = [m for m in _iter_messages(payload) if message_role(m).lower() == "assistant"]
     for msg in reversed(messages):
