@@ -26,7 +26,6 @@ class Settings:
     skills_dir: Path
     workspace_repos_dir: Path
     git_checkout_timeout_seconds: float
-    tools_dir: Path
     opencode_data_dir: Path
     opencode_config_path: Path
     # Optional build/configured OpenCode package version for observability only.
@@ -55,7 +54,6 @@ class Settings:
             skills_dir=Path(os.getenv("EFP_SKILLS_DIR", "/app/skills")),
             workspace_repos_dir=Path(os.getenv("EFP_WORKSPACE_REPOS_DIR", str(Path(os.getenv("EFP_WORKSPACE_DIR", "/workspace")) / "repos"))),
             git_checkout_timeout_seconds=float(os.getenv("EFP_GIT_CHECKOUT_TIMEOUT_SECONDS", "120")),
-            tools_dir=Path(os.getenv("EFP_TOOLS_DIR", "/app/tools")),
             opencode_data_dir=Path(os.getenv("OPENCODE_DATA_DIR", "/root/.local/share/opencode")),
             opencode_config_path=Path(os.getenv("OPENCODE_CONFIG", "/workspace/.opencode/opencode.json")),
             opencode_version=(os.getenv("OPENCODE_VERSION") or None),

@@ -42,37 +42,14 @@ def test_sanitize_public_secrets_removes_keys_and_string_values():
 
 @pytest.mark.asyncio
 async def test_capabilities_catalog(tmp_path, monkeypatch):
-    workspace, state, tools, skills = tmp_path / "workspace", tmp_path / "state", tmp_path / "tools", tmp_path / "skills"
+    workspace, state, skills = tmp_path / "workspace", tmp_path / "state", tmp_path / "skills"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
-    monkeypatch.setenv("EFP_TOOLS_DIR", str(tools))
     monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
     monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
     state.mkdir(parents=True)
-    tools.mkdir(parents=True)
     (workspace / ".opencode").mkdir(parents=True)
     (state / "skills-index.json").write_text(json.dumps({"skills": [{"opencode_name": "my-skill", "description": "d", "efp_name": "e", "tools": [], "task_tools": []}]}))
-    (tools / "manifest.yaml").write_text(
-        "tools:\n"
-        "  - capability_id: tool.read\n"
-        "    opencode_name: efp_read\n"
-        "    policy_tags: [read_only]\n"
-        "    description: requires api_key token secret\n"
-        "    input_schema:\n"
-        "      type: object\n"
-        "      properties:\n"
-        "        query:\n"
-        "          type: string\n"
-        "          description: no api_key here\n"
-        "        api_key: {type: string}\n"
-        "      required: [api_key, query]\n"
-        "  - capability_id: tool.native\n"
-        "    opencode_name: native_only\n"
-        "    runtime_compat: [native]\n"
-        "  - capability_id: tool.open\n"
-        "    opencode_name: opencode_tool\n"
-        "    runtime_compat: [opencode]\n"
-    )
     (workspace / ".opencode/opencode.json").write_text(json.dumps({"agent": {"efp-main": {"description": "Main"}}, "permission": {"skill": {"*": "deny", "my-skill": "allow"}}, "api_key": "SECRET"}))
 
     app = create_app(Settings.from_env(), opencode_client=FakeClient())
@@ -81,8 +58,7 @@ async def test_capabilities_catalog(tmp_path, monkeypatch):
     payload = await (await client.get("/api/capabilities")).json()
     caps = payload["capabilities"]
     names = {c.get("name") for c in caps}
-    assert {"read", "bash", "websearch", "my-skill", "efp_read", "efp-main", "github_status", "safe_mcp_tool", "opencode_tool"}.issubset(names)
-    assert "native_only" not in names
+    assert {"read", "bash", "websearch", "my-skill", "efp-main", "github_status", "safe_mcp_tool"}.issubset(names)
     skill = next(c for c in caps if c.get("type") == "skill" and c.get("name") == "my-skill")
     assert skill["permission_state"] == "allowed"
     assert skill["callable"] is True
@@ -107,14 +83,12 @@ async def test_capabilities_catalog(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_denied_skill_state_exposed_in_capabilities_and_skills(tmp_path, monkeypatch):
-    workspace, state, tools, skills = tmp_path / "workspace", tmp_path / "state", tmp_path / "tools", tmp_path / "skills"
+    workspace, state, skills = tmp_path / "workspace", tmp_path / "state", tmp_path / "skills"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
-    monkeypatch.setenv("EFP_TOOLS_DIR", str(tools))
     monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
     monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
     state.mkdir(parents=True)
-    tools.mkdir(parents=True)
     (workspace / ".opencode").mkdir(parents=True)
     (state / "skills-index.json").write_text(json.dumps({"skills": [{"opencode_name": "denied-skill"}]}))
     (workspace / ".opencode/opencode.json").write_text(json.dumps({"permission": {"skill": {"*": "deny"}}}))
@@ -135,9 +109,9 @@ async def test_denied_skill_state_exposed_in_capabilities_and_skills(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_unsupported_skill_is_not_callable_even_if_permission_allow(tmp_path, monkeypatch):
-    workspace, state, tools, skills = tmp_path / "workspace", tmp_path / "state", tmp_path / "tools", tmp_path / "skills"
-    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("EFP_TOOLS_DIR", str(tools)); monkeypatch.setenv("EFP_SKILLS_DIR", str(skills)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
-    state.mkdir(parents=True); tools.mkdir(parents=True); (workspace / '.opencode').mkdir(parents=True)
+    workspace, state, skills = tmp_path / "workspace", tmp_path / "state", tmp_path / "skills"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("EFP_SKILLS_DIR", str(skills)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    state.mkdir(parents=True); (workspace / '.opencode').mkdir(parents=True)
     (state / 'skills-index.json').write_text(json.dumps({"skills":[{"efp_name":"native-only","opencode_name":"native-only","description":"Native only","tools":[],"task_tools":[],"risk_level":"low","source_path":"x","target_path":"y","opencode_supported":False,"opencode_compatibility":"unsupported","runtime_equivalence":False,"programmatic":False,"compatibility_warnings":["skill is marked unsupported for OpenCode runtime"]}]}), encoding='utf-8')
     (workspace / '.opencode/opencode.json').write_text(json.dumps({"permission":{"skill":{"native-only":"allow"}}}), encoding='utf-8')
     app = create_app(Settings.from_env(), opencode_client=FakeClient()); client = TestClient(TestServer(app)); await client.start_server()
@@ -152,7 +126,7 @@ async def test_unsupported_skill_is_not_callable_even_if_permission_allow(tmp_pa
 async def test_skill_capability_has_top_level_compatibility_fields(tmp_path, monkeypatch):
     workspace, state, tools, skills = tmp_path / 'workspace', tmp_path / 'state', tmp_path / 'tools', tmp_path / 'skills'
     monkeypatch.setenv('EFP_WORKSPACE_DIR', str(workspace)); monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('EFP_TOOLS_DIR', str(tools)); monkeypatch.setenv('EFP_SKILLS_DIR', str(skills)); monkeypatch.setenv('OPENCODE_CONFIG', str(workspace / '.opencode/opencode.json'))
-    state.mkdir(parents=True); tools.mkdir(parents=True); (workspace / '.opencode').mkdir(parents=True)
+    state.mkdir(parents=True); (workspace / '.opencode').mkdir(parents=True)
     (state / 'skills-index.json').write_text(json.dumps({'skills':[{'opencode_name':'my-skill','opencode_compatibility':'prompt_only','runtime_equivalence':True,'tool_mappings':[{'efp_name':'a'}],'opencode_tools':['efp_a'],'missing_tools':['b']}]}), encoding='utf-8')
     (workspace / '.opencode/opencode.json').write_text(json.dumps({}), encoding='utf-8')
     app=create_app(Settings.from_env(), opencode_client=FakeClient()); c=TestClient(TestServer(app)); await c.start_server()
@@ -167,7 +141,7 @@ async def test_skill_capability_has_top_level_compatibility_fields(tmp_path, mon
 async def test_skill_capability_exposes_missing_opencode_tools(tmp_path, monkeypatch):
     workspace, state, tools, skills = tmp_path / 'workspace', tmp_path / 'state', tmp_path / 'tools', tmp_path / 'skills'
     monkeypatch.setenv('EFP_WORKSPACE_DIR', str(workspace)); monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('EFP_TOOLS_DIR', str(tools)); monkeypatch.setenv('EFP_SKILLS_DIR', str(skills)); monkeypatch.setenv('OPENCODE_CONFIG', str(workspace / '.opencode/opencode.json'))
-    state.mkdir(parents=True); tools.mkdir(parents=True); (workspace / '.opencode').mkdir(parents=True)
+    state.mkdir(parents=True); (workspace / '.opencode').mkdir(parents=True)
     (state / 'skills-index.json').write_text(json.dumps({'skills':[{'opencode_name':'my-skill','missing_opencode_tools':['efp_missing']}] }))
     (workspace / '.opencode/opencode.json').write_text(json.dumps({}))
     app=create_app(Settings.from_env(), opencode_client=FakeClient()); c=TestClient(TestServer(app)); await c.start_server()

@@ -107,23 +107,5 @@ def _extract_tool_items(data: dict[str, Any] | list[Any]) -> list[dict[str, Any]
 
 
 def load_tools_index(settings: Settings) -> dict[str, Any]:
-    paths = [
-        settings.adapter_state_dir / "tools-index.json",
-        settings.workspace_dir / ".opencode" / "tools-index.json",
-        settings.tools_dir / "tools-index.json",
-        settings.tools_dir / "manifest.json",
-        settings.tools_dir / "manifest.yaml",
-        settings.tools_dir / "manifest.yml",
-    ]
-    for path in paths:
-        data: dict[str, Any] | list[Any] | None
-        data = read_yaml_file(path) if path.suffix in {".yaml", ".yml"} else read_json_file(path)
-        if data is None:
-            continue
-        normalized = []
-        for item in _extract_tool_items(data):
-            tool = normalize_tool_descriptor(item)
-            if tool is not None and is_opencode_compatible_tool(tool):
-                normalized.append(tool)
-        return {"tools": normalized}
+    """External tools removed from runtime contract."""
     return {"tools": []}

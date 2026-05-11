@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .index_loader import load_skills_index, load_tools_index
+from .index_loader import load_skills_index
 from .permission_generator import build_permission
 from .settings import Settings
 
@@ -75,8 +75,7 @@ def provider_config_from_runtime_profile(runtime_config: dict) -> dict:
 def build_opencode_config(settings: Settings, runtime_config: dict | None = None) -> tuple[dict, str, list[str]]:
     runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
     skills_index = load_skills_index(settings)
-    tools_index = load_tools_index(settings)
-    permission = build_permission(runtime_config, skills_index=skills_index, tools_index=tools_index, permission_mode=settings.opencode_permission_mode, allow_bash_all=settings.opencode_allow_bash_all)
+    permission = build_permission(runtime_config, skills_index=skills_index, permission_mode=settings.opencode_permission_mode, allow_bash_all=settings.opencode_allow_bash_all)
     generated = {
         "$schema": "https://opencode.ai/config.json",
         "autoupdate": False,
@@ -118,13 +117,12 @@ def _hash_index_payload(payload: dict) -> str:
     return hashlib.sha256(src.encode("utf-8")).hexdigest()
 
 
-def merge_with_existing_config(existing: dict | None, generated: dict, *, tools_index: dict, skills_index: dict) -> dict:
+def merge_with_existing_config(existing: dict | None, generated: dict, *, skills_index: dict) -> dict:
     merged = dict(existing) if isinstance(existing, dict) else {}
     for key, value in generated.items():
         if key in MANAGED_TOP_LEVEL_KEYS:
             merged[key] = value
     merged["_efp_managed"] = {
-        "tools_index_hash": _hash_index_payload(tools_index),
         "skills_index_hash": _hash_index_payload(skills_index),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
