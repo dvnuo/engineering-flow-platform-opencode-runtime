@@ -41,6 +41,15 @@ Legacy aliases `RUNTIME_CONTRACT_EXPECT_TOOL` and `RUNTIME_CONTRACT_EXPECT_EFP_T
 
 
 
+
+## Assets contract (Portal vs runtime)
+- Portal only provides **skills** inputs (for example repo/branch mounted to `EFP_SKILLS_DIR`, default `/app/skills`).
+- `EFP_TOOLS_DIR` (default `/app/tools`) is treated as an **optional local/runtime-owned tools directory**.
+- Missing `/app/tools`, empty `/app/tools`, or `/app/tools` without `manifest.yaml|manifest.yml` are all valid startup states; runtime still boots and serves chat/skills/capabilities APIs.
+- If a local tools manifest is explicitly provided, runtime still enforces generator/index validation for that local asset.
+
+For smoke/runtime contract tests, `RUNTIME_CONTRACT_EXPECT_*` variables are fixture injection knobs for explicit local tools fixtures; they do **not** mean Portal configures or clones a tools repo.
+
 ## CI note
 
 GitHub Actions CI is intentionally disabled for now. Local validation remains available through `python -m pytest -q`, `bash scripts/ci_unit.sh`, and `bash scripts/smoke.sh`.

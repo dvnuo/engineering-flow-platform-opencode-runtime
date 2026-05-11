@@ -38,3 +38,23 @@ def test_settings_permission_mode_unknown_or_empty_fallback(monkeypatch):
     assert Settings.from_env().opencode_permission_mode == "profile_policy"
     monkeypatch.setenv("EFP_OPENCODE_PERMISSION_MODE", "restricted")
     assert Settings.from_env().opencode_permission_mode == "profile_policy"
+
+
+def test_settings_tools_dir_default_and_override(monkeypatch, tmp_path):
+    monkeypatch.delenv("EFP_TOOLS_DIR", raising=False)
+    assert Settings.from_env().tools_dir == Path("/app/tools")
+
+    override = tmp_path / "custom-tools"
+    monkeypatch.setenv("EFP_TOOLS_DIR", str(override))
+    assert Settings.from_env().tools_dir == override
+
+
+def test_settings_legacy_tool_repo_env_ignored(monkeypatch):
+    monkeypatch.setenv("DEFAULT_TOOL_REPO_URL", "https://example.com/legacy.git")
+    monkeypatch.setenv("DEFAULT_TOOL_BRANCH", "legacy")
+    monkeypatch.setenv("TOOL_REPO_URL", "https://example.com/runtime.git")
+    monkeypatch.setenv("TOOL_BRANCH", "runtime")
+    settings = Settings.from_env()
+    assert settings.tools_dir == Path("/app/tools")
+    assert not hasattr(settings, "tool_repo_url")
+    assert not hasattr(settings, "tool_branch")
