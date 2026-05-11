@@ -51,6 +51,18 @@ def test_resolve_and_decisions(tmp_path, monkeypatch):
     assert decision.allowed is True
     assert decision.reason == "allowed_with_missing_tools"
 
+    missing_write = dict(skill, missing_tools=["github_create_pull_request"])
+    write_settings = _setup(tmp_path, monkeypatch, [missing_write], {"skill": {"java-cucumber-generator": "allow"}})
+    decision = evaluate_skill_invocation(write_settings, inv)
+    assert decision.allowed is False
+    assert decision.reason == "missing_required_writeback_tools"
+
+    missing_write_op = dict(skill, missing_tools=[], missing_opencode_tools=["efp_github_create_pull_request"])
+    write_op_settings = _setup(tmp_path, monkeypatch, [missing_write_op], {"skill": {"java-cucumber-generator": "allow"}})
+    decision = evaluate_skill_invocation(write_op_settings, inv)
+    assert decision.allowed is False
+    assert decision.reason == "missing_required_writeback_tools"
+
     prompt = build_skill_prompt(missing, inv)
     assert "Compatibility warning" in prompt
     assert "x" in prompt
