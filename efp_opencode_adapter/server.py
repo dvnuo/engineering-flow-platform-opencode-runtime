@@ -71,7 +71,8 @@ import asyncio
 
 GIT_GH_ENV_KEYS = {
     "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_ACCESS_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-    "GH_HOST", "GH_CONFIG_DIR", "GH_PROMPT_DISABLED", "GIT_USERNAME", "GIT_PASSWORD", "GIT_ASKPASS",
+    "GITHUB_API_BASE_URL", "EFP_GITHUB_CONFIG_JSON",
+    "GH_HOST", "GH_CONFIG_DIR", "GH_PROMPT_DISABLED", "GH_REPO", "GIT_USERNAME", "GIT_PASSWORD", "GIT_ASKPASS",
     "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL", "GIT_EDITOR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
     "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
 }
@@ -221,7 +222,36 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
 
 
 async def runtime_profile_status_handler(request: web.Request) -> web.Response:
-    return web.json_response(build_profile_status_payload(request.app[SETTINGS_KEY]))
+    settings: Settings = request.app[SETTINGS_KEY]
+    payload = build_profile_status_payload(settings)
+
+    overlay = ProfileOverlayStore(settings).load()
+    if not overlay:
+        runtime_env = _runtime_env_for_status(settings, overlay)
+        git_askpass_path = runtime_env.get("GIT_ASKPASS")
+        gitconfig_path = runtime_env.get("GIT_CONFIG_GLOBAL")
+        gh_host = runtime_env.get("GH_HOST") or "github.com"
+        env_token_present = bool(
+            runtime_env.get("GH_TOKEN")
+            or runtime_env.get("GITHUB_TOKEN")
+            or runtime_env.get("GH_ENTERPRISE_TOKEN")
+            or runtime_env.get("GITHUB_ENTERPRISE_TOKEN")
+        )
+        payload.update({
+            "git_auth_configured": bool(
+                env_token_present
+                and git_askpass_path
+                and gitconfig_path
+                and Path(git_askpass_path).exists()
+                and Path(gitconfig_path).exists()
+            ),
+            "gh_host": gh_host,
+            "gh_config_dir": runtime_env.get("GH_CONFIG_DIR"),
+            "git_askpass_path": git_askpass_path,
+            "gitconfig_path": gitconfig_path,
+        })
+
+    return web.json_response(payload)
 
 
 async def effective_config_handler(request: web.Request) -> web.Response:
