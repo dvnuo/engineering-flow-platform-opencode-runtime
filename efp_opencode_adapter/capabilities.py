@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from .index_loader import load_skills_index, load_tools_index, read_json_file
+from .index_loader import load_skills_index, read_json_file
 from .permission_generator import default_permission_baseline, skill_permission_state
 from .profile_store import sanitize_public_secrets
 from .settings import Settings
@@ -24,10 +24,15 @@ BUILTIN_CAPABILITIES = [
     {"capability_id": "opencode.builtin.websearch", "type": "tool", "name": "websearch", "description": "Search web", "enabled": True, "policy_tags": ["web", "read_only"], "source_ref": "opencode"},
     {"capability_id": "opencode.builtin.question", "type": "tool", "name": "question", "description": "Request user interaction", "enabled": True, "policy_tags": ["user_interaction"], "source_ref": "opencode"},
 ]
+REMOVED_SKILL_EXTERNAL_TOOL_FIELDS = {"tool_mappings", "opencode_tools", "missing_tools", "missing_opencode_tools"}
 
 
 def _drop_none(payload: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in payload.items() if v is not None}
+
+
+def _clean_skill_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in item.items() if k not in REMOVED_SKILL_EXTERNAL_TOOL_FIELDS}
 
 
 def load_skills_capabilities(settings: Settings) -> list[dict[str, Any]]:
@@ -36,6 +41,9 @@ def load_skills_capabilities(settings: Settings) -> list[dict[str, Any]]:
     permission = cfg.get("permission") if isinstance(cfg.get("permission"), dict) else default_permission_baseline()
     out = []
     for item in data.get("skills", []):
+        if not isinstance(item, dict):
+            continue
+        item = _clean_skill_item(item)
         if not isinstance(item, dict) or not item.get("opencode_name"):
             continue
         tags = ["skill"]
@@ -51,51 +59,8 @@ def load_skills_capabilities(settings: Settings) -> list[dict[str, Any]]:
             "programmatic": bool(item.get("programmatic", False)),
             "opencode_supported": supported,
             "compatibility_warnings": item.get("compatibility_warnings", []),
-            "tool_mappings": item.get("tool_mappings", []),
-            "opencode_tools": item.get("opencode_tools", []),
-            "missing_tools": item.get("missing_tools", []),
-            "missing_opencode_tools": item.get("missing_opencode_tools", []),
         }
         out.append({"capability_id": f"opencode.skill.{item['opencode_name']}", "type": "skill", "name": item["opencode_name"], "description": item.get("description", ""), "enabled": True, "policy_tags": tags, "source_ref": "skills_repo", "permission_state": state, "callable": callable, "blocked_reason": blocked, **compat_payload, "metadata": _drop_none({"efp_name": item.get("efp_name"), "tools": item.get("tools", []), "task_tools": item.get("task_tools", []), "permission_state": state, "callable": callable, **compat_payload})})
-    return out
-
-
-def load_tools_capabilities(settings: Settings) -> list[dict[str, Any]]:
-    out = []
-    for t in load_tools_index(settings).get("tools", []):
-        if not isinstance(t, dict):
-            continue
-        legacy_name = t.get("legacy_name") or t.get("native_name") or t.get("efp_name")
-        opencode_name = t.get("opencode_name") or t.get("name")
-        external_system = t.get("external_system") or t.get("system_type") or t.get("domain")
-        runtime_compat = t.get("runtime_compat")
-        runtime_compatibility = "opencode" if ((isinstance(runtime_compat, str) and runtime_compat.lower() == "opencode") or (isinstance(runtime_compat, list) and "opencode" in {str(x).lower() for x in runtime_compat})) else runtime_compat
-        out.append(
-            _drop_none(
-                {
-                    "capability_id": t.get("capability_id"),
-                    "type": t.get("type", "adapter_action"),
-                    "name": t.get("name"),
-                    "description": t.get("description", ""),
-                    "policy_tags": t.get("policy_tags", []),
-                    "source_ref": t.get("source_ref", "tools_repo"),
-                    "enabled": t.get("enabled", True),
-                    "input_schema": t.get("input_schema"),
-                    "output_schema": t.get("output_schema"),
-                    "requires_identity_binding": t.get("requires_identity_binding"),
-                    "action_alias": legacy_name or opencode_name,
-                    "external_system": external_system,
-                    "adapter_system": external_system,
-                    "runtime_compatibility": runtime_compatibility,
-                    "metadata": _drop_none({
-                        "legacy_name": legacy_name,
-                        "opencode_name": opencode_name,
-                        "domain": t.get("domain"),
-                        "source_path": t.get("source_path"),
-                    }),
-                }
-            )
-        )
     return out
 
 
@@ -131,7 +96,7 @@ def normalize_mcp_capability(item: dict[str, Any]) -> dict[str, Any] | None:
 
 
 async def build_capability_catalog(settings: Settings, opencode_client=None) -> dict:
-    capabilities = [*BUILTIN_CAPABILITIES, *load_tools_capabilities(settings), *load_skills_capabilities(settings), *load_agent_capabilities(settings)]
+    capabilities = [*BUILTIN_CAPABILITIES, *load_skills_capabilities(settings), *load_agent_capabilities(settings)]
     if opencode_client and hasattr(opencode_client, "mcp"):
         try:
             mcp_data = await opencode_client.mcp()

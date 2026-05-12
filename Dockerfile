@@ -83,10 +83,8 @@ RUN sed -i 's/\r$//' /tmp/entrypoint.sh /app/runtime/scripts/smoke.sh \
   && rm -f /tmp/entrypoint.sh \
   && mkdir -p \
     /workspace/.opencode/skills \
-    /workspace/.opencode/tools \
     /workspace/.opencode/agents \
     /app/skills \
-    /app/tools \
     /root/.local/share/opencode \
     /root/.local/share/efp-compat
 

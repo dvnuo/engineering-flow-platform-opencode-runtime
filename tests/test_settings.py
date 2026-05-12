@@ -38,3 +38,15 @@ def test_settings_permission_mode_unknown_or_empty_fallback(monkeypatch):
     assert Settings.from_env().opencode_permission_mode == "profile_policy"
     monkeypatch.setenv("EFP_OPENCODE_PERMISSION_MODE", "restricted")
     assert Settings.from_env().opencode_permission_mode == "profile_policy"
+
+
+def test_settings_legacy_external_tool_env_ignored(monkeypatch):
+    monkeypatch.setenv("EFP_TOOLS_DIR", "/tmp/legacy-tools")
+    monkeypatch.setenv("OPENCODE_TOOLS_DIR", "/tmp/legacy-op-tools")
+    monkeypatch.setenv("DEFAULT_TOOL_REPO_URL", "https://example.com/legacy.git")
+    monkeypatch.setenv("DEFAULT_TOOL_BRANCH", "legacy")
+    monkeypatch.setenv("TOOL_REPO_URL", "https://example.com/runtime.git")
+    monkeypatch.setenv("TOOL_BRANCH", "runtime")
+    settings = Settings.from_env()
+    assert settings.skills_dir == Path("/app/skills")
+    assert not hasattr(settings, "tools_dir")
