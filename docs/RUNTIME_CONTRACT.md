@@ -1,88 +1,96 @@
 # Runtime Contract
 
 ## Overview
-This runtime is a **runtime-only adapter contract** for Portal/EFP integration validation. It is not a full Portal or Kubernetes E2E environment.
+This repository provides an OpenCode-based runtime adapter for EFP-facing APIs.
+
+- Portal only calls adapter APIs on port `:8000`.
+- OpenCode runs as an internal dependency on `:4096` and must not be exposed externally.
+- External tools subsystem removed / not supported.
+- Portal provides skills only; runtime maps skills into `/workspace/.opencode/skills` and runtime state.
 
 ## Runtime topology
-Portal -> adapter `0.0.0.0:8000` -> internal OpenCode `127.0.0.1:4096`.
+- Adapter service: `0.0.0.0:8000` (Portal-facing).
+- Internal OpenCode server: `127.0.0.1:4096` (runtime-only).
+- Runtime workspace root: `/workspace`.
 
 ## Non-goals
-- No direct Portal -> OpenCode `:4096` traffic.
-- No claim that default smoke validates live LLM production behavior.
+- No EFP external tools subsystem.
+- No external tool wrappers generated from manifests.
+- No tools index contract.
+- No wrapper mapping contract from source skill metadata.
 
 ## Required environment variables
 - `EFP_RUNTIME_TYPE=opencode`
 - `EFP_WORKSPACE_DIR`
 - `EFP_SKILLS_DIR`
-- `EFP_TOOLS_DIR`
 - `EFP_ADAPTER_STATE_DIR`
 - `OPENCODE_DATA_DIR`
 - `OPENCODE_CONFIG`
-- `PORTAL_AGENT_ID`
-
-`OPENCODE_VERSION` may be used as Docker build/config metadata, but it is not required by Portal and must not block runtime startup.
 
 ## Required mounted directories
 - `/workspace`
 - `/workspace/.opencode/skills`
-- `/workspace/.opencode/tools`
 - `/root/.local/share/opencode`
 - `/root/.local/share/efp-compat`
 
 ## Portal-facing endpoints
-`/health`, `/actuator/health`, `/api/chat`, `/api/chat/stream`, `/api/events`, `/api/capabilities`, `/api/skills`, `/api/tasks/execute`, `/api/tasks/{task_id}`, `/api/tasks/{task_id}/cancel`, `/api/internal/runtime-profile/apply`, `/api/internal/runtime-profile/status`, `/api/sessions`, `/api/sessions/{session_id}/messages/{message_id}/delete-from-here`, `/api/sessions/{session_id}/messages/{message_id}/edit`, `/api/queue/status`, `/api/server-files`, `/api/permissions/{permission_id}/respond`.
-
-Message mutation keeps Portal `session_id` stable while the adapter may replace the internal OpenCode session id after fork/new-session mutation.
+At minimum, runtime provides:
+- `/health`
+- `/actuator/health`
+- `/api/chat`
+- `/api/chat/stream`
+- `/api/sessions`
+- `/api/skills`
+- `/api/capabilities`
+- `/api/permissions/respond`
+- `/api/tasks/execute`
+- `/api/queue/status`
+- `/api/server-files/*`
+- `/api/events/ws`
 
 ## Internal-only OpenCode server
-Portal only calls adapter `:8000`. OpenCode `:4096` must not be exposed.
-The internal OpenCode server is intentionally reachable only over loopback (`127.0.0.1`) inside the runtime container/pod; this localhost network binding is the security boundary.
+OpenCode is an implementation detail behind adapter APIs.
+- It is bound to `:4096` internal loopback.
+- It must not be exposed as a direct Portal target.
 
 ## Skills asset mapping
-EFP skill names are normalized for OpenCode and persisted in `skills-index.json`.
-
-## Tools asset mapping
-Legacy tool names map to `efp_*` OpenCode wrapper names and are persisted in `tools-index.json`.
+- Portal provides skills only (`EFP_SKILLS_DIR`, default `/app/skills`).
+- Adapter syncs source skills into `/workspace/.opencode/skills` and writes `skills-index` state.
+- `tools` / `task_tools` in source skill frontmatter are informational metadata only.
+- Source metadata is not interpreted as runtime executable wrapper mappings.
 
 ## State persistence contract
-`/root/.local/share/opencode` and `/root/.local/share/efp-compat` should be persistent in production. Adapter state in `EFP_ADAPTER_STATE_DIR` must persist sessions/tasks/profile overlays.
+Persisted state directories:
+- OpenCode runtime state: `/root/.local/share/opencode`
+- Adapter state: `/root/.local/share/efp-compat`
+
+State should survive runtime restarts when mounted persistently.
 
 ## Runtime profile apply/status contract
-`/api/internal/runtime-profile/apply` and `/api/internal/runtime-profile/status` provide apply status, revision/runtime_profile_id propagation, and pending-restart visibility.
+- Apply endpoint updates runtime profile and OpenCode config.
+- Status endpoint reports apply status, revision, and restart/health-related state.
+- Effective config endpoint exposes sanitized runtime configuration and integration status.
 
 ## Runtime contract tests
-`runtime_contract_tests` are runtime-only checks, not Portal/K8s E2E checks.
+Quick contract check:
+
+```bash
+python -m pytest -q runtime_contract_tests
+```
+
+Live runtime check against a running adapter:
+
+```bash
+RUNTIME_BASE_URL=http://localhost:8000 python -m pytest -q runtime_contract_tests
+```
 
 ## Live LLM checks are opt-in
+Optional live checks are guarded and skipped by default unless explicitly enabled:
 - `RUNTIME_CONTRACT_ENABLE_CHAT=1`
 - `RUNTIME_CONTRACT_ENABLE_TASKS=1`
 
 ## Failure modes and expected status
-- opencode unavailable -> adapter returns 502 on upstream-dependent flows.
-- profile pending restart -> status payload shows pending restart.
-- missing skills dir -> health/capabilities surface degraded signals.
-- missing tools dir -> tools sync/capability mapping warnings.
-- state dir unwritable -> runtime state persistence failures.
-
-## Permission mode contract
-- `EFP_OPENCODE_PERMISSION_MODE=workspace_full_access` (default)
-- `EFP_OPENCODE_ALLOW_BASH_ALL=true` (default)
-- Default: built-in `edit`/`write` are `allow`, bash is `{"*":"allow"}`.
-- `profile_policy` keeps legacy ask/deny semantics for backward compatibility.
-
-## Chat final state contract
-- `completed` requires visible assistant text and returns `ok=true`.
-- `blocked`, `incomplete`, `error`, and `empty_final` must return `ok=false`.
-- `empty_final` must include non-empty diagnostic response text.
-- Runtime must not return an empty assistant response as success.
-
-## Portal/runtime responsibility split
-- Portal injects runtime env values and renders non-success chat outcomes.
-- Runtime generates the OpenCode permission map and determines final completion state.
-
-
-## Chat response id compatibility
-- `/api/chat` keeps `assistant_message_id` (string) for backward compatibility; it is the last id in `assistant_message_ids` when available.
-- `/api/chat` adds `assistant_message_ids` (string array) for all assistant message ids produced by the current request, in session order.
-- If runtime cannot reliably collect multiple ids, it may return `[assistant_message_id]` or `[]` without failing chat.
-- `/api/chat/stream` SSE `final` payload is aligned with `/api/chat` JSON response and includes the same id fields.
+- Health degradation returns non-200 when internal OpenCode or state readiness fails.
+- Optional live checks skip when required env is not present.
+- Task polling may return transient states (`accepted`, `running`) before terminal states.
+- Chat/tool execution can return empty final payload; callers should handle `empty_final` and `ok=false` states gracefully.

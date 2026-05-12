@@ -78,12 +78,9 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         "EFP_RUNTIME_TYPE": "opencode",
         "EFP_WORKSPACE_DIR": str(settings.workspace_dir),
         "EFP_SKILLS_DIR": str(settings.skills_dir),
-        "EFP_TOOLS_DIR": str(settings.tools_dir),
         "EFP_ADAPTER_STATE_DIR": str(settings.adapter_state_dir),
         "EFP_OPENCODE_URL": settings.opencode_url,
     }
-    py_path = os.getenv("PYTHONPATH")
-    env["PYTHONPATH"] = f"{settings.tools_dir}/python:{py_path}" if py_path else f"{settings.tools_dir}/python"
     updated: list[str] = []
     warnings: list[str] = []
 

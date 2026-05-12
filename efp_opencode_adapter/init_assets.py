@@ -4,11 +4,10 @@ import json
 from datetime import datetime, timezone
 
 from .agents_md import ensure_default_agents_md
-from .index_loader import read_json_file, load_skills_index, load_tools_index
+from .index_loader import read_json_file, load_skills_index
 from .opencode_config import build_opencode_config, merge_with_existing_config, write_opencode_config
 from .settings import Settings
 from .skill_sync import sync_skills
-from .tool_sync import sync_tools
 
 
 
@@ -17,27 +16,18 @@ def init_assets(settings: Settings) -> None:
         settings.workspace_dir,
         settings.workspace_dir / ".opencode",
         settings.workspace_dir / ".opencode" / "skills",
-        settings.workspace_dir / ".opencode" / "tools",
         settings.workspace_dir / ".opencode" / "agents",
         settings.workspace_dir / ".opencode" / "commands",
         settings.skills_dir,
-        settings.tools_dir,
         settings.opencode_data_dir,
         settings.adapter_state_dir,
     ]
     for d in required_dirs:
         d.mkdir(parents=True, exist_ok=True)
-
-    tools_index = sync_tools(
-        settings.tools_dir,
-        settings.workspace_dir / ".opencode" / "tools",
-        settings.adapter_state_dir,
-    )
     sync_skills(
         settings.skills_dir,
         settings.workspace_dir / ".opencode" / "skills",
         settings.adapter_state_dir,
-        tools_index=tools_index.to_json_dict() if hasattr(tools_index, "to_json_dict") else tools_index,
         opencode_commands_dir=settings.workspace_dir / ".opencode" / "commands",
     )
 
@@ -56,7 +46,6 @@ def _refresh_managed_opencode_config(settings: Settings) -> None:
     merged = merge_with_existing_config(
         existing,
         generated,
-        tools_index=load_tools_index(settings),
         skills_index=load_skills_index(settings),
     )
     write_opencode_config(settings, merged)
