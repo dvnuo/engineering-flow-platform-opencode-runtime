@@ -51,10 +51,6 @@ def load_skills_capabilities(settings: Settings) -> list[dict[str, Any]]:
             "programmatic": bool(item.get("programmatic", False)),
             "opencode_supported": supported,
             "compatibility_warnings": item.get("compatibility_warnings", []),
-            "tool_mappings": item.get("tool_mappings", []),
-            "opencode_tools": item.get("opencode_tools", []),
-            "missing_tools": item.get("missing_tools", []),
-            "missing_opencode_tools": item.get("missing_opencode_tools", []),
         }
         out.append({"capability_id": f"opencode.skill.{item['opencode_name']}", "type": "skill", "name": item["opencode_name"], "description": item.get("description", ""), "enabled": True, "policy_tags": tags, "source_ref": "skills_repo", "permission_state": state, "callable": callable, "blocked_reason": blocked, **compat_payload, "metadata": _drop_none({"efp_name": item.get("efp_name"), "tools": item.get("tools", []), "task_tools": item.get("task_tools", []), "permission_state": state, "callable": callable, **compat_payload})})
     return out

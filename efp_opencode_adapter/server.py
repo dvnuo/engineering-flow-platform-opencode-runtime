@@ -234,7 +234,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
                 "runtime_profile_id": overlay.runtime_profile_id if overlay else None,
                 "revision": overlay.revision if overlay else None,
             },
-            "external_tools": {
+            "runtime_integrations": {
                 "github": {"enabled": bool(github_cfg), "base_url": github_cfg.get("api_base_url") or "https://api.github.com", "token_present": bool(github_cfg.get("api_token"))},
                 "proxy": {"enabled": bool(proxy_cfg.get("enabled")), "url_present": bool(proxy_cfg.get("url")), "password_present": bool(proxy_cfg.get("password"))},
                 "env_file": {"present": bool(overlay and overlay.env_path), "path": overlay.env_path if overlay else None, "hash": overlay.env_hash if overlay else None},
