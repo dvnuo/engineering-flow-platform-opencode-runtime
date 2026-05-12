@@ -35,4 +35,8 @@ def test_docs_contract_sections_and_keywords():
     readme = _t('README.md')
     for token in ['docs/RUNTIME_CONTRACT.md', 'docs/OBSERVABILITY.md', 'docs/TESTING.md']:
         assert token in readme
-    assert 'No Portal startup required' in _t('integration/README.md')
+    integration = _t('integration/README.md')
+    for token in ['No Portal startup required', 'RUN_RUNTIME_CONTRACT_TESTS', 'RUNTIME_CONTRACT_EXPECT_SKILL', 'RUNTIME_CONTRACT_ENABLE_CHAT', 'RUNTIME_CONTRACT_ENABLE_TASKS', 'No real LLM key required for default smoke']:
+        assert token in integration
+    for forbidden in ['RUNTIME_CONTRACT_EXPECT_LEGACY_TOOL', 'RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL', 'RUNTIME_CONTRACT_EXPECT_TOOL_MAPPING', 'RUNTIME_CONTRACT_EXPECT_TOOL', 'RUNTIME_CONTRACT_EXPECT_EFP_TOOL', 'tool_mapping', 'tool_mappings', 'opencode_tools', 'missing_tools', 'missing_opencode_tools', 'tools-index', 'tools_index', '/app/tools', 'EFP_TOOLS_DIR', 'OPENCODE_TOOLS_DIR', 'skill/tool asset bridge', 'Tools asset mapping']:
+        assert forbidden not in integration

@@ -15,13 +15,11 @@ Default `runtime_contract_tests` do not require a live LLM key; chat/task checks
 
 Smoke contract runtime timeout can be tuned with `RUNTIME_CONTRACT_TIMEOUT_SECONDS` (default 120).
 
-When `RUN_RUNTIME_CONTRACT_TESTS=1` is used, `scripts/smoke.sh` sets smoke-specific asset expectations:
+When `RUN_RUNTIME_CONTRACT_TESTS=1` is used, `scripts/smoke.sh` supports a skills-only expectation:
 - `RUNTIME_CONTRACT_EXPECT_SKILL=smoke-skill`
-- `RUNTIME_CONTRACT_EXPECT_LEGACY_TOOL=smoke_tool`
-- `RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL=efp_smoke_tool`
-- `RUNTIME_CONTRACT_EXPECT_TOOL_MAPPING=smoke_tool:efp_smoke_tool`
 
-These checks validate the skill/tool asset bridge through `/api/skills` and `/api/capabilities`. Chat/task contract checks remain opt-in via `RUNTIME_CONTRACT_ENABLE_CHAT=1` and `RUNTIME_CONTRACT_ENABLE_TASKS=1`.
+Runtime contract checks do not validate external tools, tool mappings, tool indexes, or generated wrappers.
+Tool surface is OpenCode-owned: OpenCode built-ins, OpenCode MCP (when enabled by OpenCode itself), runtime profile, and permission policy.
+Source skill `tools` / `task_tools` metadata is informational only.
 
-
-This is runtime-only smoke, not full Portal E2E. It validates asset bridge, runtime contract, and state persistence. It does not validate real Portal K8s provisioning. Live chat/task checks are opt-in.
+This is runtime-only smoke, not full Portal E2E. It validates runtime contract and state persistence. It does not validate real Portal K8s provisioning. Live chat/task checks are opt-in.

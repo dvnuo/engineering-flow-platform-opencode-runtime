@@ -68,7 +68,7 @@ def _render_skill_markdown(opencode_name:str, entry:SkillIndexEntry, frontmatter
     meta={"efp_name":entry.efp_name,"efp_tools":','.join(entry.tools),"efp_task_tools":','.join(entry.task_tools),"efp_source_path":entry.source_path}
     fm=yaml.safe_dump({"name":opencode_name,"description":entry.description,"license":"internal","compatibility":"opencode","metadata":meta},sort_keys=False,allow_unicode=True).strip()
     warn=("## Compatibility Warnings\n"+"\n".join([f"- {w}" for w in entry.compatibility_warnings])+"\n\n") if entry.compatibility_warnings else ""
-    return f"---\n{fm}\n---\n\n# {entry.description or entry.efp_name}\n\n{GENERATED_MARKER}\n\nThis generated skill is a prompt asset.\n\nThe runtime tool surface comes from OpenCode built-in tools, OpenCode MCP tools when enabled by OpenCode itself, skills, runtime profile, and permission policy.\n\nThis adapter does not provide EFP external-tools wrappers or tools-index mapping.\n\nAny EFP tools/task_tools metadata in the source skill is informational only.\n\n{warn}{body.rstrip()}\n"
+    return f"---\n{fm}\n---\n\n# {entry.description or entry.efp_name}\n\n{GENERATED_MARKER}\n\nThis generated skill is a prompt asset.\n\nSource skill tools/task_tools metadata is informational only. Runtime tool access is controlled by OpenCode built-in tools, OpenCode MCP tools when enabled by OpenCode itself, skills, runtime profile, and permission policy.\n\n{warn}{body.rstrip()}\n"
 
 def _render_command_markdown(entry:SkillIndexEntry)->str:
     return f"---\ndescription: Run EFP skill {entry.opencode_name}\nagent: efp-main\n---\n\n{GENERATED_COMMAND_MARKER}\n\nRun the OpenCode agent skill `{entry.opencode_name}`.\n"

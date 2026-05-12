@@ -70,3 +70,14 @@ def test_commands_generated_without_external_wrapper_index_when_supported_and_eq
 def test_known_fields_does_not_include_removed_external_mapping_fields():
     assert "tool_mapping" not in KNOWN_FIELDS
     assert "opencode_tools" not in KNOWN_FIELDS
+
+
+def test_generated_skill_prompt_does_not_mention_removed_external_tool_contract(tmp_path):
+    skills=tmp_path/'skills'; out=tmp_path/'out'; st=tmp_path/'state'
+    _write_skill(skills)
+    sync_skills(skills, out, st)
+    md=(out/'demo'/'SKILL.md').read_text(encoding='utf-8')
+    for forbidden in ('external-tools', 'tools-index', 'tool_mapping', 'opencode_tools', 'wrapper mapping', 'missing_tools', 'missing_opencode_tools'):
+        assert forbidden not in md
+    for required in ('informational only', 'OpenCode built-in', 'runtime profile', 'permission policy'):
+        assert required in md

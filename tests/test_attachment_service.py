@@ -4,22 +4,17 @@ from efp_opencode_adapter.attachment_service import AttachmentService, build_att
 from efp_opencode_adapter.settings import Settings
 
 
-def make_settings(tmp_path: Path) -> Settings:
-    return Settings(
-        opencode_url="http://127.0.0.1:4096",
-        adapter_state_dir=tmp_path / "state",
-        workspace_dir=tmp_path / "workspace",
-        skills_dir=tmp_path / "skills",
-        tools_dir=tmp_path / "tools",
-        opencode_data_dir=tmp_path / "opencode-state",
-        opencode_config_path=tmp_path / "workspace/.opencode/opencode.json",
-        opencode_version="1.14.39",
-        ready_timeout_seconds=60,
-    )
+def make_settings(tmp_path: Path, monkeypatch) -> Settings:
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(tmp_path / "skills"))
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path / "opencode-state"))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "workspace/.opencode/opencode.json"))
+    return Settings.from_env()
 
 
-def test_attachment_lifecycle(tmp_path):
-    settings = make_settings(tmp_path)
+def test_attachment_lifecycle(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path, monkeypatch)
     svc = AttachmentService(settings)
     up = svc.upload("s1", "note.txt", b"revenue grows\n" * 400)
     fid = up["file_id"]
@@ -58,8 +53,8 @@ def test_normalize_attachment_refs():
     assert [r["file_id"] for r in refs] == ["a1", "a2", "a3"]
 
 
-def test_build_opencode_attachment_parts_for_text_and_missing(tmp_path):
-    settings = make_settings(tmp_path)
+def test_build_opencode_attachment_parts_for_text_and_missing(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path, monkeypatch)
     svc = AttachmentService(settings)
     up = svc.upload("s1", "notes.txt", b"hello file", "text/plain")
     parts, debug = build_opencode_attachment_parts(svc, "s1", [up["file_id"], "does-not-exist"])
@@ -69,8 +64,8 @@ def test_build_opencode_attachment_parts_for_text_and_missing(tmp_path):
     assert any(d.get("status") == "error" for d in debug)
 
 
-def test_text_truncation_still_processes_image_and_pdf(tmp_path):
-    settings = make_settings(tmp_path)
+def test_text_truncation_still_processes_image_and_pdf(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path, monkeypatch)
     svc = AttachmentService(settings)
     big = svc.upload("s1", "big.txt", b"a" * 500, "text/plain")
     img = svc.upload("s1", "cat.png", b"\x89PNG\r\n\x1a\nabc", "image/png")
@@ -83,8 +78,8 @@ def test_text_truncation_still_processes_image_and_pdf(tmp_path):
     assert any(d.get("file_id") == img["file_id"] and d.get("inlined") is True for d in debug)
 
 
-def test_text_budget_exhausted_next_text_not_unsupported(tmp_path):
-    settings = make_settings(tmp_path)
+def test_text_budget_exhausted_next_text_not_unsupported(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path, monkeypatch)
     svc = AttachmentService(settings)
     big1 = svc.upload("s1", "big1.txt", b"a" * 500, "text/plain")
     big2 = svc.upload("s1", "big2.txt", b"b" * 300, "text/plain")
@@ -93,8 +88,8 @@ def test_text_budget_exhausted_next_text_not_unsupported(tmp_path):
     assert any(d.get("file_id") == big2["file_id"] and d.get("action") == "text_context" and d.get("truncated") is True for d in debug)
 
 
-def test_invalid_attachment_refs_and_non_list_and_service_none(tmp_path):
-    settings = make_settings(tmp_path)
+def test_invalid_attachment_refs_and_non_list_and_service_none(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path, monkeypatch)
     svc = AttachmentService(settings)
     valid = svc.upload("s1", "ok.txt", b"ok", "text/plain")
     parts, debug = build_opencode_attachment_parts(svc, "s1", [123, {}, {"name": "x"}, "", {"id": valid["file_id"]}])
