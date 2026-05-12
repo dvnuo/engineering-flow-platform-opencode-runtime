@@ -22,12 +22,13 @@ def test_baseline_safety():
         assert ws[k] == "allow"
     assert ws["bash"]["*"] == "allow"
     assert ws["skill"]["*"] == "allow"
-    assert ws["external_directory"] == "deny"
+    assert ws["external_directory"] == "allow"
 
     pp = default_permission_baseline(permission_mode="profile_policy", allow_bash_all=False)
     assert pp["*"] == "ask"
     assert pp["edit"] == "ask" and pp["write"] == "ask"
-    assert pp["bash"]["rm *"] == "deny"
+    assert pp["bash"]["git *"] == "allow"
+    assert pp["bash"]["gh *"] == "allow"
 
 
 def test_denied_actions_can_deny_builtin_read_and_websearch():

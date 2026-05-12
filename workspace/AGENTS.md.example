@@ -7,5 +7,24 @@ This OpenCode runtime is managed by EFP Portal.
 - Treat this file as the project-level instruction source for OpenCode.
 - Obey Portal capability, runtime profile, and policy metadata.
 - Do not write back to external systems unless explicitly allowed by policy.
-- Prefer EFP-provided tools such as efp_* for GitHub, Jira, Confluence, and other managed integrations when available.
+
+## Git and GitHub CLI
+
+This runtime has git and GitHub CLI (`gh`) available through the Bash tool.
+
+Authentication is configured by the runtime. Do not ask the user for a GitHub token.
+
+You may use Bash to run git and gh directly, including:
+- `git clone https://github.com/OWNER/REPO.git /workspace/repos/OWNER__REPO`
+- `gh repo clone OWNER/REPO /workspace/repos/OWNER__REPO`
+- `gh auth status -h github.com`
+- `gh repo view OWNER/REPO`
+- `gh pr view <number> --repo OWNER/REPO`
+- `gh pr diff <number> --repo OWNER/REPO`
+- `gh pr checkout <number> --repo OWNER/REPO`
+- `gh pr review <number> --repo OWNER/REPO --comment --body-file /tmp/review.md`
+- `gh pr review <number> --repo OWNER/REPO --request-changes --body-file /tmp/review.md`
+- `gh pr review <number> --repo OWNER/REPO --approve --body-file /tmp/review.md`
+
+For code review tasks, prefer checking out the PR, reading the diff, running relevant tests when possible, and writing a concise review body to a temporary file before calling `gh pr review`.
 - When creating or updating files for the user, write them under the workspace directory and summarize the created or updated paths.

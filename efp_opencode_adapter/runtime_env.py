@@ -17,6 +17,8 @@ MANAGED_EXTERNAL_ENV_KEYS = {
     "CONFLUENCE_BASE_URL", "CONFLUENCE_USERNAME", "CONFLUENCE_EMAIL", "CONFLUENCE_API_TOKEN", "CONFLUENCE_PASSWORD", "CONFLUENCE_TOKEN", "CONFLUENCE_SPACE_KEY", "EFP_CONFLUENCE_INSTANCES_JSON",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
     "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+    "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "GH_PROMPT_DISABLED", "GH_REPO",
+    "GIT_USERNAME", "GIT_PASSWORD", "GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL", "GIT_EDITOR",
 }
 _REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
 
@@ -42,6 +44,44 @@ def _clean_secret(value) -> str:
     if normalized in _REDACTED_VALUES:
         return ""
     return text
+
+
+def _first_clean_secret(*values) -> str:
+    for value in values:
+        cleaned = _clean_secret(value)
+        if cleaned:
+            return cleaned
+    return ""
+
+
+def _first_text(*values, default: str = "") -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return default
+
+
+def _github_host_from_urls(*values: object) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if "://" not in text:
+            text = f"https://{text}"
+        parts = urlsplit(text)
+        host = (parts.hostname or "").strip()
+        if not host:
+            continue
+        if host == "api.github.com":
+            return "github.com"
+        return host
+    return "github.com"
+
+
+def _is_github_dotcom_like(host: str) -> bool:
+    value = str(host or "").strip().lower()
+    return value == "github.com" or value.endswith(".ghe.com")
 
 
 @dataclass(frozen=True)
@@ -94,17 +134,68 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         env["no_proxy"] = no_proxy
         updated.append("proxy")
 
-    github = cfg.get("github") if isinstance(cfg.get("github"), dict) else None
-    if isinstance(github, dict) and _section_enabled(github):
-        token = _clean_secret(github.get("api_token") or github.get("token") or github.get("access_token"))
-        if token:
-            base_url = str(github.get("api_base_url") or github.get("base_url") or "https://api.github.com").strip().rstrip("/")
-            env["GITHUB_TOKEN"] = token
-            env["GITHUB_ACCESS_TOKEN"] = token
-            env["GITHUB_API_BASE_URL"] = base_url
-            normalized_github = {"enabled": True, "api_token": token, "base_url": base_url, "api_base_url": base_url}
-            env["EFP_GITHUB_CONFIG_JSON"] = json.dumps(normalized_github, ensure_ascii=False, separators=(",", ":"))
-            updated.append("github")
+    github = cfg.get("github") if isinstance(cfg.get("github"), dict) else {}
+    github_section_present = isinstance(cfg.get("github"), dict)
+    github_enabled = github_section_present and _section_enabled(github)
+
+    github_token = _first_clean_secret(
+        github.get("api_token") if isinstance(github, dict) else None,
+        github.get("token") if isinstance(github, dict) else None,
+        github.get("access_token") if isinstance(github, dict) else None,
+        os.getenv("GH_TOKEN"),
+        os.getenv("GITHUB_TOKEN"),
+        os.getenv("EFP_GITHUB_TOKEN"),
+    )
+    github_username = _first_text(
+        github.get("username") if isinstance(github, dict) else None,
+        github.get("login") if isinstance(github, dict) else None,
+        (cfg.get("git") or {}).get("username") if isinstance(cfg.get("git"), dict) else None,
+        os.getenv("EFP_GITHUB_USERNAME"),
+        os.getenv("GITHUB_USERNAME"),
+        os.getenv("GIT_USERNAME"),
+        default="x-access-token",
+    )
+    github_api_base_url = _first_text(
+        github.get("api_base_url") if isinstance(github, dict) else None,
+        github.get("base_url") if isinstance(github, dict) else None,
+        os.getenv("GITHUB_API_BASE_URL"),
+        default="https://api.github.com",
+    ).rstrip("/")
+    github_host = _github_host_from_urls(
+        github.get("host") if isinstance(github, dict) else None,
+        github.get("web_base_url") if isinstance(github, dict) else None,
+        github_api_base_url,
+        os.getenv("GH_HOST"),
+    )
+    if github_token:
+        env["GITHUB_TOKEN"] = github_token
+        env["GITHUB_ACCESS_TOKEN"] = github_token
+        env["GH_TOKEN"] = github_token
+        env["GITHUB_API_BASE_URL"] = github_api_base_url
+        env["GH_HOST"] = github_host
+        env["GH_CONFIG_DIR"] = str(settings.adapter_state_dir / "gh")
+        env["GH_PROMPT_DISABLED"] = "1"
+        env["GIT_USERNAME"] = github_username
+        env["GIT_PASSWORD"] = github_token
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_ASKPASS"] = str(settings.adapter_state_dir / "git-askpass.sh")
+        env["GIT_CONFIG_GLOBAL"] = str(settings.adapter_state_dir / "gitconfig")
+        env["GIT_EDITOR"] = "true"
+        if not _is_github_dotcom_like(github_host):
+            env["GH_ENTERPRISE_TOKEN"] = github_token
+            env["GITHUB_ENTERPRISE_TOKEN"] = github_token
+        normalized_github = {
+            "enabled": True,
+            "api_token": github_token,
+            "base_url": github_api_base_url,
+            "api_base_url": github_api_base_url,
+            "host": github_host,
+            "username": github_username,
+        }
+        env["EFP_GITHUB_CONFIG_JSON"] = json.dumps(normalized_github, ensure_ascii=False, separators=(",", ":"))
+        updated.append("github")
+    elif github_enabled:
+        warnings.append("github enabled but no token provided")
 
     def _apply_instance(section: str, prefix: str, project_key: str) -> None:
         source = cfg.get(section) if isinstance(cfg.get(section), dict) else {}
@@ -186,16 +277,21 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
     _apply_instance("confluence", "CONFLUENCE", "space")
 
     git = cfg.get("git") if isinstance(cfg.get("git"), dict) else {}
-    if git:
-        git_user = git.get("user") if isinstance(git.get("user"), dict) else {}
-        author_name = git.get("author_name") or git_user.get("name")
-        author_email = git.get("author_email") or git_user.get("email")
-        if author_name:
-            env["GIT_AUTHOR_NAME"] = str(author_name)
-            env["GIT_COMMITTER_NAME"] = str(author_name)
-        if author_email:
-            env["GIT_AUTHOR_EMAIL"] = str(author_email)
-            env["GIT_COMMITTER_EMAIL"] = str(author_email)
+    git_user = git.get("user") if isinstance(git.get("user"), dict) else {}
+    author_name = git.get("author_name") or git_user.get("name")
+    author_email = git.get("author_email") or git_user.get("email")
+    author_name = author_name or os.getenv("GIT_AUTHOR_NAME") or github_username
+    author_email = author_email or os.getenv("GIT_AUTHOR_EMAIL") or os.getenv("GITHUB_EMAIL")
+    git_env_written = False
+    if author_name:
+        env["GIT_AUTHOR_NAME"] = str(author_name)
+        env["GIT_COMMITTER_NAME"] = str(author_name)
+        git_env_written = True
+    if author_email:
+        env["GIT_AUTHOR_EMAIL"] = str(author_email)
+        env["GIT_COMMITTER_EMAIL"] = str(author_email)
+        git_env_written = True
+    if git_env_written:
         updated.append("git")
     env.setdefault("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT", "1")
     debug = cfg.get("debug") if isinstance(cfg.get("debug"), dict) else {}

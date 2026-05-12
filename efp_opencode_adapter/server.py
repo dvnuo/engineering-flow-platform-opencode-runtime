@@ -48,6 +48,7 @@ from .opencode_config import build_opencode_config, normalize_opencode_provider_
 from .opencode_auth import build_opencode_auth_from_runtime_config
 from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_status_payload, sanitize_profile_config_for_storage, sanitize_public_secrets
 from .runtime_env import build_runtime_env_from_config, read_runtime_env_file, write_runtime_env_file
+from .git_cli_auth import write_git_gh_auth_assets
 from .opencode_process import OpenCodeProcessManager
 from .session_store import SessionStore
 from .task_store import TaskStore
@@ -159,6 +160,7 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
             auth_update_status = "failed"
     env_result = build_runtime_env_from_config(settings, runtime_config)
     env_path = write_runtime_env_file(settings, env_result.env)
+    git_auth_result = write_git_gh_auth_assets(settings, env_result.env)
     manager = request.app.get(OPENCODE_PROCESS_MANAGER_KEY)
     restart_performed = False
     health_ok = None
@@ -187,7 +189,7 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
         status, applied = ("pending_restart", False) if pending_restart else ("applied", True)
     overlay = ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status=status, pending_restart=pending_restart, warnings=warnings, updated_sections=updated_sections, last_apply_error=last_error, applied=applied, env_hash=env_result.env_hash, env_path=str(env_path), restart_performed=restart_performed, opencode_pid=opencode_pid, last_restart_at=restart_meta.get("last_restart_at") if restart_meta else None, last_restart_reason=restart_meta.get("last_restart_reason") if restart_meta else None, health_ok=health_ok)
     ProfileOverlayStore(settings).save(overlay)
-    response = {"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "env_written": True, "env_hash": env_result.env_hash, "env_path": str(env_path), "updated_sections": sorted(set(updated_sections + env_result.updated_sections)), "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "auth_update_status": auth_update_status, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "restart_performed": restart_performed, "opencode_pid": opencode_pid, "health_ok": health_ok, "status_endpoint": "/api/internal/runtime-profile/status"}
+    response = {"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "env_written": True, "env_hash": env_result.env_hash, "env_path": str(env_path), "updated_sections": sorted(set(updated_sections + env_result.updated_sections)), "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "auth_update_status": auth_update_status, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "restart_performed": restart_performed, "opencode_pid": opencode_pid, "health_ok": health_ok, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host"), "gh_config_dir": git_auth_result.get("gh_config_dir"), "git_askpass_path": git_auth_result.get("askpass_path"), "gitconfig_path": git_auth_result.get("gitconfig_path"), "status_endpoint": "/api/internal/runtime-profile/status"}
     if auth_build.warning:
         response["auth_warning"] = auth_build.warning
     return web.json_response(response, status=500 if manager and pending_restart else 200)
@@ -235,7 +237,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
                 "revision": overlay.revision if overlay else None,
             },
             "runtime_integrations": {
-                "github": {"enabled": bool(github_cfg), "base_url": github_cfg.get("api_base_url") or "https://api.github.com", "token_present": bool(github_cfg.get("api_token"))},
+                "github": {"enabled": bool(github_cfg), "base_url": github_cfg.get("api_base_url") or "https://api.github.com", "host": github_cfg.get("host") or "github.com", "token_present": bool(github_cfg.get("api_token") or github_cfg.get("token") or github_cfg.get("access_token"))},
                 "proxy": {"enabled": bool(proxy_cfg.get("enabled")), "url_present": bool(proxy_cfg.get("url")), "password_present": bool(proxy_cfg.get("password"))},
                 "env_file": {"present": bool(overlay and overlay.env_path), "path": overlay.env_path if overlay else None, "hash": overlay.env_hash if overlay else None},
             },
@@ -321,6 +323,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
                 env = read_runtime_env_file(env_path)
             else:
                 env = build_runtime_env_from_config(settings, {}).env
+            write_git_gh_auth_assets(settings, env)
             await manager.start(env, reason="startup")
 
     async def _start_event_bridge(app):

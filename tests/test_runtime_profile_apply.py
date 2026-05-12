@@ -50,6 +50,8 @@ async def test_apply_contract(tmp_path, monkeypatch):
     r = await client.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json=payload)
     body = await r.json()
     assert r.status == 200 and body["success"] is True
+    assert "git_auth_configured" in body
+    assert "gh_host" in body
     assert secret not in json.dumps(body)
     cfg = json.loads((workspace / ".opencode/opencode.json").read_text())
     assert (workspace / "AGENTS.md").exists()

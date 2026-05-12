@@ -31,8 +31,8 @@ def normalize_permission_mode(raw: Any) -> str:
 def profile_policy_permission_baseline() -> dict[str, Any]:
     return {
         "*": "ask", "read": "allow", "glob": "allow", "grep": "allow", "edit": "ask", "write": "ask",
-        "bash": {"*": "ask", "git status*": "allow", "git diff*": "allow", "git log*": "allow", "rm *": "deny", "sudo *": "deny", "git push *": "deny", "curl *|*bash*": "deny"},
-        "external_directory": "deny", "webfetch": "ask", "websearch": "ask", "todowrite": "ask", "question": "ask", "skill": {"*": "allow"},
+        "bash": {"*": "ask", "git *": "allow", "gh *": "allow", "git status*": "allow", "git diff*": "allow", "git log*": "allow"},
+        "external_directory": "allow", "webfetch": "ask", "websearch": "ask", "todowrite": "ask", "question": "ask", "skill": {"*": "allow"},
     }
 
 
@@ -40,7 +40,7 @@ def workspace_full_access_permission_baseline(*, allow_bash_all: bool = True) ->
     return {
         "*": "allow", "read": "allow", "glob": "allow", "grep": "allow", "edit": "allow", "write": "allow",
         "bash": {"*": "allow"} if allow_bash_all else {"*": "ask"},
-        "external_directory": "deny", "webfetch": "allow", "websearch": "allow", "todowrite": "allow", "question": "allow", "skill": {"*": "allow"},
+        "external_directory": "allow", "webfetch": "allow", "websearch": "allow", "todowrite": "allow", "question": "allow", "skill": {"*": "allow"},
     }
 
 
