@@ -8,6 +8,7 @@ from .opencode_config import build_opencode_config, normalize_opencode_provider_
 from .opencode_auth import build_opencode_auth_from_runtime_config
 from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_profile_config_for_storage
 from .runtime_env import build_runtime_env_from_config, write_runtime_env_file
+from .git_cli_auth import write_git_gh_auth_assets
 from .settings import Settings
 
 
@@ -85,6 +86,7 @@ async def _run(workspace_dir: Path) -> int:
 
     env_result = build_runtime_env_from_config(settings, runtime_config if isinstance(runtime_config, dict) else {})
     env_path = write_runtime_env_file(settings, env_result.env)
+    git_auth_result = write_git_gh_auth_assets(settings, env_result.env)
     ProfileOverlayStore(settings).save(ProfileOverlay(
         runtime_profile_id=runtime_profile_id,
         revision=revision,
@@ -99,9 +101,14 @@ async def _run(workspace_dir: Path) -> int:
         applied=True,
         env_hash=env_result.env_hash,
         env_path=str(env_path),
+        git_auth_configured=bool(git_auth_result.get("configured")),
+        gh_host=git_auth_result.get("host"),
+        gh_config_dir=git_auth_result.get("gh_config_dir"),
+        git_askpass_path=git_auth_result.get("askpass_path"),
+        gitconfig_path=git_auth_result.get("gitconfig_path"),
     ))
 
-    out = {"env_written": True, "env_hash": env_result.env_hash, "auth_written": auth_written}
+    out = {"env_written": True, "env_hash": env_result.env_hash, "auth_written": auth_written, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host")}
     if auth_build.warning:
         out["auth_warning"] = auth_build.warning
     print(json.dumps(out))
