@@ -18,3 +18,10 @@ python -m pytest -q
 bash scripts/ci_unit.sh
 bash scripts/smoke.sh
 ```
+
+## Quick health check
+For a fast local sanity check, run just the runtime contract tests:
+```bash
+python -m pytest -q runtime_contract_tests
+```
+
