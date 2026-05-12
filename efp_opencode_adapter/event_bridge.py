@@ -5,7 +5,6 @@ import time
 from collections import OrderedDict
 from typing import Any
 
-from .index_loader import load_tools_index
 from .profile_store import sanitize_public_secrets
 from .thinking_events import safe_preview, utc_now_iso
 from .trace_context import add_trace_context, build_trace_context
@@ -146,19 +145,7 @@ def _map_task_id(task_store, opencode_session_id: str, message_ids: set[str]) ->
 
 
 def _build_tool_metadata(settings) -> dict[str, dict[str, Any]]:
-    out: dict[str, dict[str, Any]] = {}
-    for tool in load_tools_index(settings).get("tools", []):
-        if not isinstance(tool, dict):
-            continue
-        for key in ("name", "opencode_name", "legacy_name", "native_name", "capability_id", "tool_id"):
-            value = tool.get(key)
-            if isinstance(value, str) and value:
-                if value not in out:
-                    out[value] = tool
-                elif not bool(out[value].get("enabled", True)) and bool(tool.get("enabled", True)):
-                    out[value] = tool
-    return out
-
+    return {}
 
 
 
@@ -435,7 +422,7 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
             evt["data"].update(extra)
         meta = (tool_metadata or {}).get(str(tool)) or (tool_metadata or {}).get(str(s_tool))
         if isinstance(meta, dict):
-            tool_source = meta.get("source_ref") or "tools_repo"
+            tool_source = meta.get("source_ref") or "opencode"
         elif str(tool).lower() in _BUILTIN_TOOLS:
             tool_source = "opencode_builtin"
         else:
@@ -444,7 +431,7 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     else:
         meta = (tool_metadata or {}).get(str(tool)) or (tool_metadata or {}).get(str(s_tool))
         if isinstance(meta, dict):
-            tool_source = meta.get("source_ref") or "tools_repo"
+            tool_source = meta.get("source_ref") or "opencode"
         elif str(tool).lower() in _BUILTIN_TOOLS:
             tool_source = "opencode_builtin"
         else:

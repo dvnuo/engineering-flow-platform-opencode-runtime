@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from .index_loader import load_skills_index, load_tools_index, read_json_file
+from .index_loader import load_skills_index, read_json_file
 from .permission_generator import default_permission_baseline, skill_permission_state
 from .profile_store import sanitize_public_secrets
 from .settings import Settings
@@ -60,10 +60,6 @@ def load_skills_capabilities(settings: Settings) -> list[dict[str, Any]]:
     return out
 
 
-def load_tools_capabilities(settings: Settings) -> list[dict[str, Any]]:
-    return []
-
-
 def load_agent_capabilities(settings: Settings) -> list[dict[str, Any]]:
     cfg = read_json_file(settings.opencode_config_path) or {}
     agents = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
@@ -96,7 +92,7 @@ def normalize_mcp_capability(item: dict[str, Any]) -> dict[str, Any] | None:
 
 
 async def build_capability_catalog(settings: Settings, opencode_client=None) -> dict:
-    capabilities = [*BUILTIN_CAPABILITIES, *load_tools_capabilities(settings), *load_skills_capabilities(settings), *load_agent_capabilities(settings)]
+    capabilities = [*BUILTIN_CAPABILITIES, *load_skills_capabilities(settings), *load_agent_capabilities(settings)]
     if opencode_client and hasattr(opencode_client, "mcp"):
         try:
             mcp_data = await opencode_client.mcp()
