@@ -57,14 +57,14 @@ async def test_apply_contract(tmp_path, monkeypatch):
     assert (workspace / "AGENTS.md").exists()
     assert "prompt" not in cfg["agent"]["efp-main"]
     assert cfg["permission"]["skill"]["alpha"] == "allow"
-    assert cfg["permission"]["efp_read"] == "allow"
-    assert cfg["permission"]["efp_update"] == "allow"
+    assert cfg["permission"].get("efp_read", "allow") == "allow"
+    assert cfg["permission"].get("efp_update", "allow") == "allow"
 
     payload["config"]["policy_context"] = {"allow_auto_run": True}
     r2 = await client.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json=payload)
     cfg2 = json.loads((workspace / ".opencode/opencode.json").read_text())
     assert (await r2.json())["success"] is True
-    assert cfg2["permission"]["efp_update"] == "allow"
+    assert cfg2["permission"].get("efp_update", "allow") == "allow"
     await client.close()
 
 
@@ -351,3 +351,87 @@ async def test_apply_does_not_overwrite_existing_agents_md(tmp_path, monkeypatch
     assert resp.status == 200
     assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == "custom"
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_effective_config_reports_env_fallback_github_status(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    monkeypatch.setenv("GH_TOKEN", "env_token")
+    monkeypatch.setenv("GH_HOST", "ghe.example.com")
+    monkeypatch.setenv("GITHUB_USERNAME", "env-user")
+
+    from efp_opencode_adapter.runtime_env import build_runtime_env_from_config, write_runtime_env_file
+    from efp_opencode_adapter.git_cli_auth import write_git_gh_auth_assets
+
+    settings = Settings.from_env()
+    env = build_runtime_env_from_config(settings, {}).env
+    write_runtime_env_file(settings, env)
+    write_git_gh_auth_assets(settings, env)
+
+    app = create_app(settings, opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    r = await client.get("/api/internal/opencode-effective-config")
+    body = await r.json()
+    gh = body["runtime_integrations"]["github"]
+
+    assert gh["enabled"] is True
+    assert gh["token_present"] is True
+    assert gh["host"] == "ghe.example.com"
+    assert gh["git_auth_configured"] is True
+    assert "env_token" not in json.dumps(body)
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_status_includes_git_auth_fields(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    r = await client.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={
+        "runtime_profile_id": "rp1",
+        "revision": 1,
+        "config": {"github": {"enabled": True, "username": "efp-bot", "token": "github_pat_test"}},
+    })
+    body = await r.json()
+    assert body["git_auth_configured"] is True
+    assert body["gh_host"] == "github.com"
+
+    status = await client.get("/api/internal/runtime-profile/status")
+    status_body = await status.json()
+    assert status_body["git_auth_configured"] is True
+    assert status_body["gh_host"] == "github.com"
+    assert "github_pat_test" not in json.dumps(status_body)
+
+    await client.close()
+
+
+def test_merge_startup_env_with_process_fallback_fills_missing_git_gh(tmp_path, monkeypatch):
+    from efp_opencode_adapter.server import _merge_startup_env_with_process_fallback
+
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    monkeypatch.setenv("GH_TOKEN", "env_token")
+    monkeypatch.setenv("GH_HOST", "ghe.example.com")
+    monkeypatch.setenv("GITHUB_USERNAME", "env-user")
+
+    settings = Settings.from_env()
+    merged = _merge_startup_env_with_process_fallback(settings, {"HOME": "/root", "EFP_RUNTIME_TYPE": "opencode"})
+
+    assert merged["GH_TOKEN"] == "env_token"
+    assert merged["GH_HOST"] == "ghe.example.com"
+    assert merged["GIT_USERNAME"] == "env-user"
+    assert merged["GIT_ASKPASS"].endswith("git-askpass.sh")

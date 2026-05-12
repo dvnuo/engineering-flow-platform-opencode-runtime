@@ -62,6 +62,11 @@ class ProfileOverlay:
     last_restart_at: str | None = None
     last_restart_reason: str | None = None
     health_ok: bool | None = None
+    git_auth_configured: bool = False
+    gh_host: str | None = None
+    gh_config_dir: str | None = None
+    git_askpass_path: str | None = None
+    gitconfig_path: str | None = None
 
 
 def redact_secrets(value: Any) -> Any:
@@ -123,6 +128,11 @@ class ProfileOverlayStore:
             last_restart_at=(str(payload.get("last_restart_at")) if payload.get("last_restart_at") is not None else None),
             last_restart_reason=(str(payload.get("last_restart_reason")) if payload.get("last_restart_reason") is not None else None),
             health_ok=(bool(payload.get("health_ok")) if payload.get("health_ok") is not None else None),
+            git_auth_configured=bool(payload.get("git_auth_configured", False)),
+            gh_host=(str(payload.get("gh_host")) if payload.get("gh_host") is not None else None),
+            gh_config_dir=(str(payload.get("gh_config_dir")) if payload.get("gh_config_dir") is not None else None),
+            git_askpass_path=(str(payload.get("git_askpass_path")) if payload.get("git_askpass_path") is not None else None),
+            gitconfig_path=(str(payload.get("gitconfig_path")) if payload.get("gitconfig_path") is not None else None),
         )
 
     def save(self, overlay: ProfileOverlay) -> None:
@@ -158,4 +168,9 @@ def build_profile_status_payload(settings: Settings) -> dict[str, Any]:
         "last_restart_at": overlay.last_restart_at,
         "last_restart_reason": overlay.last_restart_reason,
         "health_ok": overlay.health_ok,
+        "git_auth_configured": overlay.git_auth_configured,
+        "gh_host": overlay.gh_host,
+        "gh_config_dir": overlay.gh_config_dir,
+        "git_askpass_path": overlay.git_askpass_path,
+        "gitconfig_path": overlay.gitconfig_path,
     }

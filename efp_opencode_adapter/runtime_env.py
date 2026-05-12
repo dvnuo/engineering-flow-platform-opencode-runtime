@@ -164,8 +164,8 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
     github_host = _github_host_from_urls(
         github.get("host") if isinstance(github, dict) else None,
         github.get("web_base_url") if isinstance(github, dict) else None,
-        github_api_base_url,
         os.getenv("GH_HOST"),
+        github_api_base_url,
     )
     if github_token:
         env["GITHUB_TOKEN"] = github_token

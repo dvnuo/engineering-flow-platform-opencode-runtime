@@ -101,6 +101,11 @@ async def _run(workspace_dir: Path) -> int:
         applied=True,
         env_hash=env_result.env_hash,
         env_path=str(env_path),
+        git_auth_configured=bool(git_auth_result.get("configured")),
+        gh_host=git_auth_result.get("host"),
+        gh_config_dir=git_auth_result.get("gh_config_dir"),
+        git_askpass_path=git_auth_result.get("askpass_path"),
+        gitconfig_path=git_auth_result.get("gitconfig_path"),
     ))
 
     out = {"env_written": True, "env_hash": env_result.env_hash, "auth_written": auth_written, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host")}

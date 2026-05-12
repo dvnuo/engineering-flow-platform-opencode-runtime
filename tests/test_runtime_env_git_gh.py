@@ -58,3 +58,33 @@ def test_runtime_env_git_author_fallback(tmp_path, monkeypatch):
     result = build_runtime_env_from_config(settings, {"github": {"enabled": True, "token": "t"}})
     assert result.env["GIT_AUTHOR_NAME"] == "fallback-user"
     assert result.env["GIT_AUTHOR_EMAIL"] == "fallback@example.com"
+
+
+def test_runtime_env_uses_env_gh_host_before_default_api_url(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path)
+    monkeypatch.setenv("GH_TOKEN", "env_token")
+    monkeypatch.setenv("GH_HOST", "ghe.example.com")
+
+    result = build_runtime_env_from_config(settings, {})
+    env = result.env
+
+    assert env["GH_TOKEN"] == "env_token"
+    assert env["GH_HOST"] == "ghe.example.com"
+    assert env["GH_ENTERPRISE_TOKEN"] == "env_token"
+    assert env["GITHUB_ENTERPRISE_TOKEN"] == "env_token"
+
+
+def test_runtime_env_config_host_beats_env_gh_host(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path)
+    monkeypatch.setenv("GH_HOST", "env.example.com")
+
+    result = build_runtime_env_from_config(settings, {
+        "github": {
+            "enabled": True,
+            "token": "t",
+            "host": "portal.example.com",
+            "api_base_url": "https://api.portal.example.com"
+        }
+    })
+
+    assert result.env["GH_HOST"] == "portal.example.com"

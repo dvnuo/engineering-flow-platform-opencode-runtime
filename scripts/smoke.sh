@@ -33,6 +33,5 @@ curl -fsS http://localhost:8000/api/capabilities | jq -e '.engine == "opencode"'
 if [[ "${RUN_RUNTIME_CONTRACT_TESTS}" == "1" ]]; then
   timeout "${RUNTIME_CONTRACT_TIMEOUT_SECONDS}" env "RUNTIME_BASE_URL=${RUNTIME_CONTRACT_BASE_URL}" python -m pytest -q runtime_contract_tests
 fi
-git --version
-gh --version
+docker exec "${NAME}" bash -lc 'git --version && gh --version'
 echo "smoke passed"
