@@ -502,3 +502,22 @@ async def test_runtime_profile_status_reports_env_fallback_without_overlay(tmp_p
     assert "env_token" not in json.dumps(body)
 
     await client.close()
+
+
+def test_merge_startup_env_sets_git_config_nosystem(tmp_path):
+    from efp_opencode_adapter.server import _merge_startup_env_with_process_fallback
+
+    settings = Settings(
+        opencode_url="http://127.0.0.1:4096",
+        adapter_state_dir=tmp_path / "state",
+        workspace_dir=tmp_path / "workspace",
+        skills_dir=tmp_path / "skills",
+        workspace_repos_dir=tmp_path / "workspace" / "repos",
+        git_checkout_timeout_seconds=120,
+        opencode_data_dir=tmp_path / "opencode-data",
+        opencode_config_path=tmp_path / "workspace" / ".opencode" / "opencode.json",
+        opencode_version="1.14.39",
+        ready_timeout_seconds=1,
+    )
+    merged = _merge_startup_env_with_process_fallback(settings, {})
+    assert merged["GIT_CONFIG_NOSYSTEM"] == "1"

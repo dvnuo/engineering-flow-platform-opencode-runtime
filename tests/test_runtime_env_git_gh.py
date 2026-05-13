@@ -88,3 +88,13 @@ def test_runtime_env_config_host_beats_env_gh_host(tmp_path, monkeypatch):
     })
 
     assert result.env["GH_HOST"] == "portal.example.com"
+
+
+def test_runtime_env_sets_git_config_even_without_token(tmp_path):
+    settings = make_settings(tmp_path)
+    env = build_runtime_env_from_config(settings, {}).env
+    assert env["GIT_CONFIG_GLOBAL"].endswith("gitconfig")
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["GIT_ASKPASS"].endswith("git-askpass.sh")
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_EDITOR"] == "true"
