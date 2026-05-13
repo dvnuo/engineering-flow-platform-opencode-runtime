@@ -25,7 +25,7 @@ def test_package_lock_tracks_declared_opencode_package_versions():
     package_payload = _read_json(package_json_path)
     dependencies = package_payload.get("dependencies") or {}
 
-    for package_name in ("opencode-ai", "@opencode-ai/plugin"):
+    for package_name in ("opencode-ai",):
         declared_version = dependencies.get(package_name)
         assert declared_version is not None
         locked_version = _resolve_locked_version(lock_payload, package_name)

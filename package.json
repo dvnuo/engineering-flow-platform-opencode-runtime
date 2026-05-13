@@ -7,7 +7,6 @@
     "smoke": "bash scripts/smoke.sh"
   },
   "dependencies": {
-    "opencode-ai": "1.14.39",
-    "@opencode-ai/plugin": "1.14.39"
+    "opencode-ai": "1.14.39"
   }
 }
