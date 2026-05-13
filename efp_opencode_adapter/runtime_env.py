@@ -18,7 +18,7 @@ MANAGED_EXTERNAL_ENV_KEYS = {
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
     "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
     "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "GH_PROMPT_DISABLED", "GH_REPO",
-    "GIT_USERNAME", "GIT_PASSWORD", "GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL", "GIT_EDITOR",
+    "GIT_USERNAME", "GIT_PASSWORD", "GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_EDITOR",
 }
 _REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
 
@@ -167,20 +167,22 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         os.getenv("GH_HOST"),
         github_api_base_url,
     )
+    env["GH_CONFIG_DIR"] = str(settings.adapter_state_dir / "gh")
+    env["GH_PROMPT_DISABLED"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = str(settings.adapter_state_dir / "git-askpass.sh")
+    env["GIT_CONFIG_GLOBAL"] = str(settings.adapter_state_dir / "gitconfig")
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_EDITOR"] = "true"
+
     if github_token:
         env["GITHUB_TOKEN"] = github_token
         env["GITHUB_ACCESS_TOKEN"] = github_token
         env["GH_TOKEN"] = github_token
         env["GITHUB_API_BASE_URL"] = github_api_base_url
         env["GH_HOST"] = github_host
-        env["GH_CONFIG_DIR"] = str(settings.adapter_state_dir / "gh")
-        env["GH_PROMPT_DISABLED"] = "1"
         env["GIT_USERNAME"] = github_username
         env["GIT_PASSWORD"] = github_token
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        env["GIT_ASKPASS"] = str(settings.adapter_state_dir / "git-askpass.sh")
-        env["GIT_CONFIG_GLOBAL"] = str(settings.adapter_state_dir / "gitconfig")
-        env["GIT_EDITOR"] = "true"
         if not _is_github_dotcom_like(github_host):
             env["GH_ENTERPRISE_TOKEN"] = github_token
             env["GITHUB_ENTERPRISE_TOKEN"] = github_token
