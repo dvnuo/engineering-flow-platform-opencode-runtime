@@ -217,6 +217,7 @@ async def _send_skill_prompt(
     request_id: str,
     command_error: str | None = None,
     repository_context: Any | None = None,
+    user_message_id: str | None = None,
 ) -> Any:
     prompt = build_skill_prompt(skill_decision.skill or {}, invocation)
     if repository_context is not None:
@@ -237,6 +238,7 @@ async def _send_skill_prompt(
         model=model,
         agent=agent,
         system=system,
+        message_id=user_message_id,
     )
     prompt_data = {
         "skill": skill_decision.skill.get("opencode_name") if skill_decision.skill else invocation.skill_name
@@ -268,14 +270,44 @@ def _redact_attachment_payloads_for_debug(value: Any) -> Any:
                 out[key] = "data:<redacted>"
             else:
                 out[key] = _redact_attachment_payloads_for_debug(item)
-    if binding_store is not None:
-        binding_store.complete(request_id)
-    return out
+        return out
     if isinstance(value, list):
         return [_redact_attachment_payloads_for_debug(item) for item in value]
     if isinstance(value, str):
         return DATA_URL_RE.sub("data:<redacted>;base64,<redacted>", value)
     return value
+
+
+def _completion_progress_signature(probe: dict[str, Any], assistant_text: str, after_messages: list[dict[str, Any]] | None) -> tuple[str, str, int]:
+    message_id = str(probe.get("message_id") or "")
+    text_preview = safe_preview(assistant_text or "", 120)
+    msg_count = len(after_messages or [])
+    return (message_id, text_preview, msg_count)
+
+
+def _looks_progress_only_text(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t.startswith(("i am ", "i'm ", "working", "reading", "let me"))
+
+
+def _should_auto_continue(state: str, probe: dict[str, Any], assistant_text: str, settings) -> tuple[bool, str]:
+    if not settings.chat_auto_continue_enabled:
+        return False, "auto_continue_disabled"
+    if state in {"blocked", "error", "completed", "empty_final"}:
+        return False, "terminal_state"
+    if not (assistant_text or "").strip():
+        return False, "empty_assistant_text"
+    reason = str(probe.get("reason") or "").lower()
+    disallow_reasons = {"pending_permission", "tool_error", "provider_error", "auth_error", "cancelled", "user_cancelled"}
+    if reason in disallow_reasons:
+        return False, f"disallowed_reason:{reason}"
+    if reason in {"final_assistant_message_timeout", "length", "continue", "tool_use", "tool_calls"}:
+        return True, f"reason:{reason}"
+    if state == "incomplete" and _looks_progress_only_text(assistant_text):
+        return True, "state_incomplete_progress_text"
+    if _looks_progress_only_text(assistant_text):
+        return True, "progress_only_text"
+    return False, "not_eligible"
 
 
 async def _ensure_record_for_chat(*, client, store, portal_session_id: str, title: str, agent: str | None, model: str | None) -> tuple[SessionRecord, bool]:
@@ -404,6 +436,9 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
 
         invocation = parse_slash_invocation(message)
         skill_debug = None
+        initial_user_message_id = payload.get("message_id") if isinstance(payload.get("message_id"), str) and payload.get("message_id", "").strip() else f"portal-user-{request_id}"
+        if binding_store is not None:
+            binding_store.bind_message(record.opencode_session_id, initial_user_message_id, portal_session_id, request_id, kind="chat")
         if invocation:
             skill_decision = evaluate_skill_invocation(settings, invocation)
             executed_native_command = False
@@ -535,6 +570,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                             request_id=request_id,
                             command_error=error_preview,
                             repository_context=repository_context,
+                            user_message_id=initial_user_message_id,
                         )
                 else:
                     response_payload = await _send_skill_prompt(
@@ -553,9 +589,10 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                         portal_session_id=portal_session_id,
                         request_id=request_id,
                         repository_context=repository_context,
+                        user_message_id=initial_user_message_id,
                     )
         else:
-            response_payload = await client.send_message(record.opencode_session_id, parts=parts, model=model, agent=agent, system=system)
+            response_payload = await client.send_message(record.opencode_session_id, parts=parts, model=model, agent=agent, system=system, message_id=initial_user_message_id)
         completion_probe, waited_messages = await _wait_for_assistant_completion(
             client=client,
             opencode_session_id=record.opencode_session_id,
@@ -568,19 +605,11 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         continuation_count = 0
         continuation_debug: list[dict[str, Any]] = []
         completion_state = str(completion_probe.get("completion_state") or "incomplete")
-        def _should_continue(state: str, probe: dict[str, Any], text: str) -> bool:
-            if not settings.chat_auto_continue_enabled:
-                return False
-            reason = str(probe.get("reason") or "").lower()
-            if state in {"blocked", "error", "completed"}:
-                return False
-            if state == "incomplete":
-                return True
-            if reason in {"final_assistant_message_timeout", "length", "continue", "tool_use", "tool_calls"}:
-                return True
-            return bool(text.strip()) and text.strip().lower().startswith(("i am ", "i'm ", "working", "reading", "let me"))
-
-        while continuation_count < settings.chat_auto_continue_max_turns and _should_continue(completion_state, completion_probe, assistant_text):
+        assistant_text = str(completion_probe.get("text") or extract_assistant_text(response_payload) or "")
+        incomplete_reason = str(completion_probe.get("reason") or "")
+        last_sig = _completion_progress_signature(completion_probe, assistant_text, waited_messages)
+        allow_continue, continue_reason = _should_auto_continue(completion_state, completion_probe, assistant_text, settings)
+        while continuation_count < settings.chat_auto_continue_max_turns and allow_continue:
             continuation_count += 1
             cont_id = f"efp-auto-continue-{request_id}-{continuation_count}"
             if binding_store is not None:
@@ -588,17 +617,33 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             cont_evt = add_trace_context({"type":"continuation.started","session_id":portal_session_id,"request_id":request_id,"opencode_session_id":record.opencode_session_id,"data":{"index":continuation_count}}, trace_context)
             runtime_events.append(cont_evt); await bus.publish(cont_evt)
             before_messages = await client.list_messages(record.opencode_session_id)
-            await client.send_message(record.opencode_session_id, parts=[{"type":"text","text":settings.chat_auto_continue_prompt}], model=model, agent=agent, system=system, message_id=cont_id)
-            completion_probe, after_messages = await _wait_for_assistant_completion(client=client, opencode_session_id=record.opencode_session_id, response_payload=after_messages, before_messages=before_messages, timeout_seconds=settings.chat_completion_timeout_seconds, poll_seconds=settings.chat_completion_poll_seconds)
-            assistant_text = str(completion_probe.get("text") or assistant_text)
+            try:
+                continuation_response_payload = await client.send_message(record.opencode_session_id, parts=[{"type":"text","text":settings.chat_auto_continue_prompt}], model=model, agent=agent, system=system, message_id=cont_id)
+                completion_probe, after_messages = await _wait_for_assistant_completion(client=client, opencode_session_id=record.opencode_session_id, response_payload=continuation_response_payload, before_messages=before_messages, timeout_seconds=settings.chat_completion_timeout_seconds, poll_seconds=settings.chat_completion_poll_seconds)
+            except Exception as exc:
+                failed_evt = add_trace_context({"type":"continuation.failed","session_id":portal_session_id,"request_id":request_id,"opencode_session_id":record.opencode_session_id,"data":{"index":continuation_count,"error":safe_preview(str(exc),300)}}, trace_context)
+                runtime_events.append(failed_evt); await bus.publish(failed_evt)
+                completion_state = "incomplete"
+                incomplete_reason = "auto_continue_failed"
+                break
+            assistant_text = str(completion_probe.get("text") or extract_assistant_text(continuation_response_payload) or assistant_text)
             completion_state = str(completion_probe.get("completion_state") or completion_state)
-            continuation_debug.append({"index": continuation_count, "completion_state": completion_state, "reason": completion_probe.get("reason")})
+            continuation_debug.append({"index": continuation_count, "completion_state": completion_state, "reason": completion_probe.get("reason"), "message_id": cont_id, "text_preview": safe_preview(assistant_text, 200)})
             done_evt = add_trace_context({"type":"continuation.completed","session_id":portal_session_id,"request_id":request_id,"opencode_session_id":record.opencode_session_id,"data":{"index":continuation_count,"completion_state":completion_state}}, trace_context)
             runtime_events.append(done_evt); await bus.publish(done_evt)
-
-        assistant_text = str(completion_probe.get("text") or "")
-        incomplete_reason = ""
-        if completion_state != "completed":
+            new_sig = _completion_progress_signature(completion_probe, assistant_text, after_messages)
+            if settings.chat_auto_continue_no_progress_stop and assistant_text.strip() and new_sig == last_sig:
+                incomplete_reason = "auto_continue_no_progress"
+                allow_continue = False
+                completion_state = "incomplete"
+                break
+            last_sig = new_sig
+            allow_continue, continue_reason = _should_auto_continue(completion_state, completion_probe, assistant_text, settings)
+            incomplete_reason = str(completion_probe.get("reason") or continue_reason or "")
+        if completion_state != "completed" and continuation_count >= settings.chat_auto_continue_max_turns and allow_continue:
+            completion_state = "incomplete"
+            incomplete_reason = "auto_continue_max_turns_reached"
+        if completion_state != "completed" and not incomplete_reason:
             incomplete_reason = str(completion_probe.get("reason") or "assistant_completion_not_final")
         payload_message = response_payload.get("message") if isinstance(response_payload, dict) else None
         if isinstance(payload_message, dict):
@@ -607,7 +652,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                 think_event = add_trace_context({"type": "llm_thinking", "engine": "opencode", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "message": safe_preview(item, 300), "data": {"message": safe_preview(item, 300)}, "created_at": utc_now_iso()}, trace_context)
                 runtime_events.append(think_event)
                 await bus.publish(think_event)
-        user_message_id = ""
+        user_message_id = initial_user_message_id
         assistant_message_id = ""
         assistant_message_ids: list[str] = []
         if not before_snapshot_unreliable:
@@ -639,6 +684,10 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             assistant_message_id = assistant_message_ids[-1]
         elif assistant_message_id:
             assistant_message_ids = [assistant_message_id]
+        if binding_store is not None:
+            for _aid in [assistant_message_id, *assistant_message_ids]:
+                if _aid:
+                    binding_store.bind_message(record.opencode_session_id, _aid, portal_session_id, request_id, kind="assistant")
         if skill_debug and not skill_debug.get("blocked"):
             completed_evt = add_trace_context({"type": "skill.completed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"skill": skill_debug.get("skill_name"), "kind": skill_debug.get("kind", "skill"), "used_command_api": bool(skill_debug.get("used_command_api")), "used_skill_prompt": bool(skill_debug.get("used_skill_prompt"))}}, trace_context)
             runtime_events.append(completed_evt)
@@ -934,9 +983,9 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         try:
             final_result = run_task.result()
         except web.HTTPException as exc:
-            error_payload = {"error": "chat_failed", "detail": exc.text}
+            error_payload = {"error": "chat_failed", "detail": exc.text, "session_id": session_id, "request_id": req_id}
         except Exception as exc:
-            error_payload = {"error": "chat_failed", "detail": safe_preview(str(exc), 500)}
+            error_payload = {"error": "chat_failed", "detail": safe_preview(str(exc), 500), "session_id": session_id, "request_id": req_id}
 
         deadline = asyncio.get_running_loop().time() + 0.1
         drained = 0
@@ -949,6 +998,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
 
         if error_payload:
             await _write_sse(resp, "error", error_payload)
+            await _write_sse(resp, "done", {"ok": True})
         else:
             await _write_sse(resp, "final", final_result or {})
             await _write_sse(resp, "done", {"ok": True})
@@ -959,9 +1009,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         if not run_task.done():
             if not client_disconnected:
                 run_task.cancel()
-            await asyncio.gather(run_task, return_exceptions=True)
-        elif client_disconnected:
-            await asyncio.gather(run_task, return_exceptions=True)
+                await asyncio.gather(run_task, return_exceptions=True)
         if not client_disconnected:
             await _safe_write_eof(resp)
     return resp

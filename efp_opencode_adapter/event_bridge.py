@@ -533,6 +533,9 @@ class OpenCodeEventBridge:
                 data = event.get("data") if isinstance(event.get("data"), dict) else {}
                 data["request_id"] = binding.request_id
                 data["portal_request_id"] = binding.request_id
+                data["opencode_session_id"] = binding.opencode_session_id
+                if binding.task_id:
+                    data["task_id"] = binding.task_id
                 event["data"] = data
                 if binding.task_id and not event.get("task_id"):
                     event["task_id"] = binding.task_id

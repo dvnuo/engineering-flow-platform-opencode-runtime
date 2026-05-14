@@ -77,7 +77,8 @@ def message_to_text(message: Any) -> str:
 
 
 def _to_efp_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [to_efp_message(msg, index=idx) for idx, msg in enumerate(messages)]
+    filtered = [msg for msg in messages if not _message_id(msg).startswith("efp-auto-continue-")]
+    return [to_efp_message(msg, index=idx) for idx, msg in enumerate(filtered)]
 
 
 def _message_id(message: Any, fallback: str = "") -> str:

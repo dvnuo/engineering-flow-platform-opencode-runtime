@@ -32,3 +32,16 @@ async def test_request_binding_injected_into_event(tmp_path, monkeypatch):
     assert event['session_id'] == 'portal-1'
     assert event['request_id'] == 'req-1'
     assert got['request_id'] == 'req-1'
+
+@pytest.mark.asyncio
+async def test_event_bridge_injects_opencode_session_in_data(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_WORKSPACE_DIR', str(tmp_path / 'workspace'))
+    settings = Settings.from_env(); paths = ensure_state_dirs(settings)
+    bus = EventBus(); bindings = RequestBindingStore()
+    bindings.bind_message('oc-2', 'm-2', 'portal-2', 'req-2')
+    bridge = OpenCodeEventBridge(settings, FakeClient(), bus, SessionStore(paths.sessions_dir), TaskStore(paths.tasks_dir), request_binding_store=bindings)
+    event = await bridge.publish_raw_event({'type':'message.part.delta','sessionID':'oc-2','properties':{'sessionID':'oc-2','messageID':'m-2','partID':'p1','delta':'x'}})
+    assert event['data']['request_id'] == 'req-2'
+    assert event['data']['portal_request_id'] == 'req-2'
+    assert event['data']['opencode_session_id'] == 'oc-2'
