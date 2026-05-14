@@ -45,3 +45,25 @@ async def test_event_bridge_injects_opencode_session_in_data(tmp_path, monkeypat
     assert event['data']['request_id'] == 'req-2'
     assert event['data']['portal_request_id'] == 'req-2'
     assert event['data']['opencode_session_id'] == 'oc-2'
+
+
+@pytest.mark.asyncio
+async def test_raw_request_id_does_not_override_portal_binding_and_chatlog_append(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_WORKSPACE_DIR', str(tmp_path / 'workspace'))
+    settings = Settings.from_env(); paths = ensure_state_dirs(settings)
+    bus = EventBus(); bindings = RequestBindingStore()
+    from efp_opencode_adapter.chatlog_store import ChatLogStore
+    chatlog_store = ChatLogStore(paths.chatlogs_dir)
+    chatlog_store.start_entry('portal_sess', request_id='portal_req', message='hello', runtime_events=[], context_state={})
+    bindings.bind_message('oc_sess', 'oc_msg', 'portal_sess', 'portal_req')
+    bridge = OpenCodeEventBridge(settings, FakeClient(), bus, SessionStore(paths.sessions_dir), TaskStore(paths.tasks_dir), chatlog_store=chatlog_store, request_binding_store=bindings)
+    event = await bridge.publish_raw_event({'type': 'message.part.delta', 'id': 'raw_event_id', 'sessionID': 'oc_sess', 'properties': {'sessionID': 'oc_sess', 'messageID': 'oc_msg', 'partID': 'p1', 'requestID': 'raw_open_code_request', 'delta': 'x'}})
+    assert event['request_id'] == 'portal_req'
+    assert event['portal_request_id'] == 'portal_req'
+    assert event['opencode_session_id'] == 'oc_sess'
+    assert event['data']['request_id'] == 'portal_req'
+    assert event['data']['opencode_session_id'] == 'oc_sess'
+    assert event.get('raw_request_id')
+    latest = chatlog_store.latest_entry('portal_sess')
+    assert latest and latest.get('runtime_events')

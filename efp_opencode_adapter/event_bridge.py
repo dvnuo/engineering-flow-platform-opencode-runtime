@@ -248,7 +248,8 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
 
     opencode_session_id = _raw_session_id_from_event(raw_event, canonical, values)
     permission_id = _first_string(values, "permissionID", "permission_id", "requestID", "request_id", "id")
-    request_id = _first_string(values, "requestID", "request_id", "id")
+    portal_request_id = _first_string(values, "portal_request_id")
+    opencode_request_id = _first_string(values, "requestID", "request_id", "id")
     tool = _tool_name(values)
     input_preview = _first_string(values, "input", "arguments", "args", "params", "command")
     output_preview = _first_string(values, "output", "result", "response")
@@ -359,7 +360,8 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
 
     s_session_id = _sanitize_event_text(session_id, 300)
     s_opencode_session_id = _sanitize_event_text(opencode_session_id, 300)
-    s_request_id = _sanitize_event_text(request_id, 300)
+    s_request_id = _sanitize_event_text(portal_request_id, 300)
+    s_raw_request_id = _sanitize_event_text(opencode_request_id, 300)
     s_raw_type = _sanitize_event_text(raw_type, 200)
 
     evt = {
@@ -376,6 +378,11 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         "created_at": utc_now_iso(),
         "ts": time.time(),
     }
+    if s_raw_request_id:
+        evt["raw_request_id"] = s_raw_request_id
+        evt["opencode_request_id"] = s_raw_request_id
+        evt["data"]["raw_request_id"] = s_raw_request_id
+        evt["data"]["opencode_request_id"] = s_raw_request_id
     if normalized_type == "provider.retry":
         evt["state"] = "retrying"
         evt["summary"] = "Provider API retry"
@@ -523,7 +530,7 @@ class OpenCodeEventBridge:
         event = normalize_opencode_event(raw_event, session_store=self.session_store, task_store=self.task_store, settings=self.settings, tool_metadata=self.tool_metadata, message_role=message_role, part_meta=part_meta)
         if not event:
             return None
-        if (not event.get("request_id")) and self.request_binding_store is not None:
+        if self.request_binding_store is not None and session_id:
             binding = self.request_binding_store.resolve(opencode_session_id=session_id, message_id=message_id, task_id=str(event.get("task_id") or ""))
             if binding is not None:
                 event["session_id"] = binding.portal_session_id

@@ -293,16 +293,18 @@ def _looks_progress_only_text(text: str) -> bool:
 def _should_auto_continue(state: str, probe: dict[str, Any], assistant_text: str, settings) -> tuple[bool, str]:
     if not settings.chat_auto_continue_enabled:
         return False, "auto_continue_disabled"
-    if state in {"blocked", "error", "completed", "empty_final"}:
+    if state in {"blocked", "error", "completed", "success", "empty_final"}:
         return False, "terminal_state"
-    if not (assistant_text or "").strip():
-        return False, "empty_assistant_text"
     reason = str(probe.get("reason") or "").lower()
     disallow_reasons = {"pending_permission", "tool_error", "provider_error", "auth_error", "cancelled", "user_cancelled"}
     if reason in disallow_reasons:
         return False, f"disallowed_reason:{reason}"
-    if reason in {"final_assistant_message_timeout", "length", "continue", "tool_use", "tool_calls"}:
+    if reason in {"final_assistant_message_timeout", "length", "continue", "tool_use", "tool_calls", "assistant_in_progress", "incomplete"}:
         return True, f"reason:{reason}"
+    if state == "incomplete":
+        return True, "state_incomplete"
+    if not (assistant_text or "").strip():
+        return False, "empty_assistant_text"
     if state == "incomplete" and _looks_progress_only_text(assistant_text):
         return True, "state_incomplete_progress_text"
     if _looks_progress_only_text(assistant_text):
