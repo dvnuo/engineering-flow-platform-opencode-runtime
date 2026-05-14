@@ -736,3 +736,18 @@ async def test_execute_command_uses_command_api(monkeypatch):
     assert captured['body']['arguments'] == 'hello world'
     assert captured['body']['model'] == {'providerID': 'anthropic', 'modelID': 'claude-sonnet-4'}
     await server.close()
+
+
+@pytest.mark.asyncio
+async def test_send_message_uses_submit_timeout(monkeypatch):
+    settings = Settings.from_env()
+    client = OpenCodeClient(settings)
+    captured = {}
+
+    async def _fake(method, path, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(client, "_request_json", _fake)
+    await client.send_message("s1", parts=[{"type":"text","text":"hi"}], model=None, agent=None)
+    assert captured["timeout_seconds"] >= 300

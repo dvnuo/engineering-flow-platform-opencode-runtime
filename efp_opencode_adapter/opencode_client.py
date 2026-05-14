@@ -414,7 +414,8 @@ class OpenCodeClient:
             payload["agent"] = agent
         if system:
             payload["system"] = system
-        return await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200,))
+        submit_timeout = max(300, int(getattr(self.settings, "chat_submit_timeout_seconds", getattr(self.settings, "chat_completion_timeout_seconds", 300))))
+        return await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200,), timeout_seconds=submit_timeout)
 
     async def fork_session(self, session_id: str, message_id: str | None = None) -> dict:
         payload = {"messageID": message_id} if message_id else {}

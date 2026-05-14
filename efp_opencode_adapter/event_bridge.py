@@ -443,13 +443,14 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
 
 
 class OpenCodeEventBridge:
-    def __init__(self, settings, client, event_bus, session_store, task_store, chatlog_store=None):
+    def __init__(self, settings, client, event_bus, session_store, task_store, chatlog_store=None, request_binding_store=None):
         self.settings = settings
         self.client = client
         self.event_bus = event_bus
         self.session_store = session_store
         self.task_store = task_store
         self.chatlog_store = chatlog_store
+        self.request_binding_store = request_binding_store
         self.enabled = True
         self.running = False
         self.connected = False
@@ -522,6 +523,19 @@ class OpenCodeEventBridge:
         event = normalize_opencode_event(raw_event, session_store=self.session_store, task_store=self.task_store, settings=self.settings, tool_metadata=self.tool_metadata, message_role=message_role, part_meta=part_meta)
         if not event:
             return None
+        if (not event.get("request_id")) and self.request_binding_store is not None:
+            binding = self.request_binding_store.resolve(opencode_session_id=session_id, message_id=message_id, task_id=str(event.get("task_id") or ""))
+            if binding is not None:
+                event["session_id"] = binding.portal_session_id
+                event["request_id"] = binding.request_id
+                event["portal_request_id"] = binding.request_id
+                event["opencode_session_id"] = binding.opencode_session_id
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                data["request_id"] = binding.request_id
+                data["portal_request_id"] = binding.request_id
+                event["data"] = data
+                if binding.task_id and not event.get("task_id"):
+                    event["task_id"] = binding.task_id
         self.last_event_at = event.get("created_at")
         self.last_raw_type = event.get("raw_type", "")
         await self.event_bus.publish(event)
