@@ -2,7 +2,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from efp_opencode_adapter.server import create_app
-from efp_opencode_adapter.sessions_api import _extract_opencode_session_id
+from efp_opencode_adapter.sessions_api import _extract_opencode_session_id, _to_efp_messages
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
 from efp_opencode_adapter.app_keys import SESSION_STORE_KEY, PORTAL_METADATA_CLIENT_KEY, CHATLOG_STORE_KEY
 from efp_opencode_adapter.settings import Settings
@@ -446,3 +446,16 @@ async def test_clear_sessions_partial_opencode_failure_skips_chatlog_and_metadat
     assert set(pm.calls) == {'s1','s2'}
     assert set(chatlog.calls) == {'s1','s2'}
     await client.close()
+
+
+def test_to_efp_messages_filters_internal_auto_continue_metadata():
+    raw = [
+        {"id": "msg_user_1", "role": "user", "parts": [{"type": "text", "text": "hi"}]},
+        {"id": "msg_internal_1", "role": "user", "parts": [{"type": "text", "text": "continue", "metadata": {"efp_internal": "auto_continue"}}]},
+        {"id": "efp-auto-continue-legacy", "role": "user", "parts": [{"type": "text", "text": "legacy"}]},
+    ]
+    out = _to_efp_messages(raw)
+    ids = [m.get("id") for m in out]
+    assert "msg_user_1" in ids
+    assert "msg_internal_1" not in ids
+    assert "efp-auto-continue-legacy" not in ids

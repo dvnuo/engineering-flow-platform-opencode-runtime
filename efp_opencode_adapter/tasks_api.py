@@ -412,7 +412,7 @@ async def execute_task_handler(request: web.Request) -> web.Response:
         if metadata.get("system_prompt"):
             prompt_payload["system"] = metadata.get("system_prompt")
 
-        opencode_message_id = f"efp-task-{uuid4().hex}"
+        opencode_message_id = new_opencode_message_id()
         prompt_payload["messageID"] = opencode_message_id
         record = task_store.update(task_id, status="running", started_at=utc_now_iso(), opencode_prompt_id=opencode_message_id, opencode_message_id=opencode_message_id)
         await _publish_task_event(request.app, record, "task.started", "running")

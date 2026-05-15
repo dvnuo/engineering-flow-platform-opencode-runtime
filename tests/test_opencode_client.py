@@ -367,8 +367,8 @@ async def test_send_message_includes_message_id_no_reply_and_tools(monkeypatch):
     await server.start_server()
     monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
     client = OpenCodeClient(Settings.from_env())
-    await client.send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model="m", agent="a", message_id="m-1", no_reply=True, tools={"x": False})
-    assert captured["body"]["messageID"] == "m-1"
+    await client.send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model="m", agent="a", message_id="msg_test_1", no_reply=True, tools={"x": False})
+    assert captured["body"]["messageID"] == "msg_test_1"
     assert captured["body"]["noReply"] is True
     assert captured["body"]["tools"] == {"x": False}
     await server.close()
@@ -751,3 +751,36 @@ async def test_send_message_uses_submit_timeout(monkeypatch):
     monkeypatch.setattr(client, "_request_json", _fake)
     await client.send_message("s1", parts=[{"type":"text","text":"hi"}], model=None, agent=None)
     assert captured["timeout_seconds"] >= 300
+
+
+@pytest.mark.asyncio
+async def test_send_message_rejects_invalid_message_id_before_post(monkeypatch):
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
+    client = OpenCodeClient(Settings.from_env())
+    with pytest.raises(ValueError):
+        await client.send_message("ses-1", parts=[{"type":"text","text":"hi"}], model="m", agent="a", message_id="portal-user-x")
+
+
+@pytest.mark.asyncio
+async def test_prompt_async_rejects_invalid_message_id_before_post(monkeypatch):
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
+    client = OpenCodeClient(Settings.from_env())
+    with pytest.raises(ValueError):
+        await client.prompt_async("ses-1", {"messageID": "efp-task-x", "parts": [{"type":"text", "text":"hi"}]})
+
+
+@pytest.mark.asyncio
+async def test_prompt_async_accepts_valid_message_id(monkeypatch):
+    app = web.Application()
+    captured = {}
+    async def prompt(request):
+        captured["body"] = await request.json()
+        return web.Response(status=204)
+    app.router.add_post("/session/ses-1/prompt_async", prompt)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+    await client.prompt_async("ses-1", {"messageID": "msg_task_1", "parts": [{"type":"text", "text":"hi"}]})
+    assert captured["body"]["messageID"] == "msg_task_1"
+    await server.close()

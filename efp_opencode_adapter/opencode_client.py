@@ -11,6 +11,7 @@ import aiohttp
 
 from .settings import Settings
 from .opencode_config import normalize_opencode_provider_id
+from .opencode_ids import require_opencode_message_id
 
 
 class OpenCodeClientError(Exception):
@@ -103,6 +104,8 @@ def _normalize_prompt_body(payload: Mapping[str, Any] | dict[str, Any]) -> dict[
         body["model"] = model_ref
     else:
         body.pop("model", None)
+    if "messageID" in body and body["messageID"]:
+        body["messageID"] = require_opencode_message_id(body["messageID"])
     return body
 
 
@@ -289,7 +292,7 @@ class OpenCodeClient:
             "arguments": arguments,
         }
         if message_id:
-            payload["messageID"] = message_id
+            payload["messageID"] = require_opencode_message_id(message_id)
         if agent:
             payload["agent"] = agent
         model_ref = _model_ref_from_value(model)
@@ -402,7 +405,7 @@ class OpenCodeClient:
     ) -> dict:
         payload: dict[str, Any] = {"parts": parts}
         if message_id:
-            payload["messageID"] = message_id
+            payload["messageID"] = require_opencode_message_id(message_id)
         if no_reply is not None:
             payload["noReply"] = no_reply
         if tools:

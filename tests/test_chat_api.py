@@ -1228,6 +1228,8 @@ async def test_chat_auto_continue_progress_then_final(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
     monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
     c = AutoContinueClient()
     client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=c))); await client.start_server()
     payload = await (await client.post('/api/chat', json={"message":"q","session_id":"s1","request_id":"r1"})).json()
@@ -1306,9 +1308,10 @@ async def test_initial_message_ids_are_bound(tmp_path, monkeypatch):
     await (await client.post('/api/chat', json={"message":"q","session_id":"s1","request_id":"rbind"})).json()
     binding_store = app[REQUEST_BINDING_STORE_KEY]
     record = app[SESSION_STORE_KEY].get("s1")
-    resolved = binding_store.resolve(record.opencode_session_id, message_id="portal-user-rbind")
+    generated_id = next(mid for mid in c.sent_ids if isinstance(mid, str) and mid.startswith("msg"))
+    resolved = binding_store.resolve(record.opencode_session_id, message_id=generated_id)
     assert resolved is not None and resolved.request_id == "rbind"
-    assert "portal-user-rbind" in c.sent_ids
+    assert generated_id.startswith("msg")
     await client.close()
 
 
@@ -1499,3 +1502,18 @@ async def test_chat_stream_disconnect_background_task_is_not_cancelled_and_gets_
     assert task.done()
     assert not task.cancelled()
     assert any(record.message == "Background chat task failed after stream disconnect" for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_chat_ignores_non_msg_payload_message_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    c = AutoContinueClient()
+    app = create_app(Settings.from_env(), opencode_client=c)
+    monkeypatch.setattr(app[REQUEST_BINDING_STORE_KEY], "complete", lambda request_id: None)
+    client = TestClient(TestServer(app)); await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-msg", "request_id": "r-msg", "message_id": "portal-user-xxx"})).json()
+    assert payload["request_id"] == "r-msg"
+    generated = next(mid for mid in c.sent_ids if isinstance(mid, str) and mid.startswith("msg"))
+    assert "portal-user-xxx" not in c.sent_ids
+    assert generated.startswith("msg")
+    await client.close()
