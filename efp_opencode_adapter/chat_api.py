@@ -164,10 +164,18 @@ def extract_assistant_text(payload: Any) -> str:
 async def _wait_for_assistant_completion(*, client, opencode_session_id: str, response_payload: Any, before_messages: list[dict[str, Any]], timeout_seconds: float, poll_seconds: float, before_snapshot_unreliable: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     before_ids = {adapter_message_id(m) for m in before_messages if adapter_message_id(m)}
     probe = find_latest_assistant_completion(response_payload, exclude_message_ids=before_ids)
-    if probe.get("completion_state") == "completed":
+    if probe.get("completion_state") in {"completed", "empty_final"}:
         return probe, []
     if probe.get("completion_state") in {"error", "failed"}:
         return probe, []
+    if before_snapshot_unreliable:
+        return {
+            "text": "",
+            "message_id": str(probe.get("message_id") or ""),
+            "completion_state": "incomplete",
+            "reason": "before_snapshot_unreliable",
+            "diagnostics": {"before_snapshot_unreliable": True, "initial_probe": probe},
+        }, []
 
     loop = asyncio.get_running_loop()
     timeout = max(0.0, float(timeout_seconds))
@@ -188,7 +196,7 @@ async def _wait_for_assistant_completion(*, client, opencode_session_id: str, re
                 "diagnostics": {"before_snapshot_unreliable": True},
             }
 
-        if last_probe.get("completion_state") in {"completed", "error", "blocked"}:
+        if last_probe.get("completion_state") in {"completed", "error", "blocked", "empty_final"}:
             return last_probe, after_messages
 
         if loop.time() >= deadline:
@@ -296,7 +304,7 @@ def _should_auto_continue(state: str, probe: dict[str, Any], assistant_text: str
     if state in {"blocked", "error", "completed", "success", "empty_final"}:
         return False, "terminal_state"
     reason = str(probe.get("reason") or "").lower()
-    disallow_reasons = {"pending_permission", "tool_error", "provider_error", "auth_error", "cancelled", "user_cancelled"}
+    disallow_reasons = {"pending_permission", "tool_error", "provider_error", "auth_error", "cancelled", "user_cancelled", "before_snapshot_unreliable"}
     if reason in disallow_reasons:
         return False, f"disallowed_reason:{reason}"
     if reason in {"final_assistant_message_timeout", "length", "continue", "tool_use", "tool_calls", "assistant_in_progress", "incomplete"}:
@@ -630,14 +638,16 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                 break
             assistant_text = str(completion_probe.get("text") or extract_assistant_text(continuation_response_payload) or assistant_text)
             completion_state = str(completion_probe.get("completion_state") or completion_state)
-            continuation_debug.append({"index": continuation_count, "completion_state": completion_state, "reason": completion_probe.get("reason"), "message_id": cont_id, "text_preview": safe_preview(assistant_text, 200)})
+            debug_entry = {"index": continuation_count, "completion_state": completion_state, "reason": completion_probe.get("reason"), "message_id": cont_id, "text_preview": safe_preview(assistant_text, 200)}
+            continuation_debug.append(debug_entry)
             done_evt = add_trace_context({"type":"continuation.completed","session_id":portal_session_id,"request_id":request_id,"opencode_session_id":record.opencode_session_id,"data":{"index":continuation_count,"completion_state":completion_state}}, trace_context)
             runtime_events.append(done_evt); await bus.publish(done_evt)
             new_sig = _completion_progress_signature(completion_probe, assistant_text, after_messages)
-            if settings.chat_auto_continue_no_progress_stop and assistant_text.strip() and new_sig == last_sig:
+            if settings.chat_auto_continue_no_progress_stop and new_sig == last_sig:
                 incomplete_reason = "auto_continue_no_progress"
                 allow_continue = False
                 completion_state = "incomplete"
+                debug_entry["stopped_reason"] = "auto_continue_no_progress"
                 break
             last_sig = new_sig
             allow_continue, continue_reason = _should_auto_continue(completion_state, completion_probe, assistant_text, settings)
@@ -790,6 +800,20 @@ async def chat_handler(request: web.Request) -> web.Response:
 
 STREAM_HEARTBEAT_SECONDS = 15.0
 BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.delta", "llm_thinking", "opencode.reasoning", "provider.retry", "provider.status", "execution.started", "execution.completed", "execution.failed", "complete", "final", "error", "skill.detected", "skill.blocked", "skill.command.executed", "skill.command.failed", "skill.prompt_applied", "skill.completed", "skill.repository_checkout.completed", "skill.repository_checkout.failed"}
+REQUEST_SCOPED_STREAM_EVENT_TYPES = {
+    "message.delta",
+    "llm_thinking",
+    "permission_request",
+    "permission_resolved",
+    "provider.retry",
+    "provider.status",
+    "continuation.started",
+    "continuation.completed",
+    "continuation.failed",
+    "chat.incomplete",
+    "chat.blocked",
+    "chat.empty_final",
+}
 
 
 class SSEClientDisconnected(Exception):
@@ -850,17 +874,43 @@ def _event_dedupe_key(event: dict[str, Any]) -> tuple:
 
 
 def _is_stream_relevant_event(event: dict[str, Any], *, session_id: str, request_id: str) -> bool:
-    if str(event.get("session_id") or "") != session_id:
-        return False
-    explicit_portal_req = event.get("portal_request_id")
-    if not explicit_portal_req and isinstance(event.get("data"), dict):
-        explicit_portal_req = event["data"].get("portal_request_id")
-    if explicit_portal_req and str(explicit_portal_req) != request_id:
-        return False
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
     event_type = str(event.get("type") or event.get("event_type") or "")
     if event_type in {"opencode.sync", "opencode.message.updated", "session.updated", "session.status", "session.idle", "session.diff"}:
         return False
-    if event_type in BRIDGE_EVENT_TYPES or event_type.startswith("tool.") or event_type.startswith("permission_"):
+
+    request_scoped = (
+        event_type in BRIDGE_EVENT_TYPES
+        or event_type in REQUEST_SCOPED_STREAM_EVENT_TYPES
+        or event_type.startswith("tool.")
+        or event_type.startswith("permission_")
+        or event_type.startswith("provider.")
+        or event_type.startswith("continuation.")
+        or event_type.startswith("chat.")
+    )
+    event_session_id = event.get("session_id") or event.get("portal_session_id") or data.get("session_id")
+    event_portal_request_id = event.get("portal_request_id") or data.get("portal_request_id")
+    event_request_id = event.get("request_id") or data.get("request_id")
+
+    if event_session_id:
+        if str(event_session_id) != session_id:
+            return False
+    elif request_scoped:
+        return False
+
+    if event_portal_request_id:
+        if str(event_portal_request_id) != request_id:
+            return False
+    elif event_request_id:
+        if str(event_request_id) != request_id:
+            return False
+    elif request_scoped:
+        return False
+
+    if event_type == "stream.started":
+        return True
+
+    if request_scoped:
         if event_type in {"assistant_delta", "message.delta"}:
             return bool(_event_delta_text(event))
         return True

@@ -529,7 +529,7 @@ async def collect_task_completion(app: web.Application, task_id: str) -> None:
             if event_text:
                 status, output_payload, error = parse_task_completion(event_text, task_type=record.task_type, input_payload=record.input_payload, metadata=record.metadata)
                 if status == "success" and not _looks_structured_terminal_text(event_text):
-                    record = store.update(task_id, status="running", output_payload={**(record.output_payload or {}), "progress_preview": event_text[:300], "completion_state": "incomplete", "incomplete_reason": "ambiguous_progress_text"}, updated_at=utc_now_iso())
+                    record = store.update(task_id, status="running", output_payload={**(record.output_payload or {}), "progress_preview": event_text[:300], "completion_state": "incomplete", "incomplete_reason": "ambiguous_progress_text"})
                     await asyncio.sleep(poll)
                     continue
                 record = store.update(task_id, status=status, output_payload=output_payload, error=error, finished_at=utc_now_iso(), completion_source="opencode_event")
@@ -540,7 +540,7 @@ async def collect_task_completion(app: web.Application, task_id: str) -> None:
             if message_text:
                 status, output_payload, error = parse_task_completion(message_text, task_type=record.task_type, input_payload=record.input_payload, metadata=record.metadata)
                 if status == "success" and not _looks_structured_terminal_text(message_text):
-                    record = store.update(task_id, status="running", output_payload={**(record.output_payload or {}), "progress_preview": message_text[:300], "completion_state": "incomplete", "incomplete_reason": "ambiguous_progress_text"}, updated_at=utc_now_iso())
+                    record = store.update(task_id, status="running", output_payload={**(record.output_payload or {}), "progress_preview": message_text[:300], "completion_state": "incomplete", "incomplete_reason": "ambiguous_progress_text"})
                     await asyncio.sleep(poll)
                     continue
                 record = store.update(task_id, status=status, output_payload=output_payload, error=error, finished_at=utc_now_iso(), completion_source="messages")
