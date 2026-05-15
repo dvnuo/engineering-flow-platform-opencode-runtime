@@ -17,3 +17,5 @@ EVENT_BRIDGE_TASK_KEY = web.AppKey('event_bridge_task', object)
 FILE_SERVICE_KEY = web.AppKey('file_service', object)
 ATTACHMENT_SERVICE_KEY = web.AppKey('attachment_service', object)
 OPENCODE_PROCESS_MANAGER_KEY = web.AppKey('opencode_process_manager', object)
+
+REQUEST_BINDING_STORE_KEY = web.AppKey('request_binding_store', object)

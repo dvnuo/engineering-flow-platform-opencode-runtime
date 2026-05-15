@@ -42,6 +42,11 @@ class Settings:
     portal_metadata_timeout_seconds: float = 5.0
     chat_completion_timeout_seconds: float = 300.0
     chat_completion_poll_seconds: float = 1.0
+    chat_submit_timeout_seconds: float = 300.0
+    chat_auto_continue_enabled: bool = True
+    chat_auto_continue_max_turns: int = 3
+    chat_auto_continue_prompt: str = "Continue the previous task from exactly where you stopped. Do not repeat completed work. Keep using tools if needed. Stop only when you can provide a final user-visible answer, or clearly state the blocker. Do not answer with a progress-only sentence."
+    chat_auto_continue_no_progress_stop: bool = True
     opencode_permission_mode: str = "workspace_full_access"
     opencode_allow_bash_all: bool = True
 
@@ -68,6 +73,11 @@ class Settings:
             portal_metadata_timeout_seconds=float(os.getenv("PORTAL_METADATA_TIMEOUT_SECONDS", "5")),
             chat_completion_timeout_seconds=float(os.getenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "300")),
             chat_completion_poll_seconds=max(0.1, float(os.getenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "1.0"))),
+            chat_submit_timeout_seconds=max(300.0, float(os.getenv("EFP_CHAT_SUBMIT_TIMEOUT_SECONDS", os.getenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "300")))),
+            chat_auto_continue_enabled=_env_bool("EFP_CHAT_AUTO_CONTINUE_ENABLED", True),
+            chat_auto_continue_max_turns=max(0, int(os.getenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "3"))),
+            chat_auto_continue_prompt=os.getenv("EFP_CHAT_AUTO_CONTINUE_PROMPT", "Continue the previous task from exactly where you stopped. Do not repeat completed work. Keep using tools if needed. Stop only when you can provide a final user-visible answer, or clearly state the blocker. Do not answer with a progress-only sentence."),
+            chat_auto_continue_no_progress_stop=_env_bool("EFP_CHAT_AUTO_CONTINUE_NO_PROGRESS_STOP", True),
             opencode_permission_mode=_normalize_opencode_permission_mode(os.getenv("EFP_OPENCODE_PERMISSION_MODE", "workspace_full_access")),
             opencode_allow_bash_all=_env_bool("EFP_OPENCODE_ALLOW_BASH_ALL", True),
         )

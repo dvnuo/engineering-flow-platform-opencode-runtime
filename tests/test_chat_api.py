@@ -6,7 +6,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
 from efp_opencode_adapter.settings import Settings
-from efp_opencode_adapter.app_keys import SESSION_STORE_KEY
+from efp_opencode_adapter.app_keys import SESSION_STORE_KEY, REQUEST_BINDING_STORE_KEY
+from efp_opencode_adapter.chat_api import _is_stream_relevant_event
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -1020,4 +1021,207 @@ async def test_chat_response_blocked_without_known_assistant_id_returns_empty_as
     assert payload["completion_state"] in ("blocked", "empty_final", "error", "failed", "incomplete")
     assert payload["assistant_message_id"] == ""
     assert payload["assistant_message_ids"] == []
+    await client.close()
+
+@pytest.mark.asyncio
+async def test_attachment_debug_redaction_does_not_touch_binding_store():
+    from efp_opencode_adapter.chat_api import _redact_attachment_payloads_for_debug
+    out = _redact_attachment_payloads_for_debug({"url": "data:text/plain;base64,AAAA"})
+    assert out["url"].startswith("data:")
+
+
+class AutoContinueClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+        self.sent_ids = []
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.calls += 1
+        if message_id:
+            self.sent_ids.append(message_id)
+        if self.calls == 1:
+            return {"message": {"info": {"id": "a1", "role": "assistant"}, "parts": [{"type": "text", "text": "I am reading the repository..."}]}}
+        return {"message": {"info": {"id": "a2", "role": "assistant"}, "parts": [{"type": "text", "text": "final answer"}]}}
+
+
+@pytest.mark.asyncio
+async def test_chat_auto_continue_progress_then_final(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    c = AutoContinueClient()
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=c))); await client.start_server()
+    payload = await (await client.post('/api/chat', json={"message":"q","session_id":"s1","request_id":"r1"})).json()
+    assert payload["completion_state"] == "completed"
+    assert payload["continuation_count"] == 1
+    assert payload["response"] == "final answer"
+    types = [e.get("type") for e in payload["runtime_events"]]
+    assert "continuation.started" in types and "continuation.completed" in types
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_initial_message_ids_are_bound(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    c = AutoContinueClient()
+    app = create_app(Settings.from_env(), opencode_client=c)
+    monkeypatch.setattr(app[REQUEST_BINDING_STORE_KEY], "complete", lambda request_id: None)
+    client = TestClient(TestServer(app)); await client.start_server()
+    await (await client.post('/api/chat', json={"message":"q","session_id":"s1","request_id":"rbind"})).json()
+    binding_store = app[REQUEST_BINDING_STORE_KEY]
+    record = app[SESSION_STORE_KEY].get("s1")
+    resolved = binding_store.resolve(record.opencode_session_id, message_id="portal-user-rbind")
+    assert resolved is not None and resolved.request_id == "rbind"
+    assert "portal-user-rbind" in c.sent_ids
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        ({"type": "tool.started", "session_id": "s1", "request_id": "r1"}, True),
+        ({"type": "tool.started", "session_id": "s1", "data": {"request_id": "r1"}}, True),
+        ({"type": "tool.started", "session_id": "s1", "portal_request_id": "r1", "request_id": "old"}, True),
+        ({"type": "tool.started", "session_id": "s1", "request_id": "old"}, False),
+        ({"type": "tool.started", "session_id": "s1", "data": {"request_id": "old"}}, False),
+        ({"type": "message.delta", "session_id": "s1", "data": {"delta": "hello"}}, False),
+        ({"type": "tool.started", "session_id": "other", "request_id": "r1"}, False),
+        ({"type": "stream.started", "session_id": "s1"}, True),
+    ],
+)
+def test_chat_stream_filters_events_by_portal_request(event, expected):
+    assert _is_stream_relevant_event(event, session_id="s1", request_id="r1") is expected
+
+
+def test_chat_stream_filter_ignores_raw_opencode_request_ids():
+    event = {
+        "type": "tool.started",
+        "session_id": "s1",
+        "raw_request_id": "r1",
+        "opencode_request_id": "r1",
+        "data": {"raw_request_id": "r1", "opencode_request_id": "r1"},
+    }
+    assert _is_stream_relevant_event(event, session_id="s1", request_id="r1") is False
+
+
+class EmptyTimeoutNoProgressClient(FakeOpenCodeClient):
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        return {}
+
+    async def list_messages(self, session_id):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_chat_auto_continue_empty_timeout_no_progress_stops(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "3")
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=EmptyTimeoutNoProgressClient())))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-empty-timeout"})).json()
+    assert payload["ok"] is False
+    assert payload["completion_state"] == "incomplete"
+    assert "auto_continue_no_progress" in payload["incomplete_reason"]
+    assert payload["continuation_count"] == 1
+    assert payload["_llm_debug"]["continuations"][-1]["stopped_reason"] == "auto_continue_no_progress"
+    await client.close()
+
+
+class EmptyTimeoutThenFinalClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {}
+        return {"message": {"info": {"id": "a-final", "role": "assistant"}, "parts": [{"type": "text", "text": "Done. Summary..."}]}}
+
+    async def list_messages(self, session_id):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_chat_auto_continue_empty_timeout_then_final(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=EmptyTimeoutThenFinalClient())))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-empty-final"})).json()
+    assert payload["ok"] is True
+    assert payload["completion_state"] == "completed"
+    assert payload["continuation_count"] == 1
+    assert payload["response"] == "Done. Summary..."
+    await client.close()
+
+
+class AlwaysIncompleteProgressClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.calls += 1
+        return {
+            "message": {
+                "info": {"id": f"a-progress-{self.calls}", "role": "assistant"},
+                "parts": [{"type": "text", "text": f"I am reading the repository... {self.calls}"}],
+            }
+        }
+
+    async def list_messages(self, session_id):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_chat_auto_continue_max_turns_reached(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "2")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_NO_PROGRESS_STOP", "false")
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=AlwaysIncompleteProgressClient())))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-max-turns"})).json()
+    assert payload["ok"] is False
+    assert payload["completion_state"] == "incomplete"
+    assert "auto_continue_max_turns_reached" in payload["incomplete_reason"]
+    assert payload["continuation_count"] == 2
+    await client.close()
+
+
+class AutoContinueFailureClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {"message": {"info": {"id": "a-progress", "role": "assistant"}, "parts": [{"type": "text", "text": "I am reading the repository..."}]}}
+        raise RuntimeError("continuation failed")
+
+    async def list_messages(self, session_id):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_chat_auto_continue_failed_event(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=AutoContinueFailureClient())))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-cont-fail"})).json()
+    types = [e.get("type") for e in payload["runtime_events"]]
+    assert "continuation.failed" in types
+    assert not (payload["ok"] is True and payload["response"] == "")
+    assert payload["ok"] is False
     await client.close()

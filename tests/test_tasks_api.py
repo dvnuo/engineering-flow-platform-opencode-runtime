@@ -462,13 +462,18 @@ async def test_prompt_async_generic_exception_marks_error_and_preserves_events(t
 @pytest.mark.asyncio
 async def test_tasks_special_cases(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_TIMEOUT_SECONDS', '0.05')
     monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
     fake = FakeTaskOpenCodeClient(final_text='not-json completion')
     app = create_app(Settings.from_env(), opencode_client=fake)
     c = TestClient(TestServer(app)); await c.start_server()
     await c.post('/api/tasks/execute', json={'task_id': 't2', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
     p = await _wait_terminal(c, 't2')
-    assert p['output_payload']['raw_text']
+    assert p['status'] == 'blocked'
+    assert p['output_payload']['completion_state'] == 'incomplete'
+    assert p['output_payload']['incomplete_reason'] == 'ambiguous_progress_text'
+    assert p['output_payload']['progress_preview'] == 'not-json completion'
+    assert p['output_payload']['error_code'] == 'task_completion_timeout'
 
     fake2 = FakeTaskOpenCodeClient(final_text='{"status":"error","error_code":"superseded_by_new_head_sha","summary":"stale"}')
     app2 = create_app(Settings.from_env(), opencode_client=fake2)
@@ -517,3 +522,30 @@ async def test_testclient_close_cancels_pending_task_collectors(tmp_path, monkey
     await asyncio.sleep(0)
     assert all(task.done() for task in tasks)
     assert app[TASK_BACKGROUND_TASKS_KEY] == set()
+
+@pytest.mark.asyncio
+async def test_progress_only_event_does_not_mark_task_success(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_TIMEOUT_SECONDS', '0.05')
+    monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
+    fake = FakeTaskOpenCodeClient(no_assistant=True)
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id':'tprog','task_type':'generic_agent_task','input_payload':{},'metadata':{}})
+    sid = fake.prompt_async_calls[0][0]
+    fake.stream_events = [{'type':'message.part.delta','sessionID':sid,'properties':{'sessionID':sid,'delta':'I am working on it'}}]
+    p = await _wait_terminal(c, 'tprog', tries=120)
+    assert p['status'] != 'success'
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_final_marker_marks_task_success(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    fake = FakeTaskOpenCodeClient(final_text='{"status":"success","summary":"ok"}')
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    await c.post('/api/tasks/execute', json={'task_id':'tfinal','task_type':'generic_agent_task','input_payload':{},'metadata':{}})
+    p = await _wait_terminal(c, 'tfinal')
+    assert p['status'] == 'success'
+    await c.close()

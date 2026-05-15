@@ -274,6 +274,7 @@ def summarize_message_runtime_state(message: Any) -> dict[str, Any]:
         "finish_reason": finish_reason,
         "progress_only": progress_only,
         "terminal": terminal,
+        "empty_final": role == "assistant" and not text and not has_pending_tool and not has_pending_permission and not has_tool_error and finish_reason in {"stop", "end", "done", "complete", "completed", "success"},
         "error_summary": error_summary,
     }
 
@@ -309,6 +310,9 @@ def find_latest_assistant_completion(payload: Any, *, exclude_message_ids: set[s
     for state in reversed(states):
         if state["has_tool_error"]:
             return {"text": "", "message_id": state["message_id"], "completion_state": "error", "reason": "tool_error", "diagnostics": state}
+    for state in reversed(states):
+        if state["empty_final"]:
+            return {"text": "", "message_id": state["message_id"], "completion_state": "empty_final", "reason": "empty_final_assistant_text", "diagnostics": state}
     for state in reversed(states):
         if state["has_pending_tool"] or state["progress_only"]:
             return {"text": "", "message_id": state["message_id"], "completion_state": "pending", "reason": "assistant_in_progress", "diagnostics": state}

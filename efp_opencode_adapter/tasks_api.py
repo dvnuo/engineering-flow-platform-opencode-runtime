@@ -27,6 +27,11 @@ from .trace_context import add_trace_context, build_trace_context, profile_versi
 TERMINAL = {"success", "error", "blocked", "cancelled"}
 
 
+def _looks_structured_terminal_text(text: str) -> bool:
+    stripped = (text or "").strip()
+    return stripped.startswith("{") and '"status"' in stripped
+
+
 def _extract_session_id(payload: Any) -> str:
     if not isinstance(payload, dict):
         return ""
@@ -523,6 +528,10 @@ async def collect_task_completion(app: web.Application, task_id: str) -> None:
 
             if event_text:
                 status, output_payload, error = parse_task_completion(event_text, task_type=record.task_type, input_payload=record.input_payload, metadata=record.metadata)
+                if status == "success" and not _looks_structured_terminal_text(event_text):
+                    record = store.update(task_id, status="running", output_payload={**(record.output_payload or {}), "progress_preview": event_text[:300], "completion_state": "incomplete", "incomplete_reason": "ambiguous_progress_text"})
+                    await asyncio.sleep(poll)
+                    continue
                 record = store.update(task_id, status=status, output_payload=output_payload, error=error, finished_at=utc_now_iso(), completion_source="opencode_event")
                 await _publish_task_event(app, record, "task.completed", status)
                 return
@@ -530,6 +539,10 @@ async def collect_task_completion(app: web.Application, task_id: str) -> None:
             message_text = await _try_read_completion_from_messages(record, client)
             if message_text:
                 status, output_payload, error = parse_task_completion(message_text, task_type=record.task_type, input_payload=record.input_payload, metadata=record.metadata)
+                if status == "success" and not _looks_structured_terminal_text(message_text):
+                    record = store.update(task_id, status="running", output_payload={**(record.output_payload or {}), "progress_preview": message_text[:300], "completion_state": "incomplete", "incomplete_reason": "ambiguous_progress_text"})
+                    await asyncio.sleep(poll)
+                    continue
                 record = store.update(task_id, status=status, output_payload=output_payload, error=error, finished_at=utc_now_iso(), completion_source="messages")
                 await _publish_task_event(app, record, "task.completed", status)
                 return

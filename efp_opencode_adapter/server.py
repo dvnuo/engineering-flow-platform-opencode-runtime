@@ -20,6 +20,7 @@ from .app_keys import (
     EVENT_BRIDGE_KEY,
     EVENT_BRIDGE_TASK_KEY,
     OPENCODE_PROCESS_MANAGER_KEY,
+    REQUEST_BINDING_STORE_KEY,
 )
 
 from .capabilities import build_capability_catalog
@@ -54,6 +55,7 @@ from .opencode_process import OpenCodeProcessManager
 from .session_store import SessionStore
 from .task_store import TaskStore
 from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_handler
+from .request_bindings import RequestBindingStore
 from .sessions_api import (
     clear_sessions_handler,
     delete_message_from_here_handler,
@@ -325,6 +327,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app[CHATLOG_STORE_KEY] = ChatLogStore(state_paths.chatlogs_dir)
     app[USAGE_TRACKER_KEY] = UsageTracker(state_paths.usage_file)
     app[EVENT_BUS_KEY] = EventBus()
+    app[REQUEST_BINDING_STORE_KEY] = RequestBindingStore()
     app[TASK_BACKGROUND_TASKS_KEY] = set()
     injected_client = opencode_client is not None
     client = opencode_client or OpenCodeClient(settings)
@@ -336,7 +339,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app[RECOVERY_MANAGER_KEY] = RecoveryManager(settings=settings, state_paths=state_paths, session_store=app[SESSION_STORE_KEY], chatlog_store=app[CHATLOG_STORE_KEY], opencode_client=app[OPENCODE_CLIENT_KEY])
     should_start_event_bridge = settings.event_bridge_enabled and (start_event_bridge if start_event_bridge is not None else not injected_client) and hasattr(client, "event_stream")
     if should_start_event_bridge:
-        app[EVENT_BRIDGE_KEY] = OpenCodeEventBridge(settings, client, app[EVENT_BUS_KEY], app[SESSION_STORE_KEY], app[TASK_STORE_KEY], app[CHATLOG_STORE_KEY])
+        app[EVENT_BRIDGE_KEY] = OpenCodeEventBridge(settings, client, app[EVENT_BUS_KEY], app[SESSION_STORE_KEY], app[TASK_STORE_KEY], app[CHATLOG_STORE_KEY], app[REQUEST_BINDING_STORE_KEY])
     register_file_routes(app)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/actuator/health", health_handler)
