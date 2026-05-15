@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 from typing import Any, Iterable
@@ -46,6 +47,8 @@ from .opencode_message_adapter import (
 )
 from .skill_invocation import build_skill_prompt, evaluate_skill_invocation, parse_slash_invocation
 from .repository_workspace import ensure_repo_checkout, parse_create_pr_repo_request
+
+logger = logging.getLogger(__name__)
 
 FINAL_RESPONSE_CONTRACT_SUFFIX = "\n\nRuntime contract: Never end a user-visible answer with only progress text. If work is complete, provide a final answer with summary and evidence. If blocked, state the exact blocker. If more tool work is needed, continue tool work instead of returning a progress-only final."
 
@@ -612,6 +615,8 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             poll_seconds=settings.chat_completion_poll_seconds,
             before_snapshot_unreliable=before_snapshot_unreliable,
         )
+        latest_response_payload = response_payload
+        latest_waited_messages = waited_messages
         continuation_count = 0
         continuation_debug: list[dict[str, Any]] = []
         completion_state = str(completion_probe.get("completion_state") or "incomplete")
@@ -630,6 +635,8 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             try:
                 continuation_response_payload = await client.send_message(record.opencode_session_id, parts=[{"type":"text","text":settings.chat_auto_continue_prompt}], model=model, agent=agent, system=system, message_id=cont_id)
                 completion_probe, after_messages = await _wait_for_assistant_completion(client=client, opencode_session_id=record.opencode_session_id, response_payload=continuation_response_payload, before_messages=before_messages, timeout_seconds=settings.chat_completion_timeout_seconds, poll_seconds=settings.chat_completion_poll_seconds)
+                latest_response_payload = continuation_response_payload
+                latest_waited_messages = after_messages
             except Exception as exc:
                 failed_evt = add_trace_context({"type":"continuation.failed","session_id":portal_session_id,"request_id":request_id,"opencode_session_id":record.opencode_session_id,"data":{"index":continuation_count,"error":safe_preview(str(exc),300)}}, trace_context)
                 runtime_events.append(failed_evt); await bus.publish(failed_evt)
@@ -643,6 +650,9 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             done_evt = add_trace_context({"type":"continuation.completed","session_id":portal_session_id,"request_id":request_id,"opencode_session_id":record.opencode_session_id,"data":{"index":continuation_count,"completion_state":completion_state}}, trace_context)
             runtime_events.append(done_evt); await bus.publish(done_evt)
             new_sig = _completion_progress_signature(completion_probe, assistant_text, after_messages)
+            if completion_state in {"completed", "success"}:
+                incomplete_reason = ""
+                break
             if settings.chat_auto_continue_no_progress_stop and new_sig == last_sig:
                 incomplete_reason = "auto_continue_no_progress"
                 allow_continue = False
@@ -651,7 +661,10 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                 break
             last_sig = new_sig
             allow_continue, continue_reason = _should_auto_continue(completion_state, completion_probe, assistant_text, settings)
-            incomplete_reason = str(completion_probe.get("reason") or continue_reason or "")
+            if completion_state not in {"completed", "success"}:
+                incomplete_reason = str(completion_probe.get("reason") or continue_reason or "")
+        if completion_state in {"completed", "success"}:
+            incomplete_reason = ""
         if completion_state != "completed" and continuation_count >= settings.chat_auto_continue_max_turns and allow_continue:
             completion_state = "incomplete"
             incomplete_reason = "auto_continue_max_turns_reached"
@@ -669,11 +682,13 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         assistant_message_ids: list[str] = []
         if not before_snapshot_unreliable:
             try:
-                after_messages = waited_messages or await client.list_messages(record.opencode_session_id)
-                user_message_id, assistant_message_id = _detect_new_message_ids(before_messages, after_messages)
+                final_messages_for_ids = latest_waited_messages
+                if not final_messages_for_ids:
+                    final_messages_for_ids = await client.list_messages(record.opencode_session_id)
+                user_message_id, assistant_message_id = _detect_new_message_ids(before_messages, final_messages_for_ids)
                 _append_unique_message_ids(
                     assistant_message_ids,
-                    extract_assistant_message_ids(after_messages, exclude_message_ids=before_assistant_message_ids),
+                    extract_assistant_message_ids(final_messages_for_ids, exclude_message_ids=before_assistant_message_ids),
                 )
             except Exception as exc:
                 message_id_detection_error_after = safe_preview(str(exc), 500)
@@ -681,14 +696,14 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             completion_state = "empty_final"
             incomplete_reason = "empty_final_assistant_text"
             assistant_text = "OpenCode completed without a visible assistant response. The request may have produced tool output only; no empty success message was recorded."
-        if not assistant_message_id and isinstance(response_payload, dict):
-            candidate = response_payload.get("info", {}).get("id") if isinstance(response_payload.get("info"), dict) else ""
-            if not candidate and isinstance(response_payload.get("message"), dict):
-                candidate = adapter_message_id(response_payload["message"])
+        if not assistant_message_id and isinstance(latest_response_payload, dict):
+            candidate = latest_response_payload.get("info", {}).get("id") if isinstance(latest_response_payload.get("info"), dict) else ""
+            if not candidate and isinstance(latest_response_payload.get("message"), dict):
+                candidate = adapter_message_id(latest_response_payload["message"])
             assistant_message_id = str(candidate or "")
         _append_unique_message_ids(
             assistant_message_ids,
-            extract_assistant_message_ids(response_payload, exclude_message_ids=before_assistant_message_ids),
+            extract_assistant_message_ids(latest_response_payload, exclude_message_ids=before_assistant_message_ids),
         )
         probe_message_id = str(completion_probe.get("message_id") or "")
         _append_unique_message_ids(assistant_message_ids, [probe_message_id, assistant_message_id])
@@ -818,6 +833,25 @@ REQUEST_SCOPED_STREAM_EVENT_TYPES = {
 
 class SSEClientDisconnected(Exception):
     pass
+
+
+def _consume_background_chat_task(task: asyncio.Task, *, request_id: str, session_id: str) -> None:
+    try:
+        task.result()
+        logger.info(
+            "Background chat task completed after stream disconnect",
+            extra={"request_id": request_id, "session_id": session_id},
+        )
+    except asyncio.CancelledError:
+        logger.info(
+            "Background chat task cancelled after stream disconnect",
+            extra={"request_id": request_id, "session_id": session_id},
+        )
+    except Exception:
+        logger.exception(
+            "Background chat task failed after stream disconnect",
+            extra={"request_id": request_id, "session_id": session_id},
+        )
 
 
 def _is_closed_transport_runtime_error(exc: RuntimeError) -> bool:
@@ -1059,9 +1093,13 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     finally:
         bus.unsubscribe(sub)
         if not run_task.done():
-            if not client_disconnected:
+            if client_disconnected:
+                run_task.add_done_callback(lambda task: _consume_background_chat_task(task, request_id=req_id, session_id=session_id))
+            else:
                 run_task.cancel()
                 await asyncio.gather(run_task, return_exceptions=True)
+        else:
+            _consume_background_chat_task(run_task, request_id=req_id, session_id=session_id)
         if not client_disconnected:
             await _safe_write_eof(resp)
     return resp
