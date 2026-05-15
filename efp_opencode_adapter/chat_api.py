@@ -979,6 +979,50 @@ def _stream_delta_payload(event: dict[str, Any], delta: str, session_id: str, re
     }
 
 
+def _stream_error_final_payload(
+    *,
+    error_payload: dict[str, Any],
+    session_id: str,
+    request_id: str,
+    runtime_events: list[dict[str, Any]] | None = None,
+    settings: Any | None = None,
+) -> dict[str, Any]:
+    events = runtime_events or []
+    incomplete_reason = (
+        _optional_str(error_payload.get("incomplete_reason"))
+        or _optional_str(error_payload.get("error"))
+        or "chat_failed"
+    )
+    response = (
+        _optional_str(error_payload.get("response"))
+        or _optional_str(error_payload.get("detail"))
+        or _optional_str(error_payload.get("error"))
+        or "Chat stream failed before a final assistant response was produced."
+    )
+    response = safe_preview(response.strip() if isinstance(response, str) else "", 500) or "Chat stream failed before a final assistant response was produced."
+    auto_continue_enabled = False
+    if settings is not None:
+        auto_continue_enabled = bool(getattr(settings, "auto_continue_enabled", False))
+    return {
+        "ok": False,
+        "completion_state": "error",
+        "incomplete_reason": incomplete_reason,
+        "response": response,
+        "session_id": session_id,
+        "request_id": request_id,
+        "runtime_events": events,
+        "events": events,
+        "continuation_count": 0,
+        "auto_continue_enabled": auto_continue_enabled,
+        "context_state": {
+            "summary": safe_preview(response, 200),
+            "current_state": "error",
+            "next_step": "Inspect runtime error detail and retry after fixing the upstream issue",
+        },
+        "_llm_debug": {"stream_error": error_payload},
+    }
+
+
 async def _stream_error_response(request: web.Request, error: str, detail: str | None = None) -> web.StreamResponse:
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "keep-alive"})
     await resp.prepare(request)
@@ -1083,10 +1127,27 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             await _forward(event); drained += 1
 
         if error_payload:
+            final_error_payload = _stream_error_final_payload(
+                error_payload=error_payload,
+                session_id=session_id,
+                request_id=req_id,
+                runtime_events=[],
+                settings=settings,
+            )
             await _write_sse(resp, "error", error_payload)
+            await _write_sse(resp, "final", final_error_payload)
             await _write_sse(resp, "done", {"ok": True})
         else:
-            await _write_sse(resp, "final", final_result or {})
+            final_payload = final_result
+            if not isinstance(final_payload, dict) or not final_payload:
+                final_payload = _stream_error_final_payload(
+                    error_payload={"error": "missing_final_result", "detail": "Chat stream completed without a terminal final payload."},
+                    session_id=session_id,
+                    request_id=req_id,
+                    runtime_events=[],
+                    settings=settings,
+                )
+            await _write_sse(resp, "final", final_payload)
             await _write_sse(resp, "done", {"ok": True})
     except SSEClientDisconnected:
         client_disconnected = True
