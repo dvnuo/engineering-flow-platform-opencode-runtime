@@ -236,6 +236,106 @@ async def test_chat_stream_never_emits_empty_final_payload(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_stream_error_response_emits_final_and_done_for_invalid_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/chat/stream", data="{", headers={"Content-Type": "application/json"})
+        body = await resp.text()
+        assert "event: error" in body
+        assert "event: final" in body
+        assert "event: done" in body
+        assert body.index("event: final") < body.index("event: done")
+        events = []
+        for chunk in body.strip().split("\n\n"):
+            event_name = None
+            data_line = None
+            for line in chunk.splitlines():
+                if line.startswith("event: "):
+                    event_name = line.removeprefix("event: ")
+                elif line.startswith("data: "):
+                    data_line = line.removeprefix("data: ")
+            if event_name and data_line:
+                events.append((event_name, json.loads(data_line)))
+        final_data = next(payload for name, payload in events if name == "final")
+        assert final_data["ok"] is False
+        assert final_data["completion_state"] == "error"
+        assert final_data["incomplete_reason"]
+        assert final_data["response"]
+        assert final_data["runtime_events"] == []
+        assert final_data["events"] == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_error_response_emits_final_for_non_object_payload(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/chat/stream", json=[])
+        body = await resp.text()
+        assert "event: error" in body
+        assert "event: final" in body
+        assert "event: done" in body
+        assert body.index("event: final") < body.index("event: done")
+        events = []
+        for chunk in body.strip().split("\n\n"):
+            event_name = None
+            data_line = None
+            for line in chunk.splitlines():
+                if line.startswith("event: "):
+                    event_name = line.removeprefix("event: ")
+                elif line.startswith("data: "):
+                    data_line = line.removeprefix("data: ")
+            if event_name and data_line:
+                events.append((event_name, json.loads(data_line)))
+        final_data = next(payload for name, payload in events if name == "final")
+        assert final_data["ok"] is False
+        assert final_data["completion_state"] == "error"
+        assert final_data["incomplete_reason"]
+        assert final_data["response"]
+        assert final_data["runtime_events"] == []
+        assert final_data["events"] == []
+    finally:
+        await client.close()
+
+
+def test_stream_error_final_payload_uses_chat_auto_continue_setting():
+    class _SettingsStub:
+        chat_auto_continue_enabled = True
+
+    settings = _SettingsStub()
+    payload = chat_api._stream_error_final_payload(
+        error_payload={"error": "chat_failed", "detail": "failed detail"},
+        session_id="s1",
+        request_id="r1",
+        runtime_events=[],
+        settings=settings,
+    )
+    assert payload["auto_continue_enabled"] is True
+
+
+def test_stream_error_final_payload_debug_is_previewed_not_raw():
+    long_detail = "token=secret-secret-secret " + ("very-long-fragment-" * 200)
+    payload = chat_api._stream_error_final_payload(
+        error_payload={"error": "opencode_error", "detail": long_detail},
+        session_id="s1",
+        request_id="r1",
+        runtime_events=[],
+        settings=None,
+    )
+    debug_detail = payload["_llm_debug"]["stream_error"]["detail"]
+    assert len(debug_detail) <= 520
+    assert debug_detail != long_detail
+    assert ("very-long-fragment-" * 50) not in debug_detail
+
+
+@pytest.mark.asyncio
 async def test_chat_response_uses_history_assistant_text_not_user_input(tmp_path, monkeypatch):
     class UserOnlyFirst(FakeOpenCodeClient):
         async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):

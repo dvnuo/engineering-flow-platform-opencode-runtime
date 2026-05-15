@@ -1002,7 +1002,12 @@ def _stream_error_final_payload(
     response = safe_preview(response.strip() if isinstance(response, str) else "", 500) or "Chat stream failed before a final assistant response was produced."
     auto_continue_enabled = False
     if settings is not None:
-        auto_continue_enabled = bool(getattr(settings, "auto_continue_enabled", False))
+        auto_continue_enabled = bool(getattr(settings, "chat_auto_continue_enabled", getattr(settings, "auto_continue_enabled", False)))
+    debug_error = {
+        "error": safe_preview(str(error_payload.get("error") or ""), 200),
+        "detail": safe_preview(str(error_payload.get("detail") or ""), 500),
+        "incomplete_reason": safe_preview(str(error_payload.get("incomplete_reason") or ""), 200),
+    }
     return {
         "ok": False,
         "completion_state": "error",
@@ -1019,16 +1024,29 @@ def _stream_error_final_payload(
             "current_state": "error",
             "next_step": "Inspect runtime error detail and retry after fixing the upstream issue",
         },
-        "_llm_debug": {"stream_error": error_payload},
+        "_llm_debug": {"stream_error": debug_error},
     }
 
 
-async def _stream_error_response(request: web.Request, error: str, detail: str | None = None) -> web.StreamResponse:
+async def _stream_error_response(request: web.Request, error: str, detail: str | None = None, *, session_id: str = "", request_id: str = "") -> web.StreamResponse:
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "keep-alive"})
     await resp.prepare(request)
     client_disconnected = False
+    error_payload = {
+        "error": error or "chat_failed",
+        "detail": detail or error or "Chat stream failed before a final assistant response was produced.",
+    }
+    final_payload = _stream_error_final_payload(
+        error_payload=error_payload,
+        session_id=session_id,
+        request_id=request_id,
+        runtime_events=[],
+        settings=request.app.get(SETTINGS_KEY),
+    )
     try:
-        await _write_sse(resp, "error", {"error": error, "detail": detail or error})
+        await _write_sse(resp, "error", error_payload)
+        await _write_sse(resp, "final", final_payload)
+        await _write_sse(resp, "done", {"ok": True})
     except SSEClientDisconnected:
         client_disconnected = True
     finally:
@@ -1049,7 +1067,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         session_id = _portal_session_id_from_payload(payload)
         req_id = _request_id_from_payload(payload)
     except web.HTTPException as exc:
-        return await _stream_error_response(request, "chat_failed", exc.text)
+        return await _stream_error_response(request, "chat_failed", exc.text, session_id=str(payload.get("session_id") or ""), request_id=str(payload.get("request_id") or ""))
 
     payload = {**payload, "session_id": session_id, "request_id": req_id}
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "keep-alive"})
