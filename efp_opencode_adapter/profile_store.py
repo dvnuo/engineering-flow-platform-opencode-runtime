@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .path_utils import path_exists
 from .settings import Settings
 
 REDACTED = "***REDACTED***"
@@ -102,7 +103,7 @@ class ProfileOverlayStore:
         self.path = settings.adapter_state_dir / "runtime-profile-overlay.json"
 
     def load(self) -> ProfileOverlay | None:
-        if not self.path.exists():
+        if not path_exists(self.path):
             return None
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))

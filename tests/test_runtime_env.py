@@ -1,8 +1,10 @@
 import json
 import os
+from pathlib import Path
 
 from efp_opencode_adapter.runtime_env import (
     build_runtime_env_from_config,
+    read_runtime_env_file,
     redact_env_for_status,
     strip_managed_external_env,
     write_runtime_env_file,
@@ -32,6 +34,20 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     p = write_runtime_env_file(s, r.env)
     assert oct(os.stat(p).st_mode & 0o777) == "0o600"
     assert redact_env_for_status(r.env)["GITHUB_TOKEN"] is True
+
+
+def test_read_runtime_env_file_treats_permission_denied_path_as_missing(tmp_path, monkeypatch):
+    denied_path = tmp_path / "opencode.env"
+    original_exists = Path.exists
+
+    def fake_exists(path):
+        if path == denied_path:
+            raise PermissionError("denied")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    assert read_runtime_env_file(denied_path) == {}
 
 
 def test_runtime_env_respects_disabled_external_sections(tmp_path, monkeypatch):
@@ -205,5 +221,4 @@ def test_runtime_env_sets_disable_claude_prompt_default(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     env = build_runtime_env_from_config(s, {}).env
     assert env["OPENCODE_DISABLE_CLAUDE_CODE_PROMPT"] == "1"
-
 

@@ -49,6 +49,7 @@ from .agents_md import ensure_default_agents_md
 from .atlassian_cli_config import write_atlassian_cli_config
 from .opencode_config import build_opencode_config, normalize_opencode_provider_id, write_opencode_config
 from .opencode_auth import build_opencode_auth_from_runtime_config
+from .path_utils import path_exists
 from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_status_payload, sanitize_profile_config_for_storage, sanitize_public_secrets
 from .runtime_env import build_runtime_env_from_config, read_runtime_env_file, write_runtime_env_file
 from .git_cli_auth import write_git_gh_auth_assets
@@ -93,7 +94,7 @@ def _merge_startup_env_with_process_fallback(settings: Settings, env: dict[str, 
 
 def _runtime_env_for_status(settings: Settings, overlay) -> dict[str, str]:
     env_path = Path(overlay.env_path) if overlay and overlay.env_path else settings.adapter_state_dir / "opencode.env"
-    if env_path.exists():
+    if path_exists(env_path):
         return _merge_startup_env_with_process_fallback(settings, read_runtime_env_file(env_path))
     return build_runtime_env_from_config(settings, {}).env
 
@@ -253,8 +254,8 @@ async def runtime_profile_status_handler(request: web.Request) -> web.Response:
                 env_token_present
                 and git_askpass_path
                 and gitconfig_path
-                and Path(git_askpass_path).exists()
-                and Path(gitconfig_path).exists()
+                and path_exists(Path(git_askpass_path))
+                and path_exists(Path(gitconfig_path))
             ),
             "gh_host": gh_host,
             "gh_config_dir": runtime_env.get("GH_CONFIG_DIR"),
@@ -268,7 +269,7 @@ async def runtime_profile_status_handler(request: web.Request) -> web.Response:
 async def effective_config_handler(request: web.Request) -> web.Response:
     settings: Settings = request.app[SETTINGS_KEY]
     cfg = {}
-    if settings.opencode_config_path.exists():
+    if path_exists(settings.opencode_config_path):
         try:
             import json as _json
             cfg = _json.loads(settings.opencode_config_path.read_text(encoding="utf-8"))
@@ -278,7 +279,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
     provider = normalize_opencode_provider_id(model.split("/", 1)[0] if isinstance(model, str) and "/" in model else "")
     auth_path = settings.opencode_data_dir / "auth.json"
     auth = {}
-    if auth_path.exists():
+    if path_exists(auth_path):
         try:
             import json as _json
             auth = _json.loads(auth_path.read_text(encoding="utf-8"))
@@ -295,7 +296,9 @@ async def effective_config_handler(request: web.Request) -> web.Response:
     gh_host = github_cfg.get("host") or runtime_env.get("GH_HOST") or "github.com"
     git_askpass_path = runtime_env.get("GIT_ASKPASS")
     gitconfig_path = runtime_env.get("GIT_CONFIG_GLOBAL")
-    git_auth_configured = bool(env_token_present and git_askpass_path and gitconfig_path and Path(git_askpass_path).exists() and Path(gitconfig_path).exists())
+    git_askpass_present = bool(git_askpass_path and path_exists(Path(git_askpass_path)))
+    gitconfig_present = bool(gitconfig_path and path_exists(Path(gitconfig_path)))
+    git_auth_configured = bool(env_token_present and git_askpass_present and gitconfig_present)
     return web.json_response(
         {
             "engine": "opencode",
@@ -310,7 +313,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
                 "revision": overlay.revision if overlay else None,
             },
             "runtime_integrations": {
-                "github": {"enabled": bool(github_cfg) or env_token_present, "base_url": github_cfg.get("api_base_url") or runtime_env.get("GITHUB_API_BASE_URL") or "https://api.github.com", "host": gh_host, "token_present": config_token_present or env_token_present, "git_auth_configured": git_auth_configured, "gh_config_dir": runtime_env.get("GH_CONFIG_DIR"), "git_askpass_present": bool(git_askpass_path and Path(git_askpass_path).exists()), "gitconfig_present": bool(gitconfig_path and Path(gitconfig_path).exists())},
+                "github": {"enabled": bool(github_cfg) or env_token_present, "base_url": github_cfg.get("api_base_url") or runtime_env.get("GITHUB_API_BASE_URL") or "https://api.github.com", "host": gh_host, "token_present": config_token_present or env_token_present, "git_auth_configured": git_auth_configured, "gh_config_dir": runtime_env.get("GH_CONFIG_DIR"), "git_askpass_present": git_askpass_present, "gitconfig_present": gitconfig_present},
                 "proxy": {"enabled": bool(proxy_cfg.get("enabled")), "url_present": bool(proxy_cfg.get("url")), "password_present": bool(proxy_cfg.get("password"))},
                 "env_file": {"present": bool(overlay and overlay.env_path), "path": overlay.env_path if overlay else None, "hash": overlay.env_hash if overlay else None},
             },
@@ -393,7 +396,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
         manager = app.get(OPENCODE_PROCESS_MANAGER_KEY)
         if manager:
             env_path = settings.adapter_state_dir / "opencode.env"
-            if env_path.exists():
+            if path_exists(env_path):
                 env = _merge_startup_env_with_process_fallback(settings, read_runtime_env_file(env_path))
             else:
                 env = build_runtime_env_from_config(settings, {}).env

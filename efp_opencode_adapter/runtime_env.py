@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
+from .path_utils import path_exists
 from .settings import Settings
 
 SECRET_MARKERS = ("TOKEN", "PASSWORD", "SECRET", "API_KEY", "ACCESS", "REFRESH", "AUTHORIZATION")
@@ -323,9 +324,13 @@ def write_runtime_env_file(settings: Settings, env: dict[str, str]) -> Path:
 
 def read_runtime_env_file(path: Path) -> dict[str, str]:
     data: dict[str, str] = {}
-    if not path.exists():
+    if not path_exists(path):
         return data
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return data
+    for line in lines:
         line = line.strip()
         if not line.startswith("export ") or "=" not in line:
             continue
