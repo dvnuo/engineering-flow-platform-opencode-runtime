@@ -12,7 +12,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e ".[test]"
+      - run: python -m pip install -e ".[test]"
       - run: python -m pytest -q
     env:
       RUN_RUNTIME_CONTRACT_TESTS: '1'
