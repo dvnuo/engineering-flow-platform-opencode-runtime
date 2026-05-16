@@ -421,7 +421,7 @@ class OpenCodeClient:
         return await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200,), timeout_seconds=submit_timeout)
 
     async def fork_session(self, session_id: str, message_id: str | None = None) -> dict:
-        payload = {"messageID": message_id} if message_id else {}
+        payload = {"messageID": require_opencode_message_id(message_id)} if message_id else {}
         data = await self._request_json("POST", f"/session/{session_id}/fork", json=payload, expected_statuses=(200, 201))
         return data if isinstance(data, dict) else {}
 
@@ -430,7 +430,7 @@ class OpenCodeClient:
         return {"success": True, "supported": True, "status": status}
 
     async def revert_message(self, session_id: str, message_id: str, part_id: str | None = None) -> dict[str, Any]:
-        payload: dict[str, Any] = {"messageID": message_id}
+        payload: dict[str, Any] = {"messageID": require_opencode_message_id(message_id)}
         if part_id:
             payload["partID"] = part_id
         status, _ = await self._request_json_with_status("POST", f"/session/{session_id}/revert", json=payload, expected_statuses=(200, 202, 204))
@@ -454,17 +454,18 @@ class OpenCodeClient:
         ) or {"success": True}
 
     async def cancel_message(self, session_id: str, message_id: str | None = None) -> dict[str, Any]:
+        valid_message_id = require_opencode_message_id(message_id) if message_id else None
         try:
             return await self.abort_session(session_id)
         except Exception:
             pass
         attempts = [
-            ("POST", f"/session/{session_id}/cancel", {"messageID": message_id} if message_id else {}),
+            ("POST", f"/session/{session_id}/cancel", {"messageID": valid_message_id} if valid_message_id else {}),
         ]
-        if message_id:
+        if valid_message_id:
             attempts[0:0] = [
-                ("POST", f"/session/{session_id}/message/{message_id}/cancel", None),
-                ("POST", f"/session/{session_id}/message/{message_id}/abort", None),
+                ("POST", f"/session/{session_id}/message/{valid_message_id}/cancel", None),
+                ("POST", f"/session/{session_id}/message/{valid_message_id}/abort", None),
             ]
         for method, path, payload in attempts:
             try:

@@ -554,12 +554,14 @@ async def test_explicit_final_marker_marks_task_success(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_task_prompt_message_id_is_msg_prefixed(tmp_path, monkeypatch):
+async def test_task_prompt_message_id_is_msg_prefixed_and_imported(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     fake = FakeTaskOpenCodeClient()
     app = create_app(Settings.from_env(), opencode_client=fake)
     c = TestClient(TestServer(app)); await c.start_server()
-    await c.post("/api/tasks/execute", json={"task_id":"tmsg","task_type":"generic_agent_task","input_payload":{},"metadata":{}})
+    resp = await c.post("/api/tasks/execute", json={"task_id":"tmsg","task_type":"generic_agent_task","input_payload":{},"metadata":{}})
+    assert resp.status == 202
+    assert len(fake.prompt_async_calls) >= 1
     payload = fake.prompt_async_calls[0][1]
     assert payload["messageID"].startswith("msg")
     tj = json.loads((tmp_path / "state" / "tasks" / "tmsg.json").read_text())

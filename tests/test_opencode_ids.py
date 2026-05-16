@@ -12,7 +12,10 @@ def test_new_opencode_message_id_shape_and_uniqueness():
 
 
 def test_opencode_message_id_validation():
+    assert is_opencode_message_id("msg") is False
     assert is_opencode_message_id("msg_abc") is True
+    assert is_opencode_message_id("msg_test_1") is True
     assert is_opencode_message_id("portal-user-123") is False
+    assert is_opencode_message_id("efp-task-123") is False
     with pytest.raises(ValueError):
         require_opencode_message_id("portal-user-123")

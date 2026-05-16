@@ -18,6 +18,7 @@ from .app_keys import (
 
 from .chat_api import extract_assistant_text
 from .opencode_client import OpenCodeClientError
+from .opencode_ids import new_opencode_message_id
 from .session_store import SessionRecord
 from .task_completion_parser import parse_task_completion
 from .task_prompts import build_task_prompt
