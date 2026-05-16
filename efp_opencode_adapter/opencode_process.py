@@ -16,13 +16,17 @@ class OpenCodeProcessManager:
         self,
         settings: Settings,
         client: OpenCodeClient | None = None,
+        registry_check: Callable[[Settings, OpenCodeClient], Awaitable[dict]] | None = None,
     ):
         self.settings = settings
         self.client = client or OpenCodeClient(settings)
+        self.registry_check = registry_check
         self.process: asyncio.subprocess.Process | None = None
         self.last_restart_reason: str | None = None
         self.last_restart_at: str | None = None
         self.health_ok: bool | None = None
+        self.registry_ok: bool = False
+        self.registry_status: dict | None = None
         self.last_startup_error: str | None = None
 
     async def start(self, env: dict[str, str] | None = None, *, reason: str = "startup") -> dict:
@@ -52,9 +56,21 @@ class OpenCodeProcessManager:
             self.health_ok = True
         except Exception as exc:
             self.health_ok = False
+            self.registry_ok = False
             if not self.last_startup_error:
                 self.last_startup_error = self._startup_error_with_log_tail(str(exc), log_path)
             raise
+        if self.registry_check:
+            registry_status = await self.registry_check(self.settings, self.client)
+            self.registry_status = registry_status
+            if isinstance(registry_status, dict) and str(registry_status.get("status") or "").lower() == "ok":
+                self.registry_ok = True
+            else:
+                self.health_ok = False
+                self.registry_ok = False
+                error = self._sanitize(str((registry_status or {}).get("error") if isinstance(registry_status, dict) else "registry failed") or "registry failed")
+                self.last_startup_error = error
+                raise RuntimeError(error)
         return self.status_snapshot()
 
     async def stop(self, timeout_seconds: float = 10.0) -> dict:
@@ -78,6 +94,8 @@ class OpenCodeProcessManager:
             "running": running,
             "pid": self.process.pid if self.process else None,
             "health_ok": self.health_ok,
+            "registry_ok": self.registry_ok,
+            "registry_status": self.registry_status,
             "last_startup_error": self.last_startup_error,
             "last_restart_reason": self.last_restart_reason,
             "last_restart_at": self.last_restart_at,

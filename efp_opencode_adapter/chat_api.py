@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import re
@@ -48,6 +49,21 @@ from .opencode_message_adapter import (
 )
 from .skill_invocation import build_skill_prompt, evaluate_skill_invocation, parse_slash_invocation
 from .repository_workspace import ensure_repo_checkout, parse_create_pr_repo_request
+
+
+def _send_message_accepts_message_id(client: Any) -> bool:
+    try:
+        sig = inspect.signature(client.send_message)
+    except (TypeError, ValueError):
+        return True
+    return "message_id" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+
+
+async def _send_message(client: Any, session_id: str, *, parts: list[dict[str, Any]], model: str | None, agent: str | None, system: str | None, message_id: str | None = None) -> Any:
+    kwargs: dict[str, Any] = {"parts": parts, "model": model, "agent": agent, "system": system}
+    if message_id and _send_message_accepts_message_id(client):
+        kwargs["message_id"] = message_id
+    return await client.send_message(session_id, **kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +260,8 @@ async def _send_skill_prompt(
     skill_debug["used_skill_prompt"] = True
     if command_error:
         skill_debug["command_execution_error"] = command_error
-    response_payload = await client.send_message(
+    response_payload = await _send_message(
+        client,
         record.opencode_session_id,
         parts=parts,
         model=model,
@@ -610,7 +627,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                         user_message_id=initial_user_message_id,
                     )
         else:
-            response_payload = await client.send_message(record.opencode_session_id, parts=parts, model=model, agent=agent, system=system, message_id=initial_user_message_id)
+            response_payload = await _send_message(client, record.opencode_session_id, parts=parts, model=model, agent=agent, system=system, message_id=initial_user_message_id)
         completion_probe, waited_messages = await _wait_for_assistant_completion(
             client=client,
             opencode_session_id=record.opencode_session_id,
@@ -639,7 +656,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             before_messages = await client.list_messages(record.opencode_session_id)
             try:
                 continuation_parts = [{"type": "text", "text": settings.chat_auto_continue_prompt, "metadata": {"efp_internal": "auto_continue", "portal_request_id": request_id, "continuation_index": continuation_count}}]
-                continuation_response_payload = await client.send_message(record.opencode_session_id, parts=continuation_parts, model=model, agent=agent, system=system, message_id=cont_id)
+                continuation_response_payload = await _send_message(client, record.opencode_session_id, parts=continuation_parts, model=model, agent=agent, system=system, message_id=cont_id)
                 completion_probe, after_messages = await _wait_for_assistant_completion(client=client, opencode_session_id=record.opencode_session_id, response_payload=continuation_response_payload, before_messages=before_messages, timeout_seconds=settings.chat_completion_timeout_seconds, poll_seconds=settings.chat_completion_poll_seconds)
                 latest_response_payload = continuation_response_payload
                 latest_waited_messages = after_messages
@@ -931,6 +948,7 @@ def _is_stream_relevant_event(event: dict[str, Any], *, session_id: str, request
     event_session_id = event.get("session_id") or event.get("portal_session_id") or data.get("session_id")
     event_portal_request_id = event.get("portal_request_id") or data.get("portal_request_id")
     event_request_id = event.get("request_id") or data.get("request_id")
+    has_bridge_raw_type = bool(event.get("raw_type") or data.get("raw_type"))
 
     if event_session_id:
         if str(event_session_id) != session_id:
@@ -942,9 +960,9 @@ def _is_stream_relevant_event(event: dict[str, Any], *, session_id: str, request
         if str(event_portal_request_id) != request_id:
             return False
     elif event_request_id:
-        if str(event_request_id) != request_id:
+        if str(event_request_id) != request_id and not has_bridge_raw_type:
             return False
-    elif request_scoped:
+    elif request_scoped and event_type != "stream.started" and not has_bridge_raw_type:
         return False
 
     if event_type == "stream.started":

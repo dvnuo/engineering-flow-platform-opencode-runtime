@@ -69,7 +69,7 @@ def test_ci_unit_splits_p2_subset_by_domain():
     assert 'P2 tasks/recovery/tools subset' in script
     assert 'tests/test_tasks_api.py' in script
     assert 'tests/test_recovery.py' in script
-    assert 'tests/test_tool_sync.py' in script
+    assert 'tests/test_no_custom_tool_deps_contract.py' in script
 
 
 def test_ci_unit_runs_runtime_contract_default_skip_gate():

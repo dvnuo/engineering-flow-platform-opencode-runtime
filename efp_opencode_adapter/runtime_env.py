@@ -13,6 +13,7 @@ from .settings import Settings
 SECRET_MARKERS = ("TOKEN", "PASSWORD", "SECRET", "API_KEY", "ACCESS", "REFRESH", "AUTHORIZATION")
 MANAGED_EXTERNAL_ENV_KEYS = {
     "GITHUB_TOKEN", "GITHUB_ACCESS_TOKEN", "GITHUB_API_BASE_URL", "EFP_GITHUB_CONFIG_JSON",
+    "ATLASSIAN_CONFIG",
     "JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_PASSWORD", "JIRA_TOKEN", "JIRA_PROJECT_KEY", "EFP_JIRA_INSTANCES_JSON",
     "CONFLUENCE_BASE_URL", "CONFLUENCE_USERNAME", "CONFLUENCE_EMAIL", "CONFLUENCE_API_TOKEN", "CONFLUENCE_PASSWORD", "CONFLUENCE_TOKEN", "CONFLUENCE_SPACE_KEY", "EFP_CONFLUENCE_INSTANCES_JSON",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -115,6 +116,7 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         "HOME": os.getenv("HOME", "/root"),
         "OPENCODE_CONFIG": str(settings.opencode_config_path),
         "OPENCODE_DATA_DIR": str(settings.opencode_data_dir),
+        "ATLASSIAN_CONFIG": str(settings.atlassian_config_path),
         "EFP_RUNTIME_TYPE": "opencode",
         "EFP_WORKSPACE_DIR": str(settings.workspace_dir),
         "EFP_SKILLS_DIR": str(settings.skills_dir),
@@ -138,14 +140,17 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
     github_section_present = isinstance(cfg.get("github"), dict)
     github_enabled = github_section_present and _section_enabled(github)
 
-    github_token = _first_clean_secret(
-        github.get("api_token") if isinstance(github, dict) else None,
-        github.get("token") if isinstance(github, dict) else None,
-        github.get("access_token") if isinstance(github, dict) else None,
-        os.getenv("GH_TOKEN"),
-        os.getenv("GITHUB_TOKEN"),
-        os.getenv("EFP_GITHUB_TOKEN"),
-    )
+    if github_section_present and not github_enabled:
+        github_token = ""
+    else:
+        github_token = _first_clean_secret(
+            github.get("api_token") if isinstance(github, dict) else None,
+            github.get("token") if isinstance(github, dict) else None,
+            github.get("access_token") if isinstance(github, dict) else None,
+            os.getenv("GH_TOKEN"),
+            os.getenv("GITHUB_TOKEN"),
+            os.getenv("EFP_GITHUB_TOKEN"),
+        )
     github_username = _first_text(
         github.get("username") if isinstance(github, dict) else None,
         github.get("login") if isinstance(github, dict) else None,

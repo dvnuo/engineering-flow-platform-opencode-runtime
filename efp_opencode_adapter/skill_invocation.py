@@ -111,6 +111,13 @@ def evaluate_skill_invocation(settings: Settings, invocation: SlashInvocation) -
     if bool(skill.get("programmatic")) and not bool(skill.get("runtime_equivalence")):
         return SkillDecision(skill=skill, allowed=False, reason="programmatic_skill_requires_opencode_wrapper", permission_state=permission_state)
     if skill.get("missing_tools") or skill.get("missing_opencode_tools"):
+        if _missing_required_writeback_tools(skill):
+            return SkillDecision(
+                skill=skill,
+                allowed=False,
+                reason="missing_required_writeback_tools",
+                permission_state=permission_state,
+            )
         for mapping in (skill.get("tool_mappings") or []):
             if not isinstance(mapping, dict):
                 continue

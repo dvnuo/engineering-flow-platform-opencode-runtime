@@ -78,9 +78,9 @@ async def test_chat_stream_immediate_error_does_not_wait_for_heartbeat(tmp_path,
     await c.close()
 
 class RaceFake(FakeOpenCodeClient):
-    async def send_message(self, payload, **kwargs):
+    async def send_message(self, session_id, **kwargs):
         await self._bus.publish({'type':'tool.completed','session_id':'portal-race-1','request_id':'raw-opencode-tool-call-id','tool':'efp_race_tool','raw_type':'tool.complete'})
-        return {'ok': True, 'session_id': payload.get('session_id'), 'request_id': payload.get('request_id')}
+        return {"messages":[{"role":"assistant","content":"ok"}]}
 
 
 class DisconnectingFake(SlowFake):

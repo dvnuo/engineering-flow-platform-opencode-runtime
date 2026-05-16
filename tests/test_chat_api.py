@@ -1507,6 +1507,8 @@ async def test_chat_stream_disconnect_background_task_is_not_cancelled_and_gets_
 @pytest.mark.asyncio
 async def test_chat_ignores_non_msg_payload_message_id(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
     c = AutoContinueClient()
     app = create_app(Settings.from_env(), opencode_client=c)
     monkeypatch.setattr(app[REQUEST_BINDING_STORE_KEY], "complete", lambda request_id: None)

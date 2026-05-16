@@ -1,6 +1,6 @@
 import json
 
-from efp_opencode_adapter.opencode_config import build_opencode_config, model_from_runtime_profile, normalize_opencode_provider_id
+from efp_opencode_adapter.opencode_config import build_opencode_config, model_from_runtime_profile, normalize_opencode_provider_id, write_opencode_config
 from efp_opencode_adapter.settings import Settings
 
 
@@ -8,15 +8,17 @@ def test_build_opencode_config_defaults(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "workspace/.opencode/opencode.json"))
-    cfg, _, updated = build_opencode_config(Settings.from_env(), None)
+    settings = Settings.from_env()
+    cfg, _, updated = build_opencode_config(settings, None)
     assert cfg["autoupdate"] is False
     assert cfg["share"] == "disabled"
     assert cfg["server"] == {"hostname": "127.0.0.1", "port": 4096}
     assert "permission" in cfg and "efp-main" in cfg["agent"]
+    assert cfg["instructions"] == [str(settings.atlassian_instructions_path)]
     assert "model" not in cfg["agent"]["efp-main"]
     assert "prompt" not in cfg["agent"]["efp-main"]
     assert cfg["agent"]["efp-main"]["permission"] == {}
-    assert "permission" in updated and "agent" in updated
+    assert "permission" in updated and "agent" in updated and "instructions" in updated
 
 
 def test_model_mapping():
@@ -27,7 +29,7 @@ def test_model_mapping():
     assert normalize_opencode_provider_id("github_copilot") == "github-copilot"
 
 
-def test_permission_from_indexes(tmp_path, monkeypatch):
+def test_permission_from_skills_index_does_not_restore_external_tools(tmp_path, monkeypatch):
     workspace, state = tmp_path / "workspace", tmp_path / "state"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
@@ -37,18 +39,18 @@ def test_permission_from_indexes(tmp_path, monkeypatch):
     cfg, _, _ = build_opencode_config(Settings.from_env(), {"allowed_capability_ids": ["opencode.skill.alpha", "tool.read", "tool.update"]})
     perm = cfg["permission"]
     assert perm["skill"]["alpha"] == "allow"
-    assert perm["efp_read"] == "allow"
-    assert perm["efp_update"] == "allow"
+    assert "efp_read" not in perm
+    assert "efp_update" not in perm
 
 
-def test_permission_auto_allow_and_secret_not_leaked(tmp_path, monkeypatch):
+def test_removed_tool_index_auto_allow_and_secret_not_leaked(tmp_path, monkeypatch):
     workspace, state = tmp_path / "workspace", tmp_path / "state"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     state.mkdir(parents=True)
     (state / "tools-index.json").write_text(json.dumps({"tools": [{"capability_id": "tool.update", "opencode_name": "efp_update", "policy_tags": ["mutation"]}]}))
     cfg, _, _ = build_opencode_config(Settings.from_env(), {"allowed_capability_ids": ["tool.update"], "policy_context": {"allow_auto_run": True}, "llm": {"api_key": "SECRET"}})
-    assert cfg["permission"]["efp_update"] == "allow"
+    assert "efp_update" not in cfg["permission"]
     assert "SECRET" not in json.dumps(cfg)
 
 
@@ -118,3 +120,19 @@ def test_config_hash_deterministic(tmp_path, monkeypatch):
     _, h1, _ = build_opencode_config(s, {"llm": {"provider": "openai", "model": "gpt-5"}})
     _, h2, _ = build_opencode_config(s, {"llm": {"provider": "openai", "model": "gpt-5"}})
     assert h1 == h2
+
+
+def test_write_opencode_config_writes_generic_atlassian_instructions(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "workspace/.opencode/opencode.json"))
+    settings = Settings.from_env()
+    cfg, _, _ = build_opencode_config(settings, None)
+
+    write_opencode_config(settings, cfg)
+
+    content = settings.atlassian_instructions_path.read_text(encoding="utf-8")
+    assert "jira" in content
+    assert "confluence" in content
+    assert "--json" in content
+    assert "EFP" not in content

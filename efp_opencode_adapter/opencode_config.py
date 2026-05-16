@@ -9,7 +9,18 @@ from .index_loader import load_skills_index
 from .permission_generator import build_permission
 from .settings import Settings
 
-MANAGED_TOP_LEVEL_KEYS = {"permission", "agent", "server", "autoupdate", "share", "provider", "_efp_managed"}
+MANAGED_TOP_LEVEL_KEYS = {"permission", "agent", "server", "autoupdate", "share", "provider", "instructions", "_efp_managed"}
+
+ATLASSIAN_INSTRUCTIONS_CONTENT = """# Atlassian CLI
+
+Available Bash commands: `jira`, `confluence`.
+
+- Always use `--json` for command output.
+- Inspect Jira capabilities with `jira commands --json`, `jira schema issue.map-csv --json`, and `jira schema issue.bulk-create --json`.
+- Inspect Confluence capabilities with `confluence commands --json`; for schema details use `confluence schema <command> --json` for the specific command you intend to run.
+- For CSV bulk-create work, never create issues immediately. Inspect the CSV, an example Jira issue, the field catalog, and createmeta. Run `jira issue map-csv`, run `jira issue bulk-create --dry-run`, ask for confirmation, then run `jira issue bulk-create --yes`.
+- Use Confluence commands similarly for documentation operations, inspecting schemas and target pages or spaces before writing.
+"""
 
 
 def normalize_opencode_provider_id(provider: str | None) -> str:
@@ -82,6 +93,7 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
         "share": "disabled",
         "server": {"hostname": "127.0.0.1", "port": 4096},
         "permission": permission,
+        "instructions": [str(settings.atlassian_instructions_path)],
         "agent": {
             "efp-main": {
                 "description": "Portal managed OpenCode primary agent",
@@ -91,7 +103,7 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
             }
         },
     }
-    updated = ["permission", "agent"]
+    updated = ["permission", "agent", "instructions"]
     model = model_from_runtime_profile(runtime_config)
     if model:
         generated["agent"]["efp-main"]["model"] = model
@@ -105,11 +117,21 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
 
 
 def write_opencode_config(settings: Settings, config: dict) -> None:
+    write_atlassian_instructions(settings)
     path = settings.opencode_config_path
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = Path(f"{path}.tmp")
     tmp_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp_path.replace(path)
+
+
+def write_atlassian_instructions(settings: Settings) -> Path:
+    path = settings.atlassian_instructions_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = Path(f"{path}.tmp")
+    tmp_path.write_text(ATLASSIAN_INSTRUCTIONS_CONTENT, encoding="utf-8")
+    tmp_path.replace(path)
+    return path
 
 
 def _hash_index_payload(payload: dict) -> str:

@@ -29,9 +29,43 @@ def normalize_permission_mode(raw: Any) -> str:
 
 
 def profile_policy_permission_baseline() -> dict[str, Any]:
+    atlassian_bash = {
+        "jira commands*": "allow",
+        "jira schema*": "allow",
+        "jira version*": "allow",
+        "jira auth test*": "allow",
+        "jira instance list*": "allow",
+        "jira instance get*": "allow",
+        "jira resolve-url*": "allow",
+        "jira field list*": "allow",
+        "jira issue get*": "allow",
+        "jira issue search*": "allow",
+        "jira issue createmeta*": "allow",
+        "jira issue editmeta*": "allow",
+        "jira issue map-csv*": "allow",
+        "jira issue bulk-validate*": "allow",
+        "jira issue bulk-create *--dry-run*": "allow",
+        "jira *": "ask",
+        "confluence commands*": "allow",
+        "confluence schema*": "allow",
+        "confluence version*": "allow",
+        "confluence auth test*": "allow",
+        "confluence instance list*": "allow",
+        "confluence instance get*": "allow",
+        "confluence resolve-url*": "allow",
+        "confluence search*": "allow",
+        "confluence cql*": "allow",
+        "confluence page get*": "allow",
+        "confluence page body*": "allow",
+        "confluence space get*": "allow",
+        "confluence space list*": "allow",
+        "confluence *": "ask",
+    }
+    bash = {"*": "ask", "git *": "allow", "gh *": "allow", "git status*": "allow", "git diff*": "allow", "git log*": "allow"}
+    bash.update(atlassian_bash)
     return {
         "*": "ask", "read": "allow", "glob": "allow", "grep": "allow", "edit": "ask", "write": "ask",
-        "bash": {"*": "ask", "git *": "allow", "gh *": "allow", "git status*": "allow", "git diff*": "allow", "git log*": "allow"},
+        "bash": bash,
         "external_directory": "allow", "webfetch": "ask", "websearch": "ask", "todowrite": "ask", "question": "ask", "skill": {"*": "allow"},
     }
 
