@@ -43,6 +43,7 @@ def profile_policy_permission_baseline() -> dict[str, Any]:
         "jira issue createmeta*": "allow",
         "jira issue editmeta*": "allow",
         "jira issue map-csv*": "allow",
+        "jira issue bulk-validate*": "allow",
         "jira issue bulk-create *--dry-run*": "allow",
         "jira *": "ask",
         "confluence commands*": "allow",
