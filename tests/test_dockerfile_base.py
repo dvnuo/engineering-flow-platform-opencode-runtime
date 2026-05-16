@@ -4,19 +4,20 @@ from pathlib import Path
 def test_dockerfile_uses_ubuntu_base_not_node_base():
     root = Path(__file__).resolve().parents[1]
     text = (root / "Dockerfile").read_text(encoding="utf-8")
+    assert text.startswith("FROM ubuntu:24.04")
     assert "FROM ubuntu:24.04" in text
-    assert "FROM golang:" in text
-    assert "AS atlassian-tools" in text
+    assert "FROM golang:" not in text
     assert "ARG OPENCODE_VERSION=1.14.39" in text
     assert "FROM node:" not in text
     assert "FROM node@" not in text
 
 
-def test_dockerfile_keeps_atlassian_tools_ref_configurable_and_checks_schemas():
+def test_dockerfile_uses_prebuilt_custom_tools_and_checks_schemas():
     root = Path(__file__).resolve().parents[1]
     text = (root / "Dockerfile").read_text(encoding="utf-8")
-    assert "ARG ATLASSIAN_TOOLS_REPO=" in text
-    assert "ARG ATLASSIAN_TOOLS_REF=master" in text
+    assert "ARG CUSTOM_TOOLS_DIR=runtime-tools" in text
+    assert "COPY ${CUSTOM_TOOLS_DIR}/jira /usr/local/bin/jira" in text
+    assert "COPY ${CUSTOM_TOOLS_DIR}/confluence /usr/local/bin/confluence" in text
     assert "jira version --json" in text
     assert "confluence version --json" in text
     assert "jira commands --json" in text
