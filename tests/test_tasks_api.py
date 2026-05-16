@@ -167,6 +167,8 @@ async def test_prompt_async_none_uses_generated_message_id(tmp_path, monkeypatch
     await c.post('/api/tasks/execute', json={'task_id': 'tnone', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
     payload = fake.prompt_async_calls[0][1]
     assert payload.get("messageID")
+    assert payload["messageID"].startswith("msg")
+    assert "efp-task-" not in payload["messageID"]
     task_json = json.loads((tmp_path / 'state' / 'tasks' / 'tnone.json').read_text())
     assert task_json['opencode_prompt_id'] == payload["messageID"]
     assert task_json['opencode_message_id'] == payload["messageID"]
@@ -548,4 +550,21 @@ async def test_explicit_final_marker_marks_task_success(tmp_path, monkeypatch):
     await c.post('/api/tasks/execute', json={'task_id':'tfinal','task_type':'generic_agent_task','input_payload':{},'metadata':{}})
     p = await _wait_terminal(c, 'tfinal')
     assert p['status'] == 'success'
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_task_prompt_message_id_is_msg_prefixed_and_imported(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    resp = await c.post("/api/tasks/execute", json={"task_id":"tmsg","task_type":"generic_agent_task","input_payload":{},"metadata":{}})
+    assert resp.status == 202
+    assert len(fake.prompt_async_calls) >= 1
+    payload = fake.prompt_async_calls[0][1]
+    assert payload["messageID"].startswith("msg")
+    tj = json.loads((tmp_path / "state" / "tasks" / "tmsg.json").read_text())
+    assert tj["opencode_message_id"].startswith("msg")
+    assert "efp-task-" not in tj["opencode_message_id"]
     await c.close()

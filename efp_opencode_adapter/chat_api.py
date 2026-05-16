@@ -37,6 +37,7 @@ from .thinking_events import (
 )
 from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
 from .opencode_config import normalize_opencode_provider_id
+from .opencode_ids import is_opencode_message_id, new_opencode_message_id
 from .opencode_message_adapter import (
     extract_last_assistant_visible_text,
     find_latest_assistant_completion,
@@ -449,7 +450,11 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
 
         invocation = parse_slash_invocation(message)
         skill_debug = None
-        initial_user_message_id = payload.get("message_id") if isinstance(payload.get("message_id"), str) and payload.get("message_id", "").strip() else f"portal-user-{request_id}"
+        requested_message_id = payload.get("message_id")
+        if is_opencode_message_id(requested_message_id):
+            initial_user_message_id = str(requested_message_id)
+        else:
+            initial_user_message_id = new_opencode_message_id()
         if binding_store is not None:
             binding_store.bind_message(record.opencode_session_id, initial_user_message_id, portal_session_id, request_id, kind="chat")
         if invocation:
@@ -626,14 +631,15 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
         allow_continue, continue_reason = _should_auto_continue(completion_state, completion_probe, assistant_text, settings)
         while continuation_count < settings.chat_auto_continue_max_turns and allow_continue:
             continuation_count += 1
-            cont_id = f"efp-auto-continue-{request_id}-{continuation_count}"
+            cont_id = new_opencode_message_id()
             if binding_store is not None:
                 binding_store.bind_message(record.opencode_session_id, cont_id, portal_session_id, request_id, kind="continuation")
             cont_evt = add_trace_context({"type":"continuation.started","session_id":portal_session_id,"request_id":request_id,"opencode_session_id":record.opencode_session_id,"data":{"index":continuation_count}}, trace_context)
             runtime_events.append(cont_evt); await bus.publish(cont_evt)
             before_messages = await client.list_messages(record.opencode_session_id)
             try:
-                continuation_response_payload = await client.send_message(record.opencode_session_id, parts=[{"type":"text","text":settings.chat_auto_continue_prompt}], model=model, agent=agent, system=system, message_id=cont_id)
+                continuation_parts = [{"type": "text", "text": settings.chat_auto_continue_prompt, "metadata": {"efp_internal": "auto_continue", "portal_request_id": request_id, "continuation_index": continuation_count}}]
+                continuation_response_payload = await client.send_message(record.opencode_session_id, parts=continuation_parts, model=model, agent=agent, system=system, message_id=cont_id)
                 completion_probe, after_messages = await _wait_for_assistant_completion(client=client, opencode_session_id=record.opencode_session_id, response_payload=continuation_response_payload, before_messages=before_messages, timeout_seconds=settings.chat_completion_timeout_seconds, poll_seconds=settings.chat_completion_poll_seconds)
                 latest_response_payload = continuation_response_payload
                 latest_waited_messages = after_messages

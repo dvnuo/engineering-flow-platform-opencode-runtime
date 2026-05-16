@@ -367,8 +367,8 @@ async def test_send_message_includes_message_id_no_reply_and_tools(monkeypatch):
     await server.start_server()
     monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
     client = OpenCodeClient(Settings.from_env())
-    await client.send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model="m", agent="a", message_id="m-1", no_reply=True, tools={"x": False})
-    assert captured["body"]["messageID"] == "m-1"
+    await client.send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model="m", agent="a", message_id="msg_test_1", no_reply=True, tools={"x": False})
+    assert captured["body"]["messageID"] == "msg_test_1"
     assert captured["body"]["noReply"] is True
     assert captured["body"]["tools"] == {"x": False}
     await server.close()
@@ -387,8 +387,8 @@ async def test_fork_session_posts_message_id(monkeypatch):
     server = TestServer(app)
     await server.start_server()
     monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
-    out = await OpenCodeClient(Settings.from_env()).fork_session("ses-1", "m-prev")
-    assert captured["body"] == {"messageID": "m-prev"}
+    out = await OpenCodeClient(Settings.from_env()).fork_session("ses-1", "msg_prev")
+    assert captured["body"] == {"messageID": "msg_prev"}
     assert out == {"id": "ses-2"}
     await server.close()
 
@@ -751,3 +751,108 @@ async def test_send_message_uses_submit_timeout(monkeypatch):
     monkeypatch.setattr(client, "_request_json", _fake)
     await client.send_message("s1", parts=[{"type":"text","text":"hi"}], model=None, agent=None)
     assert captured["timeout_seconds"] >= 300
+
+
+@pytest.mark.asyncio
+async def test_send_message_rejects_invalid_message_id_before_post(monkeypatch):
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
+    client = OpenCodeClient(Settings.from_env())
+    with pytest.raises(ValueError):
+        await client.send_message("ses-1", parts=[{"type":"text","text":"hi"}], model="m", agent="a", message_id="portal-user-x")
+
+
+@pytest.mark.asyncio
+async def test_prompt_async_rejects_invalid_message_id_before_post(monkeypatch):
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
+    client = OpenCodeClient(Settings.from_env())
+    with pytest.raises(ValueError):
+        await client.prompt_async("ses-1", {"messageID": "efp-task-x", "parts": [{"type":"text", "text":"hi"}]})
+
+
+@pytest.mark.asyncio
+async def test_prompt_async_accepts_valid_message_id(monkeypatch):
+    app = web.Application()
+    captured = {}
+    async def prompt(request):
+        captured["body"] = await request.json()
+        return web.Response(status=204)
+    app.router.add_post("/session/ses-1/prompt_async", prompt)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+    await client.prompt_async("ses-1", {"messageID": "msg_task_1", "parts": [{"type":"text", "text":"hi"}]})
+    assert captured["body"]["messageID"] == "msg_task_1"
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_fork_session_rejects_invalid_message_id_before_post(monkeypatch):
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
+    with pytest.raises(ValueError):
+        await OpenCodeClient(Settings.from_env()).fork_session("s1", "portal-user-x")
+
+
+@pytest.mark.asyncio
+async def test_revert_message_rejects_invalid_message_id_before_post(monkeypatch):
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
+    with pytest.raises(ValueError):
+        await OpenCodeClient(Settings.from_env()).revert_message("s1", "efp-auto-continue-x")
+
+
+@pytest.mark.asyncio
+async def test_cancel_message_rejects_invalid_message_id_before_post(monkeypatch):
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
+    with pytest.raises(ValueError):
+        await OpenCodeClient(Settings.from_env()).cancel_message("s1", "portal-user-x")
+
+
+@pytest.mark.asyncio
+async def test_fork_session_accepts_valid_message_id(monkeypatch):
+    app = web.Application()
+    captured = {}
+    async def fork(request):
+        captured["body"] = await request.json()
+        return web.json_response({"id": "ses-2"})
+    app.router.add_post("/session/s1/fork", fork)
+    server = TestServer(app); await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    await OpenCodeClient(Settings.from_env()).fork_session("s1", "msg_valid_1")
+    assert captured["body"]["messageID"] == "msg_valid_1"
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_revert_message_accepts_valid_message_id(monkeypatch):
+    app = web.Application()
+    captured = {}
+    async def revert(request):
+        captured["body"] = await request.json()
+        return web.Response(status=204)
+    app.router.add_post("/session/s1/revert", revert)
+    server = TestServer(app); await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    out = await OpenCodeClient(Settings.from_env()).revert_message("s1", "msg_valid_2")
+    assert out["success"] is True
+    assert captured["body"]["messageID"] == "msg_valid_2"
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_message_accepts_valid_message_id_fallback(monkeypatch):
+    app = web.Application()
+    calls = []
+    async def cancel_msg(_):
+        calls.append("msg-cancel")
+        return web.json_response({}, status=200)
+    app.router.add_post("/session/s1/message/msg_valid_3/cancel", cancel_msg)
+    server = TestServer(app); await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+    async def boom(_sid):
+        raise RuntimeError("no abort")
+    client.abort_session = boom
+    out = await client.cancel_message("s1", "msg_valid_3")
+    assert out["success"] is True
+    assert calls == ["msg-cancel"]
+    await server.close()

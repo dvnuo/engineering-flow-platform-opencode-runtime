@@ -76,8 +76,30 @@ def message_to_text(message: Any) -> str:
     return message_to_visible_text(message)
 
 
+def _message_parts(message: Any) -> list[dict[str, Any]]:
+    if isinstance(message, dict):
+        parts = message.get("parts")
+        if isinstance(parts, list):
+            return [p for p in parts if isinstance(p, dict)]
+        message_obj = message.get("message")
+        if isinstance(message_obj, dict) and isinstance(message_obj.get("parts"), list):
+            return [p for p in message_obj["parts"] if isinstance(p, dict)]
+    return []
+
+
+def _is_internal_efp_message(message: Any) -> bool:
+    mid = _message_id(message)
+    if mid.startswith("efp-auto-continue-"):
+        return True
+    for part in _message_parts(message):
+        metadata = part.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("efp_internal") == "auto_continue":
+            return True
+    return False
+
+
 def _to_efp_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    filtered = [msg for msg in messages if not _message_id(msg).startswith("efp-auto-continue-")]
+    filtered = [msg for msg in messages if not _is_internal_efp_message(msg)]
     return [to_efp_message(msg, index=idx) for idx, msg in enumerate(filtered)]
 
 
