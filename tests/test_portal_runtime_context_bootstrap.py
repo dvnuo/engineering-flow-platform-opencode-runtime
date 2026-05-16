@@ -33,7 +33,9 @@ async def test_bootstrap_requires_portal_context_env_when_required(tmp_path, mon
 async def test_bootstrap_fetches_portal_context_and_writes_config_and_auth(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "workspace"
     data = tmp_path / "opdata"
+    state = tmp_path / "state"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(data))
 
     async def runtime_context(_):
@@ -82,7 +84,9 @@ async def test_bootstrap_fetches_portal_context_and_writes_config_and_auth(tmp_p
 async def test_bootstrap_copilot_ghu_token_skips_auth(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "workspace"
     data = tmp_path / "opdata"
+    state = tmp_path / "state"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(data))
 
     async def runtime_context(_):
@@ -105,7 +109,9 @@ async def test_bootstrap_copilot_ghu_token_skips_auth(tmp_path, monkeypatch, cap
 async def test_bootstrap_infers_auth_provider_from_model_prefix(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     data = tmp_path / "opdata"
+    state = tmp_path / "state"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(data))
 
     async def runtime_context(_):
@@ -134,7 +140,9 @@ async def test_bootstrap_infers_auth_provider_from_model_prefix(tmp_path, monkey
 async def test_bootstrap_oauth_by_runtime_opencode_writes_auth_without_leaking_tokens(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "workspace"
     data = tmp_path / "opdata"
+    state = tmp_path / "state"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(data))
 
     async def runtime_context(_):
