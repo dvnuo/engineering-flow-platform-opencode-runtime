@@ -21,6 +21,8 @@ def test_dockerfile_consumes_prebuilt_custom_tools_without_builder_stage():
         _join("ATLASSIAN", "_", "TOOLS_REF"),
         "git clone",
         "go build -o /out/jira",
+        "go build -o /out/confluence",
+        "COPY --from=" + _join("atlassian", "-", "tools"),
     ]
     for token in forbidden:
         assert token not in text
@@ -65,3 +67,4 @@ def test_smoke_requires_runtime_tools_without_preparing_them():
         assert token in script
     assert "git clone" not in script
     assert "golang" not in script
+    assert "go build" not in script

@@ -1,12 +1,19 @@
 from pathlib import Path
 
 
+def _join(*parts: str) -> str:
+    return "".join(parts)
+
+
 def test_dockerfile_uses_ubuntu_base_not_node_base():
     root = Path(__file__).resolve().parents[1]
     text = (root / "Dockerfile").read_text(encoding="utf-8")
     assert text.startswith("FROM ubuntu:24.04")
     assert "FROM ubuntu:24.04" in text
     assert "FROM golang:" not in text
+    assert "AS " + _join("atlassian", "-", "tools") not in text
+    assert _join("ATLASSIAN", "_", "TOOLS_REPO") not in text
+    assert _join("ATLASSIAN", "_", "TOOLS_REF") not in text
     assert "ARG OPENCODE_VERSION=1.14.39" in text
     assert "FROM node:" not in text
     assert "FROM node@" not in text
@@ -18,6 +25,7 @@ def test_dockerfile_uses_prebuilt_custom_tools_and_checks_schemas():
     assert "ARG CUSTOM_TOOLS_DIR=runtime-tools" in text
     assert "COPY ${CUSTOM_TOOLS_DIR}/jira /usr/local/bin/jira" in text
     assert "COPY ${CUSTOM_TOOLS_DIR}/confluence /usr/local/bin/confluence" in text
+    assert "COPY --from=" + _join("atlassian", "-", "tools") not in text
     assert "jira version --json" in text
     assert "confluence version --json" in text
     assert "jira commands --json" in text
