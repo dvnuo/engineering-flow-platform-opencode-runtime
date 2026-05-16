@@ -130,6 +130,6 @@ run_pytest_gate "P2 event/profile subset" "${PYTEST_TIMEOUT_SECONDS}" -q \
 run_pytest_gate "P2 tasks/recovery/tools subset" "${PYTEST_TIMEOUT_SECONDS}" -q \
   tests/test_tasks_api.py \
   tests/test_recovery.py \
-  tests/test_tool_sync.py
+  tests/test_no_custom_tool_deps_contract.py
 
 run_pytest_gate "full pytest" "${FULL_PYTEST_TIMEOUT_SECONDS}" -q

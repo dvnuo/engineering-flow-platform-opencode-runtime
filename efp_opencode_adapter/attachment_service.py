@@ -33,7 +33,36 @@ class AttachmentService:
     def sanitize_filename(self, name: str | None) -> str:
         cleaned = (name or "attachment.bin").replace("\x00", "").replace("\r", "").replace("\n", "")
         cleaned = cleaned.replace("\\", "/").split("/")[-1].strip()
+        if cleaned in {"", ".", ".."}:
+            return "attachment.bin"
         return cleaned or "attachment.bin"
+
+    def _workspace_upload_path(self, sid: str, fid: str, name: str) -> Path:
+        root = (self.settings.workspace_dir / "uploads").resolve()
+        target = (root / sid / fid / name).resolve()
+        if not target.is_relative_to(root):
+            raise ValueError("invalid upload path")
+        return target
+
+    def _materialize_workspace_file(self, sid: str, fid: str, name: str, data: bytes) -> str:
+        target = self._workspace_upload_path(sid, fid, name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return str(target)
+
+    def _delete_workspace_file(self, meta: dict) -> None:
+        workspace_path = meta.get("workspace_path")
+        if not workspace_path:
+            return
+        root = (self.settings.workspace_dir / "uploads").resolve()
+        target = Path(str(workspace_path)).resolve()
+        if not target.is_relative_to(root):
+            return
+        if target.exists():
+            target.unlink()
+        parent = target.parent
+        if parent.exists() and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
 
     def upload(self, session_id, filename, data, content_type=None) -> dict:
         sid = self.sanitize_session_id(session_id)
@@ -42,6 +71,7 @@ class AttachmentService:
         base = self.attachments_root / sid / fid
         base.mkdir(parents=True, exist_ok=True)
         (base / "original").write_bytes(data)
+        workspace_path = self._materialize_workspace_file(sid, fid, name, data)
         now = datetime.now(timezone.utc).isoformat()
         meta = {
             "file_id": fid,
@@ -49,12 +79,13 @@ class AttachmentService:
             "name": name,
             "size": len(data),
             "content_type": content_type or mimetypes.guess_type(name)[0] or "application/octet-stream",
+            "workspace_path": workspace_path,
             "created_at": now,
             "updated_at": now,
             "parsed": False,
         }
         (base / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"success": True, "file_id": fid, "name": name, "size": len(data), "content_type": meta["content_type"]}
+        return {"success": True, "file_id": fid, "session_id": sid, "name": name, "size": len(data), "content_type": meta["content_type"], "workspace_path": workspace_path}
 
     def resolve_attachment(self, file_id, session_id=None) -> Path:
         fid = self.sanitize_file_id(file_id)
@@ -87,8 +118,10 @@ class AttachmentService:
 
     def delete(self, file_id, session_id=None) -> dict:
         base = self.resolve_attachment(file_id, session_id)
+        meta = self.get_metadata(file_id, session_id)
         fid = base.name
         shutil.rmtree(base)
+        self._delete_workspace_file(meta)
         return {"success": True, "file_id": fid, "deleted": True}
 
     def download_path(self, file_id, session_id=None):
@@ -143,7 +176,7 @@ class AttachmentService:
                 chunk_count = len(pdata.get("chunks", []))
                 total_chars = len(pdata.get("text", ""))
                 parsed_at = pdata.get("parsed_at")
-            out.append({"file_id": meta["file_id"], "name": meta["name"], "size": meta["size"], "content_type": meta["content_type"], "parsed": bool(meta.get("parsed")), "chunk_count": chunk_count, "total_chars": total_chars, "parsed_at": parsed_at})
+            out.append({"file_id": meta["file_id"], "name": meta["name"], "size": meta["size"], "content_type": meta["content_type"], "workspace_path": meta.get("workspace_path"), "parsed": bool(meta.get("parsed")), "chunk_count": chunk_count, "total_chars": total_chars, "parsed_at": parsed_at})
         return {"success": True, "session_id": listing["session_id"], "files": out}
 
     def search_chunks(self, session_id=None, query="", top_k=5) -> dict:

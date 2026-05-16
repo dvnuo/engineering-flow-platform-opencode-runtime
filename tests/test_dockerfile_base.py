@@ -4,7 +4,9 @@ from pathlib import Path
 def test_dockerfile_uses_ubuntu_base_not_node_base():
     root = Path(__file__).resolve().parents[1]
     text = (root / "Dockerfile").read_text(encoding="utf-8")
-    assert text.startswith("FROM ubuntu:24.04")
+    assert "FROM ubuntu:24.04" in text
+    assert "FROM golang:" in text
+    assert "AS atlassian-tools" in text
     assert "ARG OPENCODE_VERSION=1.14.39" in text
     assert "FROM node:" not in text
     assert "FROM node@" not in text

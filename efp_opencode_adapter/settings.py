@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -32,6 +32,8 @@ class Settings:
     # It must never be used as a startup compatibility gate.
     opencode_version: str | None
     ready_timeout_seconds: int
+    atlassian_config_path: Path = field(default_factory=lambda: Path(os.getenv("ATLASSIAN_CONFIG") or (Path(os.getenv("HOME", "/root")) / ".config" / "atlassian" / "config.json")))
+    atlassian_instructions_path: Path = field(default_factory=lambda: Path("/workspace/.opencode/instructions/atlassian-cli.md"))
     event_bridge_enabled: bool = True
     event_bridge_initial_backoff_seconds: float = 1.0
     event_bridge_max_backoff_seconds: float = 30.0
@@ -52,17 +54,21 @@ class Settings:
 
     @classmethod
     def from_env(cls, opencode_url: str | None = None) -> "Settings":
+        workspace_dir = Path(os.getenv("EFP_WORKSPACE_DIR", "/workspace"))
+        home_dir = Path(os.getenv("HOME", "/root"))
         return cls(
             opencode_url=opencode_url or os.getenv("EFP_OPENCODE_URL", "http://127.0.0.1:4096"),
             adapter_state_dir=Path(os.getenv("EFP_ADAPTER_STATE_DIR", "/root/.local/share/efp-compat")),
-            workspace_dir=Path(os.getenv("EFP_WORKSPACE_DIR", "/workspace")),
+            workspace_dir=workspace_dir,
             skills_dir=Path(os.getenv("EFP_SKILLS_DIR", "/app/skills")),
-            workspace_repos_dir=Path(os.getenv("EFP_WORKSPACE_REPOS_DIR", str(Path(os.getenv("EFP_WORKSPACE_DIR", "/workspace")) / "repos"))),
+            workspace_repos_dir=Path(os.getenv("EFP_WORKSPACE_REPOS_DIR", str(workspace_dir / "repos"))),
             git_checkout_timeout_seconds=float(os.getenv("EFP_GIT_CHECKOUT_TIMEOUT_SECONDS", "120")),
             opencode_data_dir=Path(os.getenv("OPENCODE_DATA_DIR", "/root/.local/share/opencode")),
             opencode_config_path=Path(os.getenv("OPENCODE_CONFIG", "/workspace/.opencode/opencode.json")),
             opencode_version=(os.getenv("OPENCODE_VERSION") or None),
             ready_timeout_seconds=int(os.getenv("EFP_OPENCODE_READY_TIMEOUT_SECONDS", "60")),
+            atlassian_config_path=Path(os.getenv("ATLASSIAN_CONFIG") or (home_dir / ".config" / "atlassian" / "config.json")),
+            atlassian_instructions_path=Path(os.getenv("ATLASSIAN_INSTRUCTIONS_PATH", str(workspace_dir / ".opencode" / "instructions" / "atlassian-cli.md"))),
             event_bridge_enabled=_env_bool("EFP_OPENCODE_EVENT_BRIDGE_ENABLED", True),
             event_bridge_initial_backoff_seconds=float(os.getenv("EFP_OPENCODE_EVENT_BRIDGE_INITIAL_BACKOFF_SECONDS", "1.0")),
             event_bridge_max_backoff_seconds=float(os.getenv("EFP_OPENCODE_EVENT_BRIDGE_MAX_BACKOFF_SECONDS", "30.0")),

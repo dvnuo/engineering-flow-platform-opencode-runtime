@@ -67,6 +67,10 @@ class ProfileOverlay:
     gh_config_dir: str | None = None
     git_askpass_path: str | None = None
     gitconfig_path: str | None = None
+    atlassian_cli_configured: bool = False
+    atlassian_config_path: str | None = None
+    atlassian_jira_instances: int = 0
+    atlassian_confluence_instances: int = 0
 
 
 def redact_secrets(value: Any) -> Any:
@@ -133,6 +137,10 @@ class ProfileOverlayStore:
             gh_config_dir=(str(payload.get("gh_config_dir")) if payload.get("gh_config_dir") is not None else None),
             git_askpass_path=(str(payload.get("git_askpass_path")) if payload.get("git_askpass_path") is not None else None),
             gitconfig_path=(str(payload.get("gitconfig_path")) if payload.get("gitconfig_path") is not None else None),
+            atlassian_cli_configured=bool(payload.get("atlassian_cli_configured", False)),
+            atlassian_config_path=(str(payload.get("atlassian_config_path")) if payload.get("atlassian_config_path") is not None else None),
+            atlassian_jira_instances=int(payload.get("atlassian_jira_instances", 0) or 0),
+            atlassian_confluence_instances=int(payload.get("atlassian_confluence_instances", 0) or 0),
         )
 
     def save(self, overlay: ProfileOverlay) -> None:
@@ -173,4 +181,8 @@ def build_profile_status_payload(settings: Settings) -> dict[str, Any]:
         "gh_config_dir": overlay.gh_config_dir,
         "git_askpass_path": overlay.git_askpass_path,
         "gitconfig_path": overlay.gitconfig_path,
+        "atlassian_cli_configured": overlay.atlassian_cli_configured,
+        "atlassian_config_path": overlay.atlassian_config_path,
+        "atlassian_jira_instances": overlay.atlassian_jira_instances,
+        "atlassian_confluence_instances": overlay.atlassian_confluence_instances,
     }

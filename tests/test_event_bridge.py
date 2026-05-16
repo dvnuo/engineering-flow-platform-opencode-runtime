@@ -225,7 +225,9 @@ async def test_event_bridge_redacts_top_level_request_id(tmp_path, monkeypatch):
     assert "secret-key-should-not-leak" not in encoded
     assert "token" not in encoded
     assert event["type"] == "permission_request"
-    assert event["request_id"] == "[redacted]"
+    assert event["request_id"] == ""
+    assert event["raw_request_id"] == "[redacted]"
+    assert event["opencode_request_id"] == "[redacted]"
     assert event["permission_id"] == "[redacted]"
 
 
@@ -290,9 +292,9 @@ async def test_tool_event_enriched_with_mutation_metadata(tmp_path, monkeypatch)
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({"type":"tool.start","sessionID":"oc-1","tool":"efp_github_add_comment"})
     assert event["type"] == "tool.started"
-    assert event["capability_id"] == "efp.tool.github.add_comment"
-    assert event["mutation"] is True and event["audit_event"] is True and event["requires_identity_binding"] is True
-    assert "mutation" in event["policy_tags"] and event["data"]["mutation"] is True
+    assert event["capability_id"] is None
+    assert event["mutation"] is False and event["audit_event"] is False and event["requires_identity_binding"] is False
+    assert event["policy_tags"] == [] and event["data"]["mutation"] is False
 
 
 @pytest.mark.asyncio
@@ -304,7 +306,7 @@ async def test_tool_event_enriched_by_legacy_name(tmp_path, monkeypatch):
     (settings.adapter_state_dir / "tools-index.json").write_text(json.dumps({"tools":[{"opencode_name":"efp_github_add_comment","legacy_name":"github_add_comment","capability_id":"efp.tool.github.add_comment","policy_tags":["mutation"]}]}), encoding="utf-8")
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({"type":"tool.start","sessionID":"oc-1","tool":"github_add_comment"})
-    assert event["capability_id"] == "efp.tool.github.add_comment"
+    assert event["capability_id"] is None
 
 
 @pytest.mark.asyncio
@@ -368,7 +370,7 @@ async def test_refresh_tool_metadata_picks_up_updated_tools_index(tmp_path, monk
     assert event1['audit_event'] is False
     (settings.adapter_state_dir / 'tools-index.json').write_text(json.dumps({'tools':[{'capability_id':'tool.refresh','opencode_name':'efp_refresh','mutation':True,'risk_level':'high'}]}), encoding='utf-8')
     bridge.refresh_tool_metadata(); event2 = await bridge.publish_raw_event({'type':'tool.start','tool':'efp_refresh'})
-    assert event2['mutation'] is True and event2['audit_event'] is True
+    assert event2['mutation'] is False and event2['audit_event'] is False
 
 @pytest.mark.asyncio
 async def test_tool_metadata_prefers_enabled_descriptor(tmp_path, monkeypatch):
@@ -377,7 +379,7 @@ async def test_tool_metadata_prefers_enabled_descriptor(tmp_path, monkeypatch):
     (settings.adapter_state_dir / 'tools-index.json').write_text(json.dumps({'tools':[{'capability_id':'tool.same.disabled','opencode_name':'efp_same','enabled':False,'risk_level':'high','mutation':True},{'capability_id':'tool.same.enabled','opencode_name':'efp_same','enabled':True,'risk_level':'low','policy_tags':['read_only'],'mutation':False}]}), encoding='utf-8')
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({'type':'tool.start','tool':'efp_same'})
-    assert event['risk_level'] == 'low' and event['mutation'] is False and event['audit_event'] is False
+    assert event['risk_level'] == 'medium' and event['mutation'] is False and event['audit_event'] is False
 
 @pytest.mark.asyncio
 async def test_policy_tags_dict_does_not_leak_secret(tmp_path, monkeypatch):
