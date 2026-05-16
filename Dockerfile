@@ -1,6 +1,7 @@
 FROM golang:1.24-bookworm AS atlassian-tools
 
 ARG ATLASSIAN_TOOLS_REPO=https://github.com/dvnuo/engineering-flow-platform-tools.git
+# Runtime smoke expects this tools ref to expose Jira issue.map-csv and issue.bulk-create schemas.
 ARG ATLASSIAN_TOOLS_REF=master
 
 RUN set -eux; \
@@ -71,7 +72,13 @@ RUN set -eux; \
 
 COPY --from=atlassian-tools /out/jira /usr/local/bin/jira
 COPY --from=atlassian-tools /out/confluence /usr/local/bin/confluence
-RUN chmod 0755 /usr/local/bin/jira /usr/local/bin/confluence
+RUN set -eux; \
+  chmod 0755 /usr/local/bin/jira /usr/local/bin/confluence; \
+  jira version --json >/dev/null; \
+  confluence version --json >/dev/null; \
+  jira commands --json >/dev/null; \
+  jira schema issue.map-csv --json >/dev/null; \
+  jira schema issue.bulk-create --json >/dev/null
 
 WORKDIR /app/runtime
 COPY pyproject.toml README.md package*.json ./

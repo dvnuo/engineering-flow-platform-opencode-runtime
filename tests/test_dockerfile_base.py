@@ -12,6 +12,18 @@ def test_dockerfile_uses_ubuntu_base_not_node_base():
     assert "FROM node@" not in text
 
 
+def test_dockerfile_keeps_atlassian_tools_ref_configurable_and_checks_schemas():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "Dockerfile").read_text(encoding="utf-8")
+    assert "ARG ATLASSIAN_TOOLS_REPO=" in text
+    assert "ARG ATLASSIAN_TOOLS_REF=master" in text
+    assert "jira version --json" in text
+    assert "confluence version --json" in text
+    assert "jira commands --json" in text
+    assert "jira schema issue.map-csv --json" in text
+    assert "jira schema issue.bulk-create --json" in text
+
+
 def test_dockerfile_installs_node_22_from_ubuntu_base():
     root = Path(__file__).resolve().parents[1]
     text = (root / "Dockerfile").read_text(encoding="utf-8")

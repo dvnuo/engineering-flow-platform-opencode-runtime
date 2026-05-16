@@ -14,6 +14,19 @@ def test_smoke_script_runs_health_skills_capabilities_and_optional_contract_test
     assert 'python -m pytest -q runtime_contract_tests' in script
 
 
+def test_smoke_script_checks_atlassian_cli_schema_commands():
+    script = _script()
+    required = [
+        'jira version --json',
+        'confluence version --json',
+        'jira commands --json',
+        'jira schema issue.map-csv --json',
+        'jira schema issue.bulk-create --json',
+    ]
+    for token in required:
+        assert token in script
+
+
 def test_smoke_script_does_not_reference_removed_external_tool_contract_knobs():
     script = _script()
     forbidden = [

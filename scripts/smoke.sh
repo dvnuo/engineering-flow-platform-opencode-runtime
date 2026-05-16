@@ -34,4 +34,5 @@ if [[ "${RUN_RUNTIME_CONTRACT_TESTS}" == "1" ]]; then
   timeout "${RUNTIME_CONTRACT_TIMEOUT_SECONDS}" env "RUNTIME_BASE_URL=${RUNTIME_CONTRACT_BASE_URL}" python -m pytest -q runtime_contract_tests
 fi
 docker exec "${NAME}" bash -lc 'git --version && gh --version'
+docker exec "${NAME}" bash -lc 'jira version --json >/dev/null && confluence version --json >/dev/null && jira commands --json >/dev/null && jira schema issue.map-csv --json >/dev/null && jira schema issue.bulk-create --json >/dev/null'
 echo "smoke passed"

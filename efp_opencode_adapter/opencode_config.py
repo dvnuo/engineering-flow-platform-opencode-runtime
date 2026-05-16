@@ -16,10 +16,9 @@ ATLASSIAN_INSTRUCTIONS_CONTENT = """# Atlassian CLI
 Available Bash commands: `jira`, `confluence`.
 
 - Always use `--json` for command output.
-- First inspect available Jira commands with `jira commands --json` and Jira schemas with `jira schema --json`.
-- Inspect Confluence capabilities the same way with `confluence commands --json` and `confluence schema --json`.
-- For CSV bulk-create work, never create issues immediately. Inspect the CSV, an example Jira issue, the field catalog, and createmeta. Generate a mapping, run a dry run, ask for confirmation, then create.
-- Use `jira issue map-csv` and `jira issue bulk-create` when those commands are available.
+- Inspect Jira capabilities with `jira commands --json`, `jira schema issue.map-csv --json`, and `jira schema issue.bulk-create --json`.
+- Inspect Confluence capabilities with `confluence commands --json`; for schema details use `confluence schema <command> --json` for the specific command you intend to run.
+- For CSV bulk-create work, never create issues immediately. Inspect the CSV, an example Jira issue, the field catalog, and createmeta. Run `jira issue map-csv`, run `jira issue bulk-create --dry-run`, ask for confirmation, then run `jira issue bulk-create --yes`.
 - Use Confluence commands similarly for documentation operations, inspecting schemas and target pages or spaces before writing.
 """
 
