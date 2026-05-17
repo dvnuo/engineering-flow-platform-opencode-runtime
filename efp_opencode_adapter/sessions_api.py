@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from aiohttp import web
@@ -9,6 +10,9 @@ from .app_keys import CHATLOG_STORE_KEY, OPENCODE_CLIENT_KEY, PORTAL_METADATA_CL
 from .opencode_client import OpenCodeClientError
 from .opencode_message_adapter import message_to_visible_text, to_efp_message
 from .thinking_events import safe_preview
+
+
+logger = logging.getLogger(__name__)
 
 
 def _json_bad_request(error: str) -> web.HTTPBadRequest:
@@ -637,6 +641,23 @@ async def edit_message_handler(request: web.Request) -> web.Response:
             replacement_user_message_id = message_id
         elif role == "assistant":
             assistant_message_id = message_id
+    display_store = request.app.get(USER_DISPLAY_STORE_KEY)
+    if display_store is not None and replacement_user_message_id:
+        try:
+            display_store.put_user_message(
+                portal_session_id=sid,
+                opencode_session_id=updated_record.opencode_session_id,
+                opencode_message_id=replacement_user_message_id,
+                display_content=content,
+                display_attachments=[],
+                metadata={
+                    "source": "portal_original_user_message",
+                    "edited_from_message_id": mid,
+                    "internal_model_content_hidden": True,
+                },
+            )
+        except Exception:
+            logger.warning("failed to save edited user display message", exc_info=True)
     assistant_text = _last_message_text(after_messages) or message_to_text(response_payload)
     store.update_after_chat(sid, content, assistant_text, body.get("model") or updated_record.model, body.get("agent") or updated_record.agent)
     return web.json_response({
