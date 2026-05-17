@@ -21,6 +21,7 @@ from .app_keys import (
     SESSION_STORE_KEY,
     USAGE_TRACKER_KEY,
     REQUEST_BINDING_STORE_KEY,
+    USER_DISPLAY_STORE_KEY,
 )
 
 from .opencode_client import OpenCodeClientError
@@ -474,6 +475,33 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             initial_user_message_id = new_opencode_message_id()
         if binding_store is not None:
             binding_store.bind_message(record.opencode_session_id, initial_user_message_id, portal_session_id, request_id, kind="chat")
+        display_store = request.app.get(USER_DISPLAY_STORE_KEY)
+        if display_store is not None:
+            try:
+                slash_metadata = None
+                if invocation is not None:
+                    slash_metadata = {
+                        "type": "skill",
+                        "raw": message,
+                        "raw_name": invocation.raw_name,
+                        "skill_name": invocation.skill_name,
+                        "arguments": invocation.arguments,
+                    }
+                display_store.put_user_message(
+                    portal_session_id=portal_session_id,
+                    opencode_session_id=record.opencode_session_id,
+                    opencode_message_id=initial_user_message_id,
+                    display_content=message,
+                    display_attachments=display_store.sanitize_display_attachments(attachments),
+                    metadata={
+                        "source": "portal_original_user_message",
+                        "request_id": request_id,
+                        "slash_command": slash_metadata,
+                        "internal_model_content_hidden": True,
+                    },
+                )
+            except Exception:
+                logger.warning("failed to save user display message", exc_info=True)
         if invocation:
             skill_decision = evaluate_skill_invocation(settings, invocation)
             executed_native_command = False
