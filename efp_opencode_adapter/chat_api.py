@@ -631,7 +631,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                         skill_debug["command_lookup_error"] = safe_preview(str(exc), 300)
                 if (not attachments) and str(skill_decision.skill.get("opencode_name") or "") in command_names:
                     try:
-                        response_payload = await client.execute_command(record.opencode_session_id, command=str(skill_decision.skill["opencode_name"]), arguments=invocation.arguments, model=model, agent=agent or "efp-main")
+                        response_payload = await client.execute_command(record.opencode_session_id, command=str(skill_decision.skill["opencode_name"]), arguments=invocation.arguments, model=model, agent=agent or "efp-main", message_id=initial_user_message_id)
                         skill_debug["used_command_api"] = True
                         skill_debug["kind"] = "skill"
                         command_evt = add_trace_context({"type": "skill.command.executed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"command": skill_decision.skill["opencode_name"]}}, trace_context)
