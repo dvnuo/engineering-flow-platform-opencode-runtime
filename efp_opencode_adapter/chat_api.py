@@ -531,17 +531,34 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                 else:
                     command_names = {str(c.get("name") or "") for c in available_commands if isinstance(c, dict)}
                     if invocation.skill_name in command_names:
-                        try:
-                            response_payload = await client.execute_command(record.opencode_session_id, command=invocation.skill_name, arguments=invocation.arguments, model=model, agent=agent or "efp-main")
-                            skill_debug.update({"kind": "command", "used_command_api": True, "native_command": True, "reason": "allowed"})
-                            executed_native_command = True
-                            command_evt = add_trace_context({"type": "skill.command.executed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"command": invocation.skill_name, "native_command": True}}, trace_context)
-                            runtime_events.append(command_evt)
-                            await bus.publish(command_evt)
-                        except OpenCodeClientError as exc:
-                            skill_decision = type(skill_decision)(skill=None, allowed=False, reason="command_execution_failed", permission_state="unknown")
-                            skill_debug["reason"] = "command_execution_failed"
-                            skill_debug["command_execution_error"] = safe_preview(str(exc), 300)
+                        if attachments:
+                            skill_decision = type(skill_decision)(
+                                skill={"name": invocation.skill_name, "opencode_name": invocation.skill_name},
+                                allowed=True,
+                                reason="allowed_native_command_with_attachments_prompt_fallback",
+                                permission_state="allow",
+                            )
+                            skill_debug.update({
+                                "kind": "skill",
+                                "used_command_api": False,
+                                "used_skill_prompt": True,
+                                "native_command": True,
+                                "command_api_fallback": True,
+                                "reason": "allowed_native_command_with_attachments_prompt_fallback",
+                            })
+                            executed_native_command = False
+                        else:
+                            try:
+                                response_payload = await client.execute_command(record.opencode_session_id, command=invocation.skill_name, arguments=invocation.arguments, model=model, agent=agent or "efp-main", message_id=initial_user_message_id)
+                                skill_debug.update({"kind": "command", "used_command_api": True, "native_command": True, "reason": "allowed"})
+                                executed_native_command = True
+                                command_evt = add_trace_context({"type": "skill.command.executed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"command": invocation.skill_name, "native_command": True}}, trace_context)
+                                runtime_events.append(command_evt)
+                                await bus.publish(command_evt)
+                            except OpenCodeClientError as exc:
+                                skill_decision = type(skill_decision)(skill=None, allowed=False, reason="command_execution_failed", permission_state="unknown")
+                                skill_debug["reason"] = "command_execution_failed"
+                                skill_debug["command_execution_error"] = safe_preview(str(exc), 300)
                     else:
                         skill_decision = type(skill_decision)(skill=None, allowed=False, reason="unknown_skill_or_command", permission_state="unknown")
                         skill_debug["reason"] = "unknown_skill_or_command"
