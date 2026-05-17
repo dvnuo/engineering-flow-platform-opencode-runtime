@@ -11,6 +11,7 @@ from .app_keys import (
     SESSION_STORE_KEY,
     TASK_STORE_KEY,
     CHATLOG_STORE_KEY,
+    USER_DISPLAY_STORE_KEY,
     USAGE_TRACKER_KEY,
     EVENT_BUS_KEY,
     TASK_BACKGROUND_TASKS_KEY,
@@ -58,6 +59,7 @@ from .session_store import SessionStore
 from .task_store import TaskStore
 from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_handler
 from .request_bindings import RequestBindingStore
+from .user_display_store import UserDisplayStore
 from .sessions_api import (
     clear_sessions_handler,
     delete_message_from_here_handler,
@@ -337,6 +339,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app[SESSION_STORE_KEY] = SessionStore(state_paths.sessions_dir)
     app[TASK_STORE_KEY] = TaskStore(state_paths.tasks_dir)
     app[CHATLOG_STORE_KEY] = ChatLogStore(state_paths.chatlogs_dir)
+    app[USER_DISPLAY_STORE_KEY] = UserDisplayStore(state_paths.sessions_dir / "user_display_messages.json")
     app[USAGE_TRACKER_KEY] = UsageTracker(state_paths.usage_file)
     app[EVENT_BUS_KEY] = EventBus()
     app[REQUEST_BINDING_STORE_KEY] = RequestBindingStore()

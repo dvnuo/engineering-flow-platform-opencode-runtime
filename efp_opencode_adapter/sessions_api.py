@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from aiohttp import web
-from .app_keys import CHATLOG_STORE_KEY, OPENCODE_CLIENT_KEY, PORTAL_METADATA_CLIENT_KEY, SESSION_STORE_KEY
+from .app_keys import CHATLOG_STORE_KEY, OPENCODE_CLIENT_KEY, PORTAL_METADATA_CLIENT_KEY, SESSION_STORE_KEY, USER_DISPLAY_STORE_KEY
 
 from .opencode_client import OpenCodeClientError
 from .opencode_message_adapter import message_to_visible_text, to_efp_message
 from .thinking_events import safe_preview
+
+
+logger = logging.getLogger(__name__)
 
 
 def _json_bad_request(error: str) -> web.HTTPBadRequest:
@@ -59,6 +63,16 @@ def _delete_chatlog_best_effort(chatlog_store, session_id: str) -> dict[str, Any
         return {"success": False, "error": safe_preview(str(exc), 1000)}
 
 
+def _delete_user_display_best_effort(display_store, *, portal_session_id: str | None = None, opencode_session_id: str | None = None) -> dict[str, Any]:
+    if not display_store or not hasattr(display_store, "delete_session"):
+        return {"success": False, "skipped": True, "reason": "display_store_delete_not_supported"}
+    try:
+        deleted_count = display_store.delete_session(portal_session_id=portal_session_id, opencode_session_id=opencode_session_id)
+        return {"success": True, "deleted_count": int(deleted_count or 0)}
+    except Exception as exc:
+        return {"success": False, "error": safe_preview(str(exc), 1000)}
+
+
 async def _read_json_object(request: web.Request, *, error_prefix: str = "payload") -> dict[str, Any]:
     try:
         body = await request.json()
@@ -103,9 +117,37 @@ def _is_internal_efp_message(message: Any) -> bool:
     return False
 
 
-def _to_efp_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _to_efp_messages(
+    messages: list[dict[str, Any]],
+    *,
+    display_store=None,
+    portal_session_id: str = "",
+    opencode_session_id: str = "",
+) -> list[dict[str, Any]]:
     filtered = [msg for msg in messages if not _is_internal_efp_message(msg)]
-    return [to_efp_message(msg, index=idx) for idx, msg in enumerate(filtered)]
+    out = []
+    for idx, msg in enumerate(filtered):
+        efp = to_efp_message(msg, index=idx)
+        if str(efp.get("role") or "").lower() == "user" and display_store is not None:
+            metadata = efp.get("metadata") if isinstance(efp.get("metadata"), dict) else {}
+            message_id = str(efp.get("id") or metadata.get("opencode_message_id") or "")
+            display = display_store.get_user_message(
+                opencode_session_id=opencode_session_id or str(metadata.get("opencode_session_id") or ""),
+                opencode_message_id=message_id,
+                portal_session_id=portal_session_id,
+            )
+            if display:
+                visible = str(display.get("display_content") or "")
+                efp["content"] = visible
+                efp["display_content"] = visible
+                display_attachments = display.get("display_attachments")
+                efp["attachments"] = display_attachments if isinstance(display_attachments, list) else []
+                metadata = efp.setdefault("metadata", {})
+                metadata["display_content_source"] = "portal_original_user_message"
+                metadata["internal_model_content_hidden"] = True
+                metadata["original_user_message"] = visible
+        out.append(efp)
+    return out
 
 
 def _normalize_visible_content(content: str) -> str:
@@ -377,7 +419,12 @@ async def get_session_handler(request: web.Request) -> web.Response:
         messages = await client.list_messages(record.opencode_session_id)
     except OpenCodeClientError as exc:
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
-    efp_messages = _to_efp_messages(messages)
+    efp_messages = _to_efp_messages(
+        messages,
+        display_store=request.app.get(USER_DISPLAY_STORE_KEY),
+        portal_session_id=sid,
+        opencode_session_id=record.opencode_session_id,
+    )
     return web.json_response(
         {
             "session_id": sid,
@@ -434,10 +481,16 @@ async def delete_session_handler(request: web.Request) -> web.Response:
     client = request.app[OPENCODE_CLIENT_KEY]
     portal_metadata = request.app.get(PORTAL_METADATA_CLIENT_KEY)
     chatlog_store = request.app.get(CHATLOG_STORE_KEY)
+    display_store = request.app.get(USER_DISPLAY_STORE_KEY)
     record = store.get(sid)
     if record is None or record.deleted:
         metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
-        return web.json_response({"success": True, "session_id": sid, "already_deleted": True, "runtime_deleted": False, "opencode_deleted": False, "opencode_missing": record is None, "metadata_delete": metadata_delete})
+        display_delete = _delete_user_display_best_effort(
+            display_store,
+            portal_session_id=sid,
+            opencode_session_id=record.opencode_session_id if record else None,
+        )
+        return web.json_response({"success": True, "session_id": sid, "already_deleted": True, "runtime_deleted": False, "opencode_deleted": False, "opencode_missing": record is None, "metadata_delete": metadata_delete, "display_delete": display_delete})
     opencode_deleted = False
     opencode_missing = False
     try:
@@ -450,8 +503,9 @@ async def delete_session_handler(request: web.Request) -> web.Response:
             return web.json_response({"success": False, "error": "opencode_delete_failed", "session_id": sid, "opencode_session_id": record.opencode_session_id, "opencode_status": exc.status, "detail": str(exc)}, status=502)
     store.mark_deleted(sid)
     chatlog_delete = _delete_chatlog_best_effort(chatlog_store, sid)
+    display_delete = _delete_user_display_best_effort(display_store, portal_session_id=sid, opencode_session_id=record.opencode_session_id)
     metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
-    return web.json_response({"success": True, "session_id": sid, "opencode_session_id": record.opencode_session_id, "already_deleted": False, "runtime_deleted": True, "opencode_deleted": opencode_deleted, "opencode_missing": opencode_missing, "metadata_delete": metadata_delete, "chatlog_delete": chatlog_delete})
+    return web.json_response({"success": True, "session_id": sid, "opencode_session_id": record.opencode_session_id, "already_deleted": False, "runtime_deleted": True, "opencode_deleted": opencode_deleted, "opencode_missing": opencode_missing, "metadata_delete": metadata_delete, "chatlog_delete": chatlog_delete, "display_delete": display_delete})
 
 
 async def clear_sessions_handler(request: web.Request) -> web.Response:
@@ -459,6 +513,7 @@ async def clear_sessions_handler(request: web.Request) -> web.Response:
     client = request.app[OPENCODE_CLIENT_KEY]
     portal_metadata = request.app.get(PORTAL_METADATA_CLIENT_KEY)
     chatlog_store = request.app.get(CHATLOG_STORE_KEY)
+    display_store = request.app.get(USER_DISPLAY_STORE_KEY)
     failures = []
     deleted_count = 0
     metadata_results = []
@@ -475,8 +530,9 @@ async def clear_sessions_handler(request: web.Request) -> web.Response:
         store.mark_deleted(rec.portal_session_id)
         deleted_count += 1
         chatlog_delete = _delete_chatlog_best_effort(chatlog_store, rec.portal_session_id)
+        display_delete = _delete_user_display_best_effort(display_store, portal_session_id=rec.portal_session_id, opencode_session_id=rec.opencode_session_id)
         metadata = await _delete_portal_metadata_best_effort(portal_metadata, rec.portal_session_id)
-        metadata_results.append({"session_id": rec.portal_session_id, "opencode_missing": op_missing, "metadata_delete": metadata, "chatlog_delete": chatlog_delete})
+        metadata_results.append({"session_id": rec.portal_session_id, "opencode_missing": op_missing, "metadata_delete": metadata, "chatlog_delete": chatlog_delete, "display_delete": display_delete})
     if failures:
         return web.json_response({"success": False, "deleted_count": deleted_count, "failed_count": len(failures), "failures": failures, "metadata_delete": metadata_results}, status=502)
     return web.json_response({"success": True, "deleted_count": deleted_count, "failed_count": 0, "metadata_delete": metadata_results})
@@ -526,8 +582,21 @@ async def delete_message_from_here_handler(request: web.Request) -> web.Response
                 allow_revert_fallback = bool(body.get("allow_revert_fallback"))
         except Exception:
             allow_revert_fallback = False
-    _, new_messages, metadata = await _delete_from_here(store=request.app[SESSION_STORE_KEY], client=request.app[OPENCODE_CLIENT_KEY], portal_session_id=sid, message_id=mid, allow_revert_fallback=allow_revert_fallback)
-    return web.json_response({"success": True, "session_id": sid, "message_id": mid, "engine": "opencode", "mutation": "delete_from_here", "messages": _to_efp_messages(new_messages), "metadata": metadata})
+    updated_record, new_messages, metadata = await _delete_from_here(store=request.app[SESSION_STORE_KEY], client=request.app[OPENCODE_CLIENT_KEY], portal_session_id=sid, message_id=mid, allow_revert_fallback=allow_revert_fallback)
+    return web.json_response({
+        "success": True,
+        "session_id": sid,
+        "message_id": mid,
+        "engine": "opencode",
+        "mutation": "delete_from_here",
+        "messages": _to_efp_messages(
+            new_messages,
+            display_store=request.app.get(USER_DISPLAY_STORE_KEY),
+            portal_session_id=sid,
+            opencode_session_id=updated_record.opencode_session_id,
+        ),
+        "metadata": metadata,
+    })
 
 
 async def edit_message_handler(request: web.Request) -> web.Response:
@@ -591,6 +660,37 @@ async def edit_message_handler(request: web.Request) -> web.Response:
             replacement_user_message_id = message_id
         elif role == "assistant":
             assistant_message_id = message_id
+    display_store = request.app.get(USER_DISPLAY_STORE_KEY)
+    if display_store is not None and replacement_user_message_id:
+        try:
+            display_store.put_user_message(
+                portal_session_id=sid,
+                opencode_session_id=updated_record.opencode_session_id,
+                opencode_message_id=replacement_user_message_id,
+                display_content=content,
+                display_attachments=[],
+                metadata={
+                    "source": "portal_original_user_message",
+                    "edited_from_message_id": mid,
+                    "internal_model_content_hidden": True,
+                },
+            )
+        except Exception:
+            logger.warning("failed to save edited user display message", exc_info=True)
     assistant_text = _last_message_text(after_messages) or message_to_text(response_payload)
     store.update_after_chat(sid, content, assistant_text, body.get("model") or updated_record.model, body.get("agent") or updated_record.agent)
-    return web.json_response({"success": True, "session_id": sid, "message_id": mid, "replacement_user_message_id": replacement_user_message_id, "assistant_message_id": assistant_message_id, "response": assistant_text, "messages": _to_efp_messages(after_messages), "metadata": metadata})
+    return web.json_response({
+        "success": True,
+        "session_id": sid,
+        "message_id": mid,
+        "replacement_user_message_id": replacement_user_message_id,
+        "assistant_message_id": assistant_message_id,
+        "response": assistant_text,
+        "messages": _to_efp_messages(
+            after_messages,
+            display_store=request.app.get(USER_DISPLAY_STORE_KEY),
+            portal_session_id=sid,
+            opencode_session_id=updated_record.opencode_session_id,
+        ),
+        "metadata": metadata,
+    })

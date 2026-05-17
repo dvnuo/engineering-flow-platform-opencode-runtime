@@ -7,9 +7,10 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
 from efp_opencode_adapter.settings import Settings
-from efp_opencode_adapter.app_keys import SESSION_STORE_KEY, REQUEST_BINDING_STORE_KEY
+from efp_opencode_adapter.app_keys import ATTACHMENT_SERVICE_KEY, SESSION_STORE_KEY, REQUEST_BINDING_STORE_KEY, USER_DISPLAY_STORE_KEY
 from efp_opencode_adapter import chat_api
 from efp_opencode_adapter.chat_api import _consume_background_chat_task, _is_stream_relevant_event
+from efp_opencode_adapter.skill_invocation import SkillDecision
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -355,6 +356,321 @@ async def test_chat_response_uses_history_assistant_text_not_user_input(tmp_path
     assert session["messages"][-1]["content"] == "Hi. What do you need?"
     assert "hidden" not in session["messages"][-1]["content"]
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_persists_original_display_for_slash_skill_with_csv_attachment(tmp_path, monkeypatch):
+    class CaptureSkillClient(FakeOpenCodeClient):
+        def __init__(self):
+            super().__init__()
+            self.sent_parts = []
+
+        async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+            self.sent_parts.append(parts)
+            user_id = message_id or f"u-{len(self.messages[session_id]) + 1}"
+            user = {"id": user_id, "role": "user", "parts": parts}
+            assistant = {
+                "id": f"a-{len(self.messages[session_id]) + 2}",
+                "role": "assistant",
+                "parts": [{"type": "text", "text": "skill done"}, {"type": "step-finish", "reason": "stop"}],
+            }
+            self.messages[session_id].extend([user, assistant])
+            return {"message": assistant, "usage": {"input_tokens": 10, "output_tokens": 5, "cost": 0.001}, "model": model or "test-model", "provider": "test-provider"}
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    fake = CaptureSkillClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    upload = app[ATTACHMENT_SERVICE_KEY].upload("webchat_test", "cases.csv", b"summary,steps\nA,B", "text/csv")
+
+    def _allow_skill(settings, invocation):
+        return SkillDecision(
+            skill={"opencode_name": "jira-bulk-create-from-csv"},
+            allowed=True,
+            reason="allowed",
+            permission_state="allow",
+        )
+
+    monkeypatch.setattr(chat_api, "evaluate_skill_invocation", _allow_skill)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/chat",
+            json={
+                "message": "/jira-bulk-create-from-csv example: https://jira.company.com/browse/MMGFX-13887",
+                "session_id": "webchat_test",
+                "request_id": "req_test",
+                "attachments": [
+                    {
+                        **upload,
+                        "url": "https://files.invalid/cases.csv",
+                        "text": "summary,steps\nA,B",
+                        "content": "raw csv content",
+                    }
+                ],
+            },
+        )
+        body = await resp.json()
+
+        assert resp.status == 200
+        assert fake.sent_parts
+        sent_parts = fake.sent_parts[-1]
+        assert sent_parts[0]["synthetic"] is True
+        assert sent_parts[0]["metadata"]["efp_internal"] == "skill_prompt"
+        assert "Run the OpenCode agent skill `jira-bulk-create-from-csv`" in sent_parts[0]["text"]
+        assert any(
+            part.get("type") == "text"
+            and "Attached files:" in part.get("text", "")
+            and "summary,steps" in part.get("text", "")
+            and part.get("synthetic") is True
+            and part.get("metadata", {}).get("efp_internal") == "attachment_context"
+            for part in sent_parts
+        )
+
+        record = app[USER_DISPLAY_STORE_KEY].get_user_message(
+            app[SESSION_STORE_KEY].get("webchat_test").opencode_session_id,
+            body["user_message_id"],
+            "webchat_test",
+        )
+        assert record["display_content"] == "/jira-bulk-create-from-csv example: https://jira.company.com/browse/MMGFX-13887"
+        assert record["display_attachments"] == [
+            {
+                "file_id": upload["file_id"],
+                "name": "cases.csv",
+                "content_type": "text/csv",
+                "size": len(b"summary,steps\nA,B"),
+                "type": "file",
+            }
+        ]
+        serialized = json.dumps(record)
+        assert "summary,steps" not in serialized
+        assert "https://files.invalid/cases.csv" not in serialized
+        assert "raw csv content" not in serialized
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_known_skill_native_command_api_receives_display_message_id(tmp_path, monkeypatch):
+    class KnownCommandClient(FakeOpenCodeClient):
+        def __init__(self):
+            super().__init__()
+            self.execute_command_called = False
+            self.execute_command_message_id = ""
+
+        async def list_commands(self, timeout_seconds=30):
+            return [{"name": "some-skill"}]
+
+        async def execute_command(self, session_id, *, command, arguments, model, agent, message_id=None):
+            self.execute_command_called = True
+            self.execute_command_message_id = message_id or ""
+            assistant = {
+                "id": "a-known-command",
+                "role": "assistant",
+                "finish_reason": "stop",
+                "parts": [{"type": "text", "text": "known command ok"}],
+            }
+            self.messages[session_id].extend([
+                {"id": message_id, "role": "user", "parts": [{"type": "text", "text": "/some-skill arg1"}]},
+                assistant,
+            ])
+            return {"message": assistant}
+
+        async def send_message(self, *args, **kwargs):
+            raise AssertionError("send_message should not be called for no-attachment native commands")
+
+    def _allow_skill(settings, invocation):
+        return SkillDecision(
+            skill={"opencode_name": "some-skill"},
+            allowed=True,
+            reason="allowed",
+            permission_state="allow",
+        )
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(chat_api, "evaluate_skill_invocation", _allow_skill)
+    fake = KnownCommandClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        response = await client.post(
+            "/api/chat",
+            json={
+                "message": "/some-skill arg1",
+                "session_id": "webchat_command_id",
+                "request_id": "req_command_id",
+                "attachments": [],
+            },
+        )
+        payload = await response.json()
+
+        assert response.status == 200
+        assert fake.execute_command_called is True
+        assert fake.execute_command_message_id == payload["user_message_id"]
+        assert fake.execute_command_message_id.startswith("msg_")
+        record = app[USER_DISPLAY_STORE_KEY].get_user_message(
+            app[SESSION_STORE_KEY].get("webchat_command_id").opencode_session_id,
+            payload["user_message_id"],
+            "webchat_command_id",
+        )
+        assert record["display_content"] == "/some-skill arg1"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_native_command_api_receives_display_message_id(tmp_path, monkeypatch):
+    class UnknownCommandClient(FakeOpenCodeClient):
+        def __init__(self):
+            super().__init__()
+            self.execute_command_message_id = ""
+
+        async def list_commands(self, timeout_seconds=30):
+            return [{"name": "native-command"}]
+
+        async def execute_command(self, session_id, *, command, arguments, model, agent, message_id=None):
+            self.execute_command_message_id = message_id or ""
+            assistant = {
+                "id": "a-native-command",
+                "role": "assistant",
+                "finish_reason": "stop",
+                "parts": [{"type": "text", "text": "native command ok"}],
+            }
+            self.messages[session_id].extend([
+                {"id": message_id, "role": "user", "parts": [{"type": "text", "text": "/native-command abc"}]},
+                assistant,
+            ])
+            return {"message": assistant}
+
+        async def send_message(self, *args, **kwargs):
+            raise AssertionError("send_message should not be called for no-attachment native commands")
+
+    def _unknown_skill(settings, invocation):
+        return SkillDecision(skill=None, allowed=False, reason="unknown_skill", permission_state="unknown")
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(chat_api, "evaluate_skill_invocation", _unknown_skill)
+    fake = UnknownCommandClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        response = await client.post(
+            "/api/chat",
+            json={
+                "message": "/native-command abc",
+                "session_id": "webchat_unknown_command_id",
+                "request_id": "req_unknown_command_id",
+                "attachments": [],
+            },
+        )
+        payload = await response.json()
+        history = await (await client.get("/api/sessions/webchat_unknown_command_id")).json()
+
+        assert response.status == 200
+        assert fake.execute_command_message_id == payload["user_message_id"]
+        assert fake.execute_command_message_id.startswith("msg_")
+        record = app[USER_DISPLAY_STORE_KEY].get_user_message(
+            app[SESSION_STORE_KEY].get("webchat_unknown_command_id").opencode_session_id,
+            payload["user_message_id"],
+            "webchat_unknown_command_id",
+        )
+        assert record["display_content"] == "/native-command abc"
+        user_messages = [message for message in history["messages"] if message["role"] == "user"]
+        assert user_messages[0]["id"] == payload["user_message_id"]
+        assert user_messages[0]["content"] == "/native-command abc"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_native_command_with_csv_attachment_uses_prompt_fallback(tmp_path, monkeypatch):
+    class UnknownCommandWithAttachmentClient(FakeOpenCodeClient):
+        def __init__(self):
+            super().__init__()
+            self.execute_command_called = False
+            self.send_message_called = False
+            self.send_message_message_id = ""
+            self.sent_parts = []
+
+        async def list_commands(self, timeout_seconds=30):
+            return [{"name": "native-command"}]
+
+        async def execute_command(self, *args, **kwargs):
+            self.execute_command_called = True
+            raise AssertionError("command API must not be used when attachments are present")
+
+        async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+            self.send_message_called = True
+            self.send_message_message_id = message_id or ""
+            self.sent_parts = parts
+            assistant = {
+                "id": "a-native-fallback",
+                "role": "assistant",
+                "finish_reason": "stop",
+                "parts": [{"type": "text", "text": "fallback ok"}],
+            }
+            self.messages[session_id].extend([
+                {"id": message_id, "role": "user", "parts": parts},
+                assistant,
+            ])
+            return {"message": assistant}
+
+    def _unknown_skill(settings, invocation):
+        return SkillDecision(skill=None, allowed=False, reason="unknown_skill", permission_state="unknown")
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setattr(chat_api, "evaluate_skill_invocation", _unknown_skill)
+    fake = UnknownCommandWithAttachmentClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    upload = app[ATTACHMENT_SERVICE_KEY].upload("webchat_unknown_attachment", "cases.csv", b"summary,steps\nA,B", "text/csv")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        response = await client.post(
+            "/api/chat",
+            json={
+                "message": "/native-command abc",
+                "session_id": "webchat_unknown_attachment",
+                "request_id": "req_unknown_attachment",
+                "attachments": [
+                    {
+                        **upload,
+                        "url": "https://files.invalid/cases.csv",
+                        "text": "summary,steps\nA,B",
+                        "raw": "raw csv content",
+                        "base64": "c3VtbWFyeSxzdGVwcw==",
+                    }
+                ],
+            },
+        )
+        payload = await response.json()
+
+        assert response.status == 200
+        assert fake.execute_command_called is False
+        assert fake.send_message_called is True
+        assert fake.send_message_message_id == payload["user_message_id"]
+        assert any(
+            part.get("type") == "text"
+            and part.get("synthetic") is True
+            and part.get("metadata", {}).get("efp_internal") == "attachment_context"
+            and "summary,steps" in part.get("text", "")
+            for part in fake.sent_parts
+        )
+        record = app[USER_DISPLAY_STORE_KEY].get_user_message(
+            app[SESSION_STORE_KEY].get("webchat_unknown_attachment").opencode_session_id,
+            payload["user_message_id"],
+            "webchat_unknown_attachment",
+        )
+        assert record["display_content"] == "/native-command abc"
+        serialized = json.dumps(record)
+        for forbidden in ["summary,steps", "https://files.invalid/cases.csv", "raw csv content", "c3VtbWFyeSxzdGVwcw=="]:
+            assert forbidden not in serialized
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio

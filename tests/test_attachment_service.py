@@ -64,6 +64,22 @@ def test_build_opencode_attachment_parts_for_text_and_missing(tmp_path, monkeypa
     assert any(d.get("status") == "error" for d in debug)
 
 
+def test_build_opencode_attachment_parts_marks_text_context_synthetic(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path, monkeypatch)
+    svc = AttachmentService(settings)
+    text = svc.upload("s1", "cases.csv", b"summary,steps\nA,B", "text/csv")
+    image = svc.upload("s1", "shot.png", b"\x89PNG\r\n\x1a\nabc", "image/png")
+
+    parts, _debug = build_opencode_attachment_parts(svc, "s1", [text["file_id"], image["file_id"], "missing"])
+
+    text_parts = [part for part in parts if part.get("type") == "text"]
+    assert text_parts
+    for part in text_parts:
+        assert part.get("synthetic") is True
+        assert part.get("metadata", {}).get("efp_internal") == "attachment_context"
+    assert any(part.get("type") == "file" and part.get("synthetic") is not True for part in parts)
+
+
 def test_text_truncation_still_processes_image_and_pdf(tmp_path, monkeypatch):
     settings = make_settings(tmp_path, monkeypatch)
     svc = AttachmentService(settings)

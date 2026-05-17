@@ -21,6 +21,7 @@ from .app_keys import (
     SESSION_STORE_KEY,
     USAGE_TRACKER_KEY,
     REQUEST_BINDING_STORE_KEY,
+    USER_DISPLAY_STORE_KEY,
 )
 
 from .opencode_client import OpenCodeClientError
@@ -256,7 +257,19 @@ async def _send_skill_prompt(
             f"Use head branch: {repository_context.head_branch}\n"
             "Do not run git inspection from /workspace unless /workspace/.git exists"
         )
-    parts[0]["text"] = prompt
+    part_metadata = parts[0].get("metadata") if isinstance(parts[0].get("metadata"), dict) else {}
+    parts[0] = {
+        **parts[0],
+        "type": "text",
+        "text": prompt,
+        "synthetic": True,
+        "metadata": {
+            **part_metadata,
+            "efp_internal": "skill_prompt",
+            "portal_request_id": request_id,
+            "original_user_message_hidden": True,
+        },
+    }
     skill_debug["used_skill_prompt"] = True
     if command_error:
         skill_debug["command_execution_error"] = command_error
@@ -463,7 +476,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             except Exception as exc:
                 safe_error = safe_preview(str(exc), 300)
                 attachment_debug.append({"status": "error", "error": safe_error})
-                parts.append({"type": "text", "text": f"Attachment processing failed: {safe_error}"})
+                parts.append({"type": "text", "text": f"Attachment processing failed: {safe_error}", "synthetic": True, "metadata": {"efp_internal": "attachment_context"}})
 
         invocation = parse_slash_invocation(message)
         skill_debug = None
@@ -474,6 +487,33 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             initial_user_message_id = new_opencode_message_id()
         if binding_store is not None:
             binding_store.bind_message(record.opencode_session_id, initial_user_message_id, portal_session_id, request_id, kind="chat")
+        display_store = request.app.get(USER_DISPLAY_STORE_KEY)
+        if display_store is not None:
+            try:
+                slash_metadata = None
+                if invocation is not None:
+                    slash_metadata = {
+                        "type": "skill",
+                        "raw": message,
+                        "raw_name": invocation.raw_name,
+                        "skill_name": invocation.skill_name,
+                        "arguments": invocation.arguments,
+                    }
+                display_store.put_user_message(
+                    portal_session_id=portal_session_id,
+                    opencode_session_id=record.opencode_session_id,
+                    opencode_message_id=initial_user_message_id,
+                    display_content=message,
+                    display_attachments=display_store.sanitize_display_attachments(attachments),
+                    metadata={
+                        "source": "portal_original_user_message",
+                        "request_id": request_id,
+                        "slash_command": slash_metadata,
+                        "internal_model_content_hidden": True,
+                    },
+                )
+            except Exception:
+                logger.warning("failed to save user display message", exc_info=True)
         if invocation:
             skill_decision = evaluate_skill_invocation(settings, invocation)
             executed_native_command = False
@@ -491,17 +531,34 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                 else:
                     command_names = {str(c.get("name") or "") for c in available_commands if isinstance(c, dict)}
                     if invocation.skill_name in command_names:
-                        try:
-                            response_payload = await client.execute_command(record.opencode_session_id, command=invocation.skill_name, arguments=invocation.arguments, model=model, agent=agent or "efp-main")
-                            skill_debug.update({"kind": "command", "used_command_api": True, "native_command": True, "reason": "allowed"})
-                            executed_native_command = True
-                            command_evt = add_trace_context({"type": "skill.command.executed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"command": invocation.skill_name, "native_command": True}}, trace_context)
-                            runtime_events.append(command_evt)
-                            await bus.publish(command_evt)
-                        except OpenCodeClientError as exc:
-                            skill_decision = type(skill_decision)(skill=None, allowed=False, reason="command_execution_failed", permission_state="unknown")
-                            skill_debug["reason"] = "command_execution_failed"
-                            skill_debug["command_execution_error"] = safe_preview(str(exc), 300)
+                        if attachments:
+                            skill_decision = type(skill_decision)(
+                                skill={"name": invocation.skill_name, "opencode_name": invocation.skill_name},
+                                allowed=True,
+                                reason="allowed_native_command_with_attachments_prompt_fallback",
+                                permission_state="allow",
+                            )
+                            skill_debug.update({
+                                "kind": "skill",
+                                "used_command_api": False,
+                                "used_skill_prompt": True,
+                                "native_command": True,
+                                "command_api_fallback": True,
+                                "reason": "allowed_native_command_with_attachments_prompt_fallback",
+                            })
+                            executed_native_command = False
+                        else:
+                            try:
+                                response_payload = await client.execute_command(record.opencode_session_id, command=invocation.skill_name, arguments=invocation.arguments, model=model, agent=agent or "efp-main", message_id=initial_user_message_id)
+                                skill_debug.update({"kind": "command", "used_command_api": True, "native_command": True, "reason": "allowed"})
+                                executed_native_command = True
+                                command_evt = add_trace_context({"type": "skill.command.executed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"command": invocation.skill_name, "native_command": True}}, trace_context)
+                                runtime_events.append(command_evt)
+                                await bus.publish(command_evt)
+                            except OpenCodeClientError as exc:
+                                skill_decision = type(skill_decision)(skill=None, allowed=False, reason="command_execution_failed", permission_state="unknown")
+                                skill_debug["reason"] = "command_execution_failed"
+                                skill_debug["command_execution_error"] = safe_preview(str(exc), 300)
                     else:
                         skill_decision = type(skill_decision)(skill=None, allowed=False, reason="unknown_skill_or_command", permission_state="unknown")
                         skill_debug["reason"] = "unknown_skill_or_command"
@@ -574,7 +631,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
                         skill_debug["command_lookup_error"] = safe_preview(str(exc), 300)
                 if (not attachments) and str(skill_decision.skill.get("opencode_name") or "") in command_names:
                     try:
-                        response_payload = await client.execute_command(record.opencode_session_id, command=str(skill_decision.skill["opencode_name"]), arguments=invocation.arguments, model=model, agent=agent or "efp-main")
+                        response_payload = await client.execute_command(record.opencode_session_id, command=str(skill_decision.skill["opencode_name"]), arguments=invocation.arguments, model=model, agent=agent or "efp-main", message_id=initial_user_message_id)
                         skill_debug["used_command_api"] = True
                         skill_debug["kind"] = "skill"
                         command_evt = add_trace_context({"type": "skill.command.executed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"command": skill_decision.skill["opencode_name"]}}, trace_context)

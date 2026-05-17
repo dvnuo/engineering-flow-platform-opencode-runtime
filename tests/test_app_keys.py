@@ -12,7 +12,7 @@ ADAPTER_DIR = Path(__file__).resolve().parents[1] / 'efp_opencode_adapter'
 
 STRING_APP_KEY_NAMES = {
     'settings', 'state_paths', 'session_store', 'task_store', 'chatlog_store',
-    'usage_tracker', 'event_bus', 'task_background_tasks', 'opencode_client',
+    'user_display_store', 'usage_tracker', 'event_bus', 'task_background_tasks', 'opencode_client',
     'portal_metadata_client', 'recovery_manager', 'event_bridge', 'event_bridge_task',
     'file_service', 'attachment_service'
 }
