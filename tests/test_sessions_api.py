@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -249,6 +251,83 @@ async def test_delete_from_here_prefix_mismatch_keeps_original_mapping_and_histo
         ("user", "how are you"),
         ("assistant", "echo: how are you"),
     ]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_from_here_allow_revert_fallback_does_not_mutate_old_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient(fork_mode="all_forks_bad_prefix")
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await client.post("/api/chat", json={"message": "hi", "session_id": "s1"})
+    second = await (await client.post("/api/chat", json={"message": "how are you", "session_id": "s1"})).json()
+    old_opencode_session_id = app[SESSION_STORE_KEY].get("s1").opencode_session_id
+    old_messages = deepcopy(fake.messages[old_opencode_session_id])
+
+    res = await client.post(
+        f"/api/sessions/s1/messages/{second['user_message_id']}/delete-from-here",
+        json={"allow_revert_fallback": True},
+    )
+    body = await res.json()
+
+    assert res.status == 409
+    assert body["error"] == "opencode_fork_prefix_mismatch"
+    assert body["metadata"]["allow_revert_fallback_requested"] is True
+    assert body["metadata"]["revert_fallback_disabled"] is True
+    assert fake.revert_calls == []
+    assert fake.messages[old_opencode_session_id] == old_messages
+    assert app[SESSION_STORE_KEY].get("s1").opencode_session_id == old_opencode_session_id
+
+    session = await (await client.get("/api/sessions/s1")).json()
+    assert _role_content_pairs(session["messages"]) == [
+        ("user", "hi"),
+        ("assistant", "echo: hi"),
+        ("user", "how are you"),
+        ("assistant", "echo: how are you"),
+    ]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_edit_allow_revert_fallback_does_not_mutate_old_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient(fork_mode="all_forks_bad_prefix")
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await client.post("/api/chat", json={"message": "hi", "session_id": "s1"})
+    second = await (await client.post("/api/chat", json={"message": "how are you", "session_id": "s1"})).json()
+    old_opencode_session_id = app[SESSION_STORE_KEY].get("s1").opencode_session_id
+    old_messages = deepcopy(fake.messages[old_opencode_session_id])
+
+    res = await client.post(
+        f"/api/sessions/s1/messages/{second['user_message_id']}/edit",
+        json={"content": "how are u??", "allow_revert_fallback": True},
+    )
+    body = await res.json()
+
+    assert res.status == 409
+    assert body["error"] == "opencode_fork_prefix_mismatch"
+    assert body["metadata"]["allow_revert_fallback_requested"] is True
+    assert body["metadata"]["revert_fallback_disabled"] is True
+    assert fake.revert_calls == []
+    assert fake.messages[old_opencode_session_id] == old_messages
+    assert app[SESSION_STORE_KEY].get("s1").opencode_session_id == old_opencode_session_id
+
+    session = await (await client.get("/api/sessions/s1")).json()
+    contents = [message["content"] for message in session["messages"]]
+    assert _role_content_pairs(session["messages"]) == [
+        ("user", "hi"),
+        ("assistant", "echo: hi"),
+        ("user", "how are you"),
+        ("assistant", "echo: how are you"),
+    ]
+    assert "how are u??" not in contents
+    assert "echo: how are u??" not in contents
     await client.close()
 
 

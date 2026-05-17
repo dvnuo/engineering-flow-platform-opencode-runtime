@@ -14,6 +14,7 @@ class FakeOpenCodeClient:
         self.abort_session_called = 0
         self.fork_mode = fork_mode
         self.fork_calls: list[dict[str, Any]] = []
+        self.revert_calls: list[dict[str, Any]] = []
 
     async def health(self):
         return {"healthy": True, "version": "1.14.39"}
@@ -93,6 +94,7 @@ class FakeOpenCodeClient:
         return {"success": True, "supported": True, "status": 200}
 
     async def revert_message(self, session_id, message_id, part_id=None):
+        self.revert_calls.append({"session_id": session_id, "message_id": message_id, "part_id": part_id})
         messages = self.messages.get(session_id, [])
         index = next((i for i, msg in enumerate(messages) if msg.get("id") == message_id), -1)
         if index < 0:

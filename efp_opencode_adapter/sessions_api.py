@@ -220,6 +220,8 @@ async def _fork_session_preserving_prefix(
         "target_message_id": target_message_id,
         "expected_prefix_count": expected_prefix_count,
         "prefix_validated": False,
+        "allow_revert_fallback_requested": bool(allow_revert_fallback),
+        "revert_fallback_disabled": True,
         "attempted_boundaries": attempted_boundaries,
     }
 
@@ -291,8 +293,6 @@ async def _fork_session_preserving_prefix(
         except OpenCodeClientError as exc:
             attempt["status"] = exc.status
             attempt["error"] = safe_preview(_opencode_detail(exc), 1000)
-            if exc.status in {404, 405} and allow_revert_fallback:
-                continue
             continue
         except Exception as exc:
             attempt["error"] = safe_preview(_unexpected_upstream_detail(exc), 1000)
@@ -328,34 +328,6 @@ async def _fork_session_preserving_prefix(
             "prefix_validated": True,
         }
         return new_opencode_session_id, new_messages, metadata
-
-    if allow_revert_fallback:
-        attempt = {"message_id": target_message_id, "role": _message_role(target_message), "result": "fork_failed"}
-        attempted_boundaries.append(attempt)
-        try:
-            await client.revert_message(old_opencode_session_id, target_message_id)
-            new_messages = await client.list_messages(old_opencode_session_id)
-            valid, _, actual_prefix_count = _prefix_matches(expected_prefix_messages, new_messages)
-            last_actual_prefix_count = actual_prefix_count
-            attempt["actual_prefix_count"] = actual_prefix_count
-            if valid:
-                attempt["result"] = "matched"
-                metadata = {
-                    **base_metadata,
-                    "strategy": "revert_fallback",
-                    "opencode_session_id": old_opencode_session_id,
-                    "accepted_boundary_message_id": target_message_id,
-                    "accepted_boundary_role": _message_role(target_message),
-                    "actual_prefix_count": actual_prefix_count,
-                    "prefix_validated": True,
-                }
-                return old_opencode_session_id, new_messages, metadata
-            attempt["result"] = "prefix_mismatch"
-        except OpenCodeClientError as exc:
-            attempt["status"] = exc.status
-            attempt["error"] = safe_preview(_opencode_detail(exc), 1000)
-        except Exception as exc:
-            attempt["error"] = safe_preview(_unexpected_upstream_detail(exc), 1000)
 
     metadata = {
         **base_metadata,
