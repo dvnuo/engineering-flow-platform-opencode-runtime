@@ -389,6 +389,56 @@ async def test_effective_config_reports_env_fallback_github_status(tmp_path, mon
 
 
 @pytest.mark.asyncio
+async def test_effective_config_treats_inaccessible_git_status_paths_as_absent(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    state.mkdir(parents=True)
+    denied_state = Path("/root/.local/share/efp-compat")
+    (state / "opencode.env").write_text(
+        "\n".join(
+            [
+                "export GH_TOKEN=env_token",
+                "export GH_HOST=ghe.example.com",
+                f"export GIT_ASKPASS={denied_state / 'git-askpass.sh'}",
+                f"export GIT_CONFIG_GLOBAL={denied_state / 'gitconfig'}",
+                f"export GH_CONFIG_DIR={denied_state / 'gh'}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    original_exists = Path.exists
+
+    def fake_exists(path):
+        if str(path).startswith(str(denied_state)):
+            raise PermissionError("denied")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    resp = await client.get("/api/internal/opencode-effective-config")
+    body = await resp.json()
+    gh = body["runtime_integrations"]["github"]
+
+    assert resp.status == 200
+    assert gh["enabled"] is True
+    assert gh["token_present"] is True
+    assert gh["git_auth_configured"] is False
+    assert gh["git_askpass_present"] is False
+    assert gh["gitconfig_present"] is False
+    assert "env_token" not in json.dumps(body)
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_runtime_profile_status_includes_git_auth_fields(tmp_path, monkeypatch):
     workspace, state = tmp_path / "workspace", tmp_path / "state"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))

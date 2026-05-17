@@ -1,17 +1,3 @@
-FROM golang:1.24-bookworm AS atlassian-tools
-
-ARG ATLASSIAN_TOOLS_REPO=https://github.com/dvnuo/engineering-flow-platform-tools.git
-# Runtime smoke expects this tools ref to expose Jira issue.map-csv and issue.bulk-create schemas.
-ARG ATLASSIAN_TOOLS_REF=master
-
-RUN set -eux; \
-  git clone --depth 1 --branch "${ATLASSIAN_TOOLS_REF}" "${ATLASSIAN_TOOLS_REPO}" /src
-
-WORKDIR /src
-RUN set -eux; \
-  go build -o /out/jira ./cmd/jira; \
-  go build -o /out/confluence ./cmd/confluence
-
 FROM ubuntu:24.04
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -19,6 +5,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG OPENCODE_VERSION=1.14.39
 ARG NODE_MAJOR=22
 ARG DEBIAN_FRONTEND=noninteractive
+ARG CUSTOM_TOOLS_DIR=runtime-tools
 
 ENV OPENCODE_VERSION=${OPENCODE_VERSION}
 ENV PYTHONUNBUFFERED=1
@@ -70,8 +57,8 @@ RUN set -eux; \
   actual="$(opencode --version | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"; \
   test "${actual}" = "${OPENCODE_VERSION}"
 
-COPY --from=atlassian-tools /out/jira /usr/local/bin/jira
-COPY --from=atlassian-tools /out/confluence /usr/local/bin/confluence
+COPY ${CUSTOM_TOOLS_DIR}/jira /usr/local/bin/jira
+COPY ${CUSTOM_TOOLS_DIR}/confluence /usr/local/bin/confluence
 RUN set -eux; \
   chmod 0755 /usr/local/bin/jira /usr/local/bin/confluence; \
   jira version --json >/dev/null; \

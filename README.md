@@ -20,6 +20,10 @@ bash scripts/ci_unit.sh
 bash scripts/smoke.sh
 ```
 
+## Runtime tool binaries
+This image expects prebuilt custom tool binaries in `runtime-tools/` before
+`docker build`. See `docs/CUSTOM_TOOLS_IMAGE.md`.
+
 ## Docs
 - Runtime contract: `docs/RUNTIME_CONTRACT.md`
 - Observability: `docs/OBSERVABILITY.md`

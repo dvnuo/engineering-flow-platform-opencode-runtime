@@ -6,9 +6,9 @@ from typing import Any
 from .settings import Settings
 
 def read_json_file(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
     try:
+        if not path.exists():
+            return None
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
