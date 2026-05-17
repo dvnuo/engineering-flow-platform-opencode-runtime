@@ -6,12 +6,15 @@ from efp_opencode_adapter.opencode_client import OpenCodeClientError
 
 
 class FakeOpenCodeClient:
-    def __init__(self):
+    def __init__(self, fork_mode: str = "include_boundary"):
         self.sessions: dict[str, dict[str, Any]] = {}
         self.messages: dict[str, list[dict[str, Any]]] = {}
         self.next_id = 1
         self.create_calls = 0
         self.abort_session_called = 0
+        self.fork_mode = fork_mode
+        self.fork_calls: list[dict[str, Any]] = []
+        self.revert_calls: list[dict[str, Any]] = []
 
     async def health(self):
         return {"healthy": True, "version": "1.14.39"}
@@ -65,6 +68,7 @@ class FakeOpenCodeClient:
     async def fork_session(self, session_id, message_id=None):
         if session_id not in self.sessions:
             raise OpenCodeClientError("not found", status=404)
+        self.fork_calls.append({"session_id": session_id, "message_id": message_id})
         sid = f"ses-{self.next_id}"
         self.next_id += 1
         self.sessions[sid] = {"id": sid, "title": self.sessions[session_id].get("title", "Chat")}
@@ -75,7 +79,14 @@ class FakeOpenCodeClient:
             index = next((i for i, msg in enumerate(old_messages) if msg.get("id") == message_id), -1)
             if index < 0:
                 raise OpenCodeClientError("message not found", status=404)
-            self.messages[sid] = list(old_messages[: index + 1])
+            if self.fork_mode == "assistant_boundary_drops_assistant" and old_messages[index].get("role") == "assistant":
+                self.messages[sid] = list(old_messages[:index])
+            elif self.fork_mode == "assistant_boundary_drops_assistant" and old_messages[index].get("role") == "user" and index == 0:
+                self.messages[sid] = list(old_messages[: min(len(old_messages), 2)])
+            elif self.fork_mode == "all_forks_bad_prefix":
+                self.messages[sid] = list(old_messages[:1])
+            else:
+                self.messages[sid] = list(old_messages[: index + 1])
         return {"id": sid, "title": self.sessions[sid]["title"]}
 
     async def abort_session(self, session_id):
@@ -83,6 +94,7 @@ class FakeOpenCodeClient:
         return {"success": True, "supported": True, "status": 200}
 
     async def revert_message(self, session_id, message_id, part_id=None):
+        self.revert_calls.append({"session_id": session_id, "message_id": message_id, "part_id": part_id})
         messages = self.messages.get(session_id, [])
         index = next((i for i, msg in enumerate(messages) if msg.get("id") == message_id), -1)
         if index < 0:

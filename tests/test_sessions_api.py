@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -7,6 +9,10 @@ from efp_opencode_adapter.opencode_client import OpenCodeClientError
 from efp_opencode_adapter.app_keys import SESSION_STORE_KEY, PORTAL_METADATA_CLIENT_KEY, CHATLOG_STORE_KEY
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
+
+
+def _role_content_pairs(messages):
+    return [(message["role"], message["content"]) for message in messages]
 
 
 @pytest.mark.asyncio
@@ -154,6 +160,174 @@ async def test_delete_from_here_and_edit_flow(tmp_path, monkeypatch):
     reject_body = await reject.json()
     assert reject.status == 400
     assert reject_body["error"] == "only_user_message_edit_supported"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_edit_second_user_message_preserves_first_assistant(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await client.post("/api/chat", json={"message": "hi", "session_id": "s1"})
+    second = await (await client.post("/api/chat", json={"message": "how are you", "session_id": "s1"})).json()
+    edit = await client.post(f"/api/sessions/s1/messages/{second['user_message_id']}/edit", json={"content": "how are u??"})
+    edit_body = await edit.json()
+
+    assert edit.status == 200
+    assert edit_body["metadata"]["prefix_validated"] is True
+    assert edit_body["metadata"]["expected_prefix_count"] == 2
+    assert _role_content_pairs(edit_body["messages"]) == [
+        ("user", "hi"),
+        ("assistant", "echo: hi"),
+        ("user", "how are u??"),
+        ("assistant", "echo: how are u??"),
+    ]
+
+    session = await (await client.get("/api/sessions/s1")).json()
+    contents = [message["content"] for message in session["messages"]]
+    assert _role_content_pairs(session["messages"]) == _role_content_pairs(edit_body["messages"])
+    assert "echo: hi" in contents
+    assert "how are you" not in contents
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_edit_skips_assistant_boundary_fork_that_drops_assistant(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient(fork_mode="assistant_boundary_drops_assistant")
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    first = await (await client.post("/api/chat", json={"message": "hi", "session_id": "s1"})).json()
+    second = await (await client.post("/api/chat", json={"message": "how are you", "session_id": "s1"})).json()
+    edit = await client.post(f"/api/sessions/s1/messages/{second['user_message_id']}/edit", json={"content": "how are u??"})
+    edit_body = await edit.json()
+
+    assert edit.status == 200
+    metadata = edit_body["metadata"]
+    assistant_attempt = next(item for item in metadata["attempted_boundaries"] if item["role"] == "assistant")
+    assert assistant_attempt["result"] == "prefix_mismatch"
+    assert assistant_attempt["actual_prefix_count"] == 1
+    assert metadata["accepted_boundary_message_id"] == first["user_message_id"]
+    assert metadata["accepted_boundary_role"] == "user"
+    assert metadata["prefix_validated"] is True
+    assert _role_content_pairs(edit_body["messages"]) == [
+        ("user", "hi"),
+        ("assistant", "echo: hi"),
+        ("user", "how are u??"),
+        ("assistant", "echo: how are u??"),
+    ]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_from_here_prefix_mismatch_keeps_original_mapping_and_history(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient(fork_mode="all_forks_bad_prefix")
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await client.post("/api/chat", json={"message": "hi", "session_id": "s1"})
+    second = await (await client.post("/api/chat", json={"message": "how are you", "session_id": "s1"})).json()
+    old_opencode_session_id = app[SESSION_STORE_KEY].get("s1").opencode_session_id
+    res = await client.post(f"/api/sessions/s1/messages/{second['user_message_id']}/delete-from-here", json={})
+    body = await res.json()
+
+    assert res.status == 409
+    assert body["error"] == "opencode_fork_prefix_mismatch"
+    assert body["expected_prefix_count"] == 2
+    assert body["actual_prefix_count"] == 1
+    assert body["metadata"]["prefix_validated"] is False
+    assert app[SESSION_STORE_KEY].get("s1").opencode_session_id == old_opencode_session_id
+
+    session = await (await client.get("/api/sessions/s1")).json()
+    assert _role_content_pairs(session["messages"]) == [
+        ("user", "hi"),
+        ("assistant", "echo: hi"),
+        ("user", "how are you"),
+        ("assistant", "echo: how are you"),
+    ]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_from_here_allow_revert_fallback_does_not_mutate_old_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient(fork_mode="all_forks_bad_prefix")
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await client.post("/api/chat", json={"message": "hi", "session_id": "s1"})
+    second = await (await client.post("/api/chat", json={"message": "how are you", "session_id": "s1"})).json()
+    old_opencode_session_id = app[SESSION_STORE_KEY].get("s1").opencode_session_id
+    old_messages = deepcopy(fake.messages[old_opencode_session_id])
+
+    res = await client.post(
+        f"/api/sessions/s1/messages/{second['user_message_id']}/delete-from-here",
+        json={"allow_revert_fallback": True},
+    )
+    body = await res.json()
+
+    assert res.status == 409
+    assert body["error"] == "opencode_fork_prefix_mismatch"
+    assert body["metadata"]["allow_revert_fallback_requested"] is True
+    assert body["metadata"]["revert_fallback_disabled"] is True
+    assert fake.revert_calls == []
+    assert fake.messages[old_opencode_session_id] == old_messages
+    assert app[SESSION_STORE_KEY].get("s1").opencode_session_id == old_opencode_session_id
+
+    session = await (await client.get("/api/sessions/s1")).json()
+    assert _role_content_pairs(session["messages"]) == [
+        ("user", "hi"),
+        ("assistant", "echo: hi"),
+        ("user", "how are you"),
+        ("assistant", "echo: how are you"),
+    ]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_edit_allow_revert_fallback_does_not_mutate_old_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient(fork_mode="all_forks_bad_prefix")
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await client.post("/api/chat", json={"message": "hi", "session_id": "s1"})
+    second = await (await client.post("/api/chat", json={"message": "how are you", "session_id": "s1"})).json()
+    old_opencode_session_id = app[SESSION_STORE_KEY].get("s1").opencode_session_id
+    old_messages = deepcopy(fake.messages[old_opencode_session_id])
+
+    res = await client.post(
+        f"/api/sessions/s1/messages/{second['user_message_id']}/edit",
+        json={"content": "how are u??", "allow_revert_fallback": True},
+    )
+    body = await res.json()
+
+    assert res.status == 409
+    assert body["error"] == "opencode_fork_prefix_mismatch"
+    assert body["metadata"]["allow_revert_fallback_requested"] is True
+    assert body["metadata"]["revert_fallback_disabled"] is True
+    assert fake.revert_calls == []
+    assert fake.messages[old_opencode_session_id] == old_messages
+    assert app[SESSION_STORE_KEY].get("s1").opencode_session_id == old_opencode_session_id
+
+    session = await (await client.get("/api/sessions/s1")).json()
+    contents = [message["content"] for message in session["messages"]]
+    assert _role_content_pairs(session["messages"]) == [
+        ("user", "hi"),
+        ("assistant", "echo: hi"),
+        ("user", "how are you"),
+        ("assistant", "echo: how are you"),
+    ]
+    assert "how are u??" not in contents
+    assert "echo: how are u??" not in contents
     await client.close()
 
 
