@@ -257,7 +257,19 @@ async def _send_skill_prompt(
             f"Use head branch: {repository_context.head_branch}\n"
             "Do not run git inspection from /workspace unless /workspace/.git exists"
         )
-    parts[0]["text"] = prompt
+    part_metadata = parts[0].get("metadata") if isinstance(parts[0].get("metadata"), dict) else {}
+    parts[0] = {
+        **parts[0],
+        "type": "text",
+        "text": prompt,
+        "synthetic": True,
+        "metadata": {
+            **part_metadata,
+            "efp_internal": "skill_prompt",
+            "portal_request_id": request_id,
+            "original_user_message_hidden": True,
+        },
+    }
     skill_debug["used_skill_prompt"] = True
     if command_error:
         skill_debug["command_execution_error"] = command_error
@@ -464,7 +476,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             except Exception as exc:
                 safe_error = safe_preview(str(exc), 300)
                 attachment_debug.append({"status": "error", "error": safe_error})
-                parts.append({"type": "text", "text": f"Attachment processing failed: {safe_error}"})
+                parts.append({"type": "text", "text": f"Attachment processing failed: {safe_error}", "synthetic": True, "metadata": {"efp_internal": "attachment_context"}})
 
         invocation = parse_slash_invocation(message)
         skill_debug = None

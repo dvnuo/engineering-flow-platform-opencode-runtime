@@ -280,6 +280,10 @@ def _safe_attachment_error(exc: Exception) -> str:
     return "unreadable"
 
 
+def _attachment_context_part(text: str) -> dict:
+    return {"type": "text", "text": text, "synthetic": True, "metadata": {"efp_internal": "attachment_context"}}
+
+
 def build_opencode_attachment_parts(
     service: AttachmentService,
     session_id: str,
@@ -292,7 +296,7 @@ def build_opencode_attachment_parts(
     debug: list[dict] = []
     has_attachments = bool(attachments)
     if not service and has_attachments:
-        return [{"type": "text", "text": "Attachments were provided, but the attachment service is unavailable."}], [{"status": "error", "error": "attachment_service_unavailable"}]
+        return [_attachment_context_part("Attachments were provided, but the attachment service is unavailable.")], [{"status": "error", "error": "attachment_service_unavailable"}]
     if not service:
         return parts, debug
 
@@ -300,7 +304,7 @@ def build_opencode_attachment_parts(
     refs, normalize_debug = _normalize_attachment_refs_with_debug(attachments)
     debug.extend(normalize_debug)
     if any(item.get("error") == "attachments_not_list" for item in normalize_debug):
-        parts.append({"type": "text", "text": "Attachments could not be processed: attachments must be a list."})
+        parts.append(_attachment_context_part("Attachments could not be processed: attachments must be a list."))
         return parts, debug
     text_blocks: list[str] = ["Attached files:\n"]
     used = len(text_blocks[0])
@@ -349,28 +353,28 @@ def build_opencode_attachment_parts(
             if content_type.startswith("image/") or content_type == "application/pdf":
                 if size <= max_inline_bytes:
                     if content_type.startswith("image/"):
-                        parts.append({"type": "text", "text": f"Attached image: {name} ({content_type}, {size} bytes). The binary image is included as a file part."})
+                        parts.append(_attachment_context_part(f"Attached image: {name} ({content_type}, {size} bytes). The binary image is included as a file part."))
                     else:
-                        parts.append({"type": "text", "text": f"Attached PDF: {name} ({content_type}, {size} bytes). The binary PDF is included as a file part."})
+                        parts.append(_attachment_context_part(f"Attached PDF: {name} ({content_type}, {size} bytes). The binary PDF is included as a file part."))
                     import base64
                     parts.append({"type": "file", "mime": content_type, "filename": name, "url": f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"})
                     item.update({"action": "inline_file", "inlined": True})
                 else:
-                    parts.append({"type": "text", "text": f"Attached file {name} ({content_type}, {size} bytes) was not inlined because it exceeds the {max_inline_bytes} byte inline limit."})
+                    parts.append(_attachment_context_part(f"Attached file {name} ({content_type}, {size} bytes) was not inlined because it exceeds the {max_inline_bytes} byte inline limit."))
                     item.update({"action": "inline_file", "inlined": False})
                 debug.append(item)
                 continue
 
-            parts.append({"type": "text", "text": f"Attached file {name} ({content_type}, {size} bytes) is uploaded, but this runtime cannot parse or inline this file type yet."})
+            parts.append(_attachment_context_part(f"Attached file {name} ({content_type}, {size} bytes) is uploaded, but this runtime cannot parse or inline this file type yet."))
             item.update({"action": "unsupported", "status": "ok"})
             debug.append(item)
         except Exception as exc:
             reason = _safe_attachment_error(exc)
-            parts.append({"type": "text", "text": f"Attachment {str(fid_raw)[:80]} could not be loaded: {reason}."})
+            parts.append(_attachment_context_part(f"Attachment {str(fid_raw)[:80]} could not be loaded: {reason}."))
             debug.append({"file_id": str(fid_raw)[:80], "status": "error", "error": reason})
 
     if text_added and len(text_blocks) > 1:
-        parts.insert(0, {"type": "text", "text": "".join(text_blocks)})
+        parts.insert(0, _attachment_context_part("".join(text_blocks)))
 
     return parts, debug
 def build_attachment_context(session_id: str, attachments: list[dict], *, settings: Settings | None = None, max_chars: int = 30000) -> str:
