@@ -63,6 +63,16 @@ def _delete_chatlog_best_effort(chatlog_store, session_id: str) -> dict[str, Any
         return {"success": False, "error": safe_preview(str(exc), 1000)}
 
 
+def _delete_user_display_best_effort(display_store, *, portal_session_id: str | None = None, opencode_session_id: str | None = None) -> dict[str, Any]:
+    if not display_store or not hasattr(display_store, "delete_session"):
+        return {"success": False, "skipped": True, "reason": "display_store_delete_not_supported"}
+    try:
+        deleted_count = display_store.delete_session(portal_session_id=portal_session_id, opencode_session_id=opencode_session_id)
+        return {"success": True, "deleted_count": int(deleted_count or 0)}
+    except Exception as exc:
+        return {"success": False, "error": safe_preview(str(exc), 1000)}
+
+
 async def _read_json_object(request: web.Request, *, error_prefix: str = "payload") -> dict[str, Any]:
     try:
         body = await request.json()
@@ -471,10 +481,16 @@ async def delete_session_handler(request: web.Request) -> web.Response:
     client = request.app[OPENCODE_CLIENT_KEY]
     portal_metadata = request.app.get(PORTAL_METADATA_CLIENT_KEY)
     chatlog_store = request.app.get(CHATLOG_STORE_KEY)
+    display_store = request.app.get(USER_DISPLAY_STORE_KEY)
     record = store.get(sid)
     if record is None or record.deleted:
         metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
-        return web.json_response({"success": True, "session_id": sid, "already_deleted": True, "runtime_deleted": False, "opencode_deleted": False, "opencode_missing": record is None, "metadata_delete": metadata_delete})
+        display_delete = _delete_user_display_best_effort(
+            display_store,
+            portal_session_id=sid,
+            opencode_session_id=record.opencode_session_id if record else None,
+        )
+        return web.json_response({"success": True, "session_id": sid, "already_deleted": True, "runtime_deleted": False, "opencode_deleted": False, "opencode_missing": record is None, "metadata_delete": metadata_delete, "display_delete": display_delete})
     opencode_deleted = False
     opencode_missing = False
     try:
@@ -487,8 +503,9 @@ async def delete_session_handler(request: web.Request) -> web.Response:
             return web.json_response({"success": False, "error": "opencode_delete_failed", "session_id": sid, "opencode_session_id": record.opencode_session_id, "opencode_status": exc.status, "detail": str(exc)}, status=502)
     store.mark_deleted(sid)
     chatlog_delete = _delete_chatlog_best_effort(chatlog_store, sid)
+    display_delete = _delete_user_display_best_effort(display_store, portal_session_id=sid, opencode_session_id=record.opencode_session_id)
     metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
-    return web.json_response({"success": True, "session_id": sid, "opencode_session_id": record.opencode_session_id, "already_deleted": False, "runtime_deleted": True, "opencode_deleted": opencode_deleted, "opencode_missing": opencode_missing, "metadata_delete": metadata_delete, "chatlog_delete": chatlog_delete})
+    return web.json_response({"success": True, "session_id": sid, "opencode_session_id": record.opencode_session_id, "already_deleted": False, "runtime_deleted": True, "opencode_deleted": opencode_deleted, "opencode_missing": opencode_missing, "metadata_delete": metadata_delete, "chatlog_delete": chatlog_delete, "display_delete": display_delete})
 
 
 async def clear_sessions_handler(request: web.Request) -> web.Response:
@@ -496,6 +513,7 @@ async def clear_sessions_handler(request: web.Request) -> web.Response:
     client = request.app[OPENCODE_CLIENT_KEY]
     portal_metadata = request.app.get(PORTAL_METADATA_CLIENT_KEY)
     chatlog_store = request.app.get(CHATLOG_STORE_KEY)
+    display_store = request.app.get(USER_DISPLAY_STORE_KEY)
     failures = []
     deleted_count = 0
     metadata_results = []
@@ -512,8 +530,9 @@ async def clear_sessions_handler(request: web.Request) -> web.Response:
         store.mark_deleted(rec.portal_session_id)
         deleted_count += 1
         chatlog_delete = _delete_chatlog_best_effort(chatlog_store, rec.portal_session_id)
+        display_delete = _delete_user_display_best_effort(display_store, portal_session_id=rec.portal_session_id, opencode_session_id=rec.opencode_session_id)
         metadata = await _delete_portal_metadata_best_effort(portal_metadata, rec.portal_session_id)
-        metadata_results.append({"session_id": rec.portal_session_id, "opencode_missing": op_missing, "metadata_delete": metadata, "chatlog_delete": chatlog_delete})
+        metadata_results.append({"session_id": rec.portal_session_id, "opencode_missing": op_missing, "metadata_delete": metadata, "chatlog_delete": chatlog_delete, "display_delete": display_delete})
     if failures:
         return web.json_response({"success": False, "deleted_count": deleted_count, "failed_count": len(failures), "failures": failures, "metadata_delete": metadata_results}, status=502)
     return web.json_response({"success": True, "deleted_count": deleted_count, "failed_count": 0, "metadata_delete": metadata_results})
