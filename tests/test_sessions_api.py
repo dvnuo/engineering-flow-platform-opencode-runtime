@@ -633,3 +633,54 @@ def test_to_efp_messages_filters_internal_auto_continue_metadata():
     assert "msg_user_1" in ids
     assert "msg_internal_1" not in ids
     assert "efp-auto-continue-legacy" not in ids
+
+
+def test_to_efp_messages_uses_display_sidecar_for_user_content_and_attachments(tmp_path):
+    class DisplayStore:
+        def get_user_message(self, opencode_session_id, opencode_message_id, portal_session_id=None):
+            assert opencode_session_id == "ses_1"
+            assert opencode_message_id == "msg_1"
+            assert portal_session_id == "portal_1"
+            return {
+                "display_content": "/jira-bulk-create-from-csv example: https://jira.company.com/browse/MMGFX-13887",
+                "display_attachments": [
+                    {
+                        "file_id": "file_1",
+                        "name": "cases.csv",
+                        "content_type": "text/csv",
+                        "size": 123,
+                        "type": "file",
+                        "parsed": True,
+                    }
+                ],
+            }
+
+    raw = [
+        {
+            "info": {"id": "msg_1", "role": "user"},
+            "parts": [
+                {
+                    "type": "text",
+                    "text": "Run the OpenCode agent skill `jira-bulk-create-from-csv`.\n\nOriginal user slash command:\n`/jira-bulk-create-from-csv example: https://jira.company.com/browse/MMGFX-13887`\n\nAttached files:\n## cases.csv\nsummary,steps\nA,B",
+                }
+            ],
+        }
+    ]
+
+    out = _to_efp_messages(
+        raw,
+        display_store=DisplayStore(),
+        portal_session_id="portal_1",
+        opencode_session_id="ses_1",
+    )
+
+    assert out[0]["content"] == "/jira-bulk-create-from-csv example: https://jira.company.com/browse/MMGFX-13887"
+    assert out[0]["display_content"] == out[0]["content"]
+    assert out[0]["attachments"] == [
+        {"file_id": "file_1", "name": "cases.csv", "content_type": "text/csv", "size": 123, "type": "file", "parsed": True}
+    ]
+    assert out[0]["metadata"]["display_content_source"] == "portal_original_user_message"
+    assert out[0]["metadata"]["internal_model_content_hidden"] is True
+    assert "Run the OpenCode agent skill" not in out[0]["content"]
+    assert "Attached files:" not in out[0]["content"]
+    assert "summary,steps" not in out[0]["content"]

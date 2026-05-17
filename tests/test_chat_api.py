@@ -7,9 +7,10 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
 from efp_opencode_adapter.settings import Settings
-from efp_opencode_adapter.app_keys import SESSION_STORE_KEY, REQUEST_BINDING_STORE_KEY
+from efp_opencode_adapter.app_keys import ATTACHMENT_SERVICE_KEY, SESSION_STORE_KEY, REQUEST_BINDING_STORE_KEY, USER_DISPLAY_STORE_KEY
 from efp_opencode_adapter import chat_api
 from efp_opencode_adapter.chat_api import _consume_background_chat_task, _is_stream_relevant_event
+from efp_opencode_adapter.skill_invocation import SkillDecision
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -355,6 +356,99 @@ async def test_chat_response_uses_history_assistant_text_not_user_input(tmp_path
     assert session["messages"][-1]["content"] == "Hi. What do you need?"
     assert "hidden" not in session["messages"][-1]["content"]
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_persists_original_display_for_slash_skill_with_csv_attachment(tmp_path, monkeypatch):
+    class CaptureSkillClient(FakeOpenCodeClient):
+        def __init__(self):
+            super().__init__()
+            self.sent_parts = []
+
+        async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+            self.sent_parts.append(parts)
+            user_id = message_id or f"u-{len(self.messages[session_id]) + 1}"
+            user = {"id": user_id, "role": "user", "parts": parts}
+            assistant = {
+                "id": f"a-{len(self.messages[session_id]) + 2}",
+                "role": "assistant",
+                "parts": [{"type": "text", "text": "skill done"}, {"type": "step-finish", "reason": "stop"}],
+            }
+            self.messages[session_id].extend([user, assistant])
+            return {"message": assistant, "usage": {"input_tokens": 10, "output_tokens": 5, "cost": 0.001}, "model": model or "test-model", "provider": "test-provider"}
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    fake = CaptureSkillClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    upload = app[ATTACHMENT_SERVICE_KEY].upload("webchat_test", "cases.csv", b"summary,steps\nA,B", "text/csv")
+
+    def _allow_skill(settings, invocation):
+        return SkillDecision(
+            skill={"opencode_name": "jira-bulk-create-from-csv"},
+            allowed=True,
+            reason="allowed",
+            permission_state="allow",
+        )
+
+    monkeypatch.setattr(chat_api, "evaluate_skill_invocation", _allow_skill)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/chat",
+            json={
+                "message": "/jira-bulk-create-from-csv example: https://jira.company.com/browse/MMGFX-13887",
+                "session_id": "webchat_test",
+                "request_id": "req_test",
+                "attachments": [
+                    {
+                        **upload,
+                        "url": "https://files.invalid/cases.csv",
+                        "text": "summary,steps\nA,B",
+                        "content": "raw csv content",
+                    }
+                ],
+            },
+        )
+        body = await resp.json()
+
+        assert resp.status == 200
+        assert fake.sent_parts
+        sent_parts = fake.sent_parts[-1]
+        assert sent_parts[0]["synthetic"] is True
+        assert sent_parts[0]["metadata"]["efp_internal"] == "skill_prompt"
+        assert "Run the OpenCode agent skill `jira-bulk-create-from-csv`" in sent_parts[0]["text"]
+        assert any(
+            part.get("type") == "text"
+            and "Attached files:" in part.get("text", "")
+            and "summary,steps" in part.get("text", "")
+            and part.get("synthetic") is True
+            and part.get("metadata", {}).get("efp_internal") == "attachment_context"
+            for part in sent_parts
+        )
+
+        record = app[USER_DISPLAY_STORE_KEY].get_user_message(
+            app[SESSION_STORE_KEY].get("webchat_test").opencode_session_id,
+            body["user_message_id"],
+            "webchat_test",
+        )
+        assert record["display_content"] == "/jira-bulk-create-from-csv example: https://jira.company.com/browse/MMGFX-13887"
+        assert record["display_attachments"] == [
+            {
+                "file_id": upload["file_id"],
+                "name": "cases.csv",
+                "content_type": "text/csv",
+                "size": len(b"summary,steps\nA,B"),
+                "type": "file",
+            }
+        ]
+        serialized = json.dumps(record)
+        assert "summary,steps" not in serialized
+        assert "https://files.invalid/cases.csv" not in serialized
+        assert "raw csv content" not in serialized
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
