@@ -25,6 +25,11 @@ def _json_bad_gateway(error: str, **extra) -> web.HTTPBadGateway:
     return web.HTTPBadGateway(text=json.dumps(payload), content_type="application/json")
 
 
+def _json_conflict(error: str, **extra) -> web.HTTPConflict:
+    payload = {"error": error, **extra}
+    return web.HTTPConflict(text=json.dumps(payload), content_type="application/json")
+
+
 def _opencode_detail(exc: OpenCodeClientError) -> str:
     return str(exc)
 
@@ -103,6 +108,24 @@ def _to_efp_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [to_efp_message(msg, index=idx) for idx, msg in enumerate(filtered)]
 
 
+def _normalize_visible_content(content: str) -> str:
+    return (content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _visible_message_signatures(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {"role": _message_role(message), "content": _normalize_visible_content(message_to_text(message))}
+        for message in messages
+        if not _is_internal_efp_message(message)
+    ]
+
+
+def _prefix_matches(expected_messages: list[dict[str, Any]], actual_messages: list[dict[str, Any]]) -> tuple[bool, int, int]:
+    expected = _visible_message_signatures(expected_messages)
+    actual = _visible_message_signatures(actual_messages)
+    return expected == actual, len(expected), len(actual)
+
+
 def _message_id(message: Any, fallback: str = "") -> str:
     info = _message_info(message)
     return str(info.get("id") or (message.get("id") if isinstance(message, dict) else "") or (message.get("message_id") if isinstance(message, dict) else "") or fallback)
@@ -140,6 +163,215 @@ def _extract_opencode_session_id(payload: dict[str, Any] | Any) -> str:
         if nested_id:
             return nested_id
     return ""
+
+
+def _fork_boundary_candidates(messages: list[dict[str, Any]], target_idx: int) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    candidates: list[dict[str, str]] = []
+
+    def add_message(idx: int) -> None:
+        if idx < 0 or idx >= len(messages):
+            return
+        message = messages[idx]
+        message_id = _message_id(message)
+        if not message_id or message_id in seen:
+            return
+        seen.add(message_id)
+        candidates.append({"message_id": message_id, "role": _message_role(message)})
+
+    add_message(target_idx)
+    add_message(target_idx - 1)
+    for idx in range(target_idx - 1, -1, -1):
+        if _message_role(messages[idx]) == "user":
+            add_message(idx)
+            break
+
+    return candidates
+
+
+async def _fork_candidate_with_abort_retry(client, old_opencode_session_id: str, boundary_message_id: str) -> dict[str, Any]:
+    try:
+        return await client.fork_session(old_opencode_session_id, boundary_message_id)
+    except OpenCodeClientError as exc:
+        if exc.status not in {409, 423}:
+            raise
+        await client.abort_session(old_opencode_session_id)
+        return await client.fork_session(old_opencode_session_id, boundary_message_id)
+
+
+async def _fork_session_preserving_prefix(
+    client,
+    old_opencode_session_id: str,
+    messages: list[dict[str, Any]],
+    target_idx: int,
+    record,
+    allow_revert_fallback: bool = False,
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    target_message = messages[target_idx]
+    target_message_id = _message_id(target_message)
+    expected_prefix_messages = messages[:target_idx]
+    expected_prefix_count = len(_visible_message_signatures(expected_prefix_messages))
+    attempted_boundaries: list[dict[str, Any]] = []
+    last_actual_prefix_count = 0
+
+    base_metadata = {
+        "old_opencode_session_id": old_opencode_session_id,
+        "deleted_from_message_id": target_message_id,
+        "target_message_id": target_message_id,
+        "expected_prefix_count": expected_prefix_count,
+        "prefix_validated": False,
+        "attempted_boundaries": attempted_boundaries,
+    }
+
+    if target_idx == 0:
+        attempt = {"message_id": "", "role": "session_start", "result": "fork_failed"}
+        attempted_boundaries.append(attempt)
+        try:
+            created = await client.create_session(title=record.title)
+            new_opencode_session_id = _extract_opencode_session_id(created)
+            if not new_opencode_session_id:
+                attempt["error"] = "missing_fork_session_id"
+                raise _json_bad_gateway("opencode_mutation_failed", detail="missing_fork_session_id")
+            new_messages = await client.list_messages(new_opencode_session_id)
+        except OpenCodeClientError as exc:
+            attempt["status"] = exc.status
+            attempt["error"] = safe_preview(_opencode_detail(exc), 1000)
+            raise _json_bad_gateway("opencode_mutation_failed", detail=_opencode_detail(exc))
+        except web.HTTPException:
+            raise
+        except Exception as exc:
+            attempt["error"] = safe_preview(_unexpected_upstream_detail(exc), 1000)
+            raise _json_bad_gateway("opencode_mutation_failed", detail=_unexpected_upstream_detail(exc))
+
+        valid, _, actual_prefix_count = _prefix_matches(expected_prefix_messages, new_messages)
+        last_actual_prefix_count = actual_prefix_count
+        attempt["actual_prefix_count"] = actual_prefix_count
+        if valid:
+            attempt["result"] = "matched"
+            metadata = {
+                **base_metadata,
+                "strategy": "new_empty_session",
+                "opencode_session_id": new_opencode_session_id,
+                "accepted_boundary_message_id": "",
+                "accepted_boundary_role": "session_start",
+                "actual_prefix_count": actual_prefix_count,
+                "prefix_validated": True,
+            }
+            return new_opencode_session_id, new_messages, metadata
+
+        attempt["result"] = "prefix_mismatch"
+        metadata = {
+            **base_metadata,
+            "strategy": "prefix_validation_failed",
+            "opencode_session_id": new_opencode_session_id,
+            "accepted_boundary_message_id": "",
+            "accepted_boundary_role": "",
+            "actual_prefix_count": last_actual_prefix_count,
+        }
+        raise _json_conflict(
+            "opencode_fork_prefix_mismatch",
+            expected_prefix_count=expected_prefix_count,
+            actual_prefix_count=last_actual_prefix_count,
+            detail="OpenCode mutation session did not match the expected prefix",
+            metadata=metadata,
+        )
+
+    for candidate in _fork_boundary_candidates(messages, target_idx):
+        boundary_message_id = candidate["message_id"]
+        boundary_role = candidate["role"]
+        attempt = {"message_id": boundary_message_id, "role": boundary_role, "result": "fork_failed"}
+        attempted_boundaries.append(attempt)
+
+        try:
+            forked = await _fork_candidate_with_abort_retry(client, old_opencode_session_id, boundary_message_id)
+            new_opencode_session_id = _extract_opencode_session_id(forked)
+            if not new_opencode_session_id:
+                attempt["error"] = "missing_fork_session_id"
+                continue
+        except OpenCodeClientError as exc:
+            attempt["status"] = exc.status
+            attempt["error"] = safe_preview(_opencode_detail(exc), 1000)
+            if exc.status in {404, 405} and allow_revert_fallback:
+                continue
+            continue
+        except Exception as exc:
+            attempt["error"] = safe_preview(_unexpected_upstream_detail(exc), 1000)
+            continue
+
+        try:
+            new_messages = await client.list_messages(new_opencode_session_id)
+        except OpenCodeClientError as exc:
+            attempt["result"] = "list_failed"
+            attempt["status"] = exc.status
+            attempt["error"] = safe_preview(_opencode_detail(exc), 1000)
+            continue
+        except Exception as exc:
+            attempt["result"] = "list_failed"
+            attempt["error"] = safe_preview(_unexpected_upstream_detail(exc), 1000)
+            continue
+
+        valid, _, actual_prefix_count = _prefix_matches(expected_prefix_messages, new_messages)
+        last_actual_prefix_count = actual_prefix_count
+        attempt["actual_prefix_count"] = actual_prefix_count
+        if not valid:
+            attempt["result"] = "prefix_mismatch"
+            continue
+
+        attempt["result"] = "matched"
+        metadata = {
+            **base_metadata,
+            "strategy": "fork_before_target",
+            "opencode_session_id": new_opencode_session_id,
+            "accepted_boundary_message_id": boundary_message_id,
+            "accepted_boundary_role": boundary_role,
+            "actual_prefix_count": actual_prefix_count,
+            "prefix_validated": True,
+        }
+        return new_opencode_session_id, new_messages, metadata
+
+    if allow_revert_fallback:
+        attempt = {"message_id": target_message_id, "role": _message_role(target_message), "result": "fork_failed"}
+        attempted_boundaries.append(attempt)
+        try:
+            await client.revert_message(old_opencode_session_id, target_message_id)
+            new_messages = await client.list_messages(old_opencode_session_id)
+            valid, _, actual_prefix_count = _prefix_matches(expected_prefix_messages, new_messages)
+            last_actual_prefix_count = actual_prefix_count
+            attempt["actual_prefix_count"] = actual_prefix_count
+            if valid:
+                attempt["result"] = "matched"
+                metadata = {
+                    **base_metadata,
+                    "strategy": "revert_fallback",
+                    "opencode_session_id": old_opencode_session_id,
+                    "accepted_boundary_message_id": target_message_id,
+                    "accepted_boundary_role": _message_role(target_message),
+                    "actual_prefix_count": actual_prefix_count,
+                    "prefix_validated": True,
+                }
+                return old_opencode_session_id, new_messages, metadata
+            attempt["result"] = "prefix_mismatch"
+        except OpenCodeClientError as exc:
+            attempt["status"] = exc.status
+            attempt["error"] = safe_preview(_opencode_detail(exc), 1000)
+        except Exception as exc:
+            attempt["error"] = safe_preview(_unexpected_upstream_detail(exc), 1000)
+
+    metadata = {
+        **base_metadata,
+        "strategy": "prefix_validation_failed",
+        "opencode_session_id": "",
+        "accepted_boundary_message_id": "",
+        "accepted_boundary_role": "",
+        "actual_prefix_count": last_actual_prefix_count,
+    }
+    raise _json_conflict(
+        "opencode_fork_prefix_mismatch",
+        expected_prefix_count=expected_prefix_count,
+        actual_prefix_count=last_actual_prefix_count,
+        detail="OpenCode fork did not preserve the expected message prefix",
+        metadata=metadata,
+    )
 
 
 async def list_sessions_handler(request: web.Request) -> web.Response:
@@ -294,57 +526,20 @@ async def _delete_from_here(*, store, client, portal_session_id: str, message_id
     idx = _find_message_index(messages, message_id)
     if idx < 0:
         raise _json_not_found("message_not_found")
-    previous_message_id = _message_id(messages[idx - 1]) if idx > 0 else ""
-    strategy = "fork_before_target"
-    new_opencode_session_id = ""
-    if previous_message_id:
-        try:
-            forked = await client.fork_session(old_opencode_session_id, previous_message_id)
-        except OpenCodeClientError as exc:
-            if exc.status in {409, 423}:
-                try:
-                    await client.abort_session(old_opencode_session_id)
-                    forked = await client.fork_session(old_opencode_session_id, previous_message_id)
-                except OpenCodeClientError as retry_exc:
-                    raise _json_bad_gateway("opencode_mutation_failed", detail=_opencode_detail(retry_exc))
-                except Exception as retry_exc:
-                    raise _json_bad_gateway("opencode_mutation_failed", detail=_unexpected_upstream_detail(retry_exc))
-            elif exc.status in {404, 405} and allow_revert_fallback:
-                try:
-                    await client.revert_message(old_opencode_session_id, message_id)
-                except OpenCodeClientError as revert_exc:
-                    raise _json_bad_gateway("opencode_mutation_failed", detail=_opencode_detail(revert_exc))
-                except Exception as revert_exc:
-                    raise _json_bad_gateway("opencode_mutation_failed", detail=_unexpected_upstream_detail(revert_exc))
-                strategy = "revert_fallback"
-                new_opencode_session_id = old_opencode_session_id
-                forked = {}
-            else:
-                raise _json_bad_gateway("opencode_mutation_failed", detail=_opencode_detail(exc))
-        except Exception as exc:
-            raise _json_bad_gateway("opencode_mutation_failed", detail=_unexpected_upstream_detail(exc))
-        if not new_opencode_session_id:
-            new_opencode_session_id = _extract_opencode_session_id(forked)
-    else:
-        try:
-            created = await client.create_session(title=record.title)
-        except OpenCodeClientError as exc:
-            raise _json_bad_gateway("opencode_mutation_failed", detail=_opencode_detail(exc))
-        except Exception as exc:
-            raise _json_bad_gateway("opencode_mutation_failed", detail=_unexpected_upstream_detail(exc))
-        new_opencode_session_id = _extract_opencode_session_id(created)
-        strategy = "new_empty_session"
-    if not new_opencode_session_id:
-        raise _json_bad_gateway("opencode_mutation_failed", detail="missing_fork_session_id")
-    try:
-        new_messages = await client.list_messages(new_opencode_session_id)
-    except OpenCodeClientError as exc:
-        detail = f"mutated_session_unreadable: {_opencode_detail(exc)}" if exc.status == 404 else _opencode_detail(exc)
-        raise _json_bad_gateway("opencode_mutation_failed", detail=detail)
-    except Exception as exc:
-        raise _json_bad_gateway("opencode_mutation_failed", detail=f"mutated_session_unreadable: {_unexpected_upstream_detail(exc)}")
-    updated_record = store.replace_opencode_session_after_mutation(portal_session_id, new_opencode_session_id, message_count=len(new_messages), last_message=_last_message_text(new_messages))
-    metadata = {"strategy": strategy, "deleted_from_message_id": message_id, "previous_message_id": previous_message_id or "", "old_opencode_session_id": old_opencode_session_id, "opencode_session_id": new_opencode_session_id}
+    new_opencode_session_id, new_messages, metadata = await _fork_session_preserving_prefix(
+        client,
+        old_opencode_session_id,
+        messages,
+        idx,
+        record,
+        allow_revert_fallback=allow_revert_fallback,
+    )
+    updated_record = store.replace_opencode_session_after_mutation(
+        portal_session_id,
+        new_opencode_session_id,
+        message_count=len(_visible_message_signatures(new_messages)),
+        last_message=_last_message_text(new_messages),
+    )
     return updated_record, new_messages, metadata
 
 
