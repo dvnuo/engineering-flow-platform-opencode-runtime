@@ -21,6 +21,9 @@ MANAGED_EXTERNAL_ENV_KEYS = {
     "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
     "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "GH_PROMPT_DISABLED", "GH_REPO",
     "GIT_USERNAME", "GIT_PASSWORD", "GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_EDITOR",
+    "JAVA_HOME", "JAVA8_HOME", "JAVA17_HOME", "JAVA21_HOME", "JAVA25_HOME",
+    "JDK8_HOME", "JDK17_HOME", "JDK21_HOME", "JDK25_HOME",
+    "MAVEN_HOME", "M2_HOME", "MAVEN_CONFIG", "MAVEN_SETTINGS_PATH",
 }
 _REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
 
@@ -123,8 +126,21 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         "EFP_SKILLS_DIR": str(settings.skills_dir),
         "EFP_ADAPTER_STATE_DIR": str(settings.adapter_state_dir),
         "EFP_OPENCODE_URL": settings.opencode_url,
+        "JAVA8_HOME": "/opt/jdks/zulu8",
+        "JAVA17_HOME": "/opt/jdks/zulu17",
+        "JAVA21_HOME": "/opt/jdks/zulu21",
+        "JAVA25_HOME": "/opt/jdks/zulu25",
+        "JDK8_HOME": "/opt/jdks/zulu8",
+        "JDK17_HOME": "/opt/jdks/zulu17",
+        "JDK21_HOME": "/opt/jdks/zulu21",
+        "JDK25_HOME": "/opt/jdks/zulu25",
+        "JAVA_HOME": "/opt/jdks/zulu21",
+        "MAVEN_HOME": "/opt/maven",
+        "M2_HOME": "/opt/maven",
+        "MAVEN_CONFIG": "/root/.m2",
+        "MAVEN_SETTINGS_PATH": "/root/.m2/settings.xml",
     }
-    updated: list[str] = []
+    updated: list[str] = ["java_maven"]
     warnings: list[str] = []
 
     proxy = cfg.get("proxy") if isinstance(cfg.get("proxy"), dict) else {}
