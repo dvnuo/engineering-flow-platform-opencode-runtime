@@ -260,7 +260,7 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     message_ids = {values.get(k, "") for k in ("message_id", "messageID", "messageId", "parentID", "parent_id") if values.get(k)}
     mapped = session_store.find_by_opencode_session_id(opencode_session_id) if opencode_session_id else None
     session_id = mapped.portal_session_id if mapped else (opencode_session_id or "")
-    normalized_type = f"opencode.{raw_type}" if raw_type else "opencode.event"
+    normalized_type = "opencode.sync" if raw_type == "sync" else "opencode.raw"
 
     if "permission" in raw_type:
         if any(x in raw_type for x in ("replied", "resolved", "approved", "denied", "rejected", "closed")):
@@ -282,7 +282,10 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         part = canonical.get("part") if isinstance(canonical.get("part"), dict) else {}
         ptype = str(part.get("type") or "").lower()
         if ptype == "tool":
-            normalized_type = "tool.started" if status in {"", "started", "running"} else "tool.completed"
+            if status in {"failed", "error", "rejected", "denied"}:
+                normalized_type = "tool.failed"
+            else:
+                normalized_type = "tool.started" if status in {"", "started", "running", "pending"} else "tool.completed"
         elif ptype == "step-start":
             normalized_type = "opencode.step.started"
         elif ptype == "step-finish":
@@ -296,9 +299,10 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         field = str(canonical.get("field") or values.get("field") or "").lower()
         delta = canonical.get("delta") or values.get("delta") or ""
         delta = delta if isinstance(delta, str) else ""
-        normalized_type = "opencode.message.part.delta"
+        normalized_type = "opencode.raw"
         text = ""
-        pmeta = part_meta if isinstance(part_meta, dict) else {}
+        canonical_part = canonical.get("part") if isinstance(canonical.get("part"), dict) else {}
+        pmeta = part_meta if isinstance(part_meta, dict) and part_meta else (_part_meta_from_part(canonical_part) if canonical_part else {})
         role_values = _role_candidates(values, canonical, message_role, pmeta)
         role = next((r for r in role_values if r in {"assistant", "user"}), (role_values[0] if role_values else ""))
         ptype = str(pmeta.get("type") or "").lower()
@@ -326,6 +330,11 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     retry_status = canonical.get("status") if isinstance(canonical.get("status"), dict) else {}
     if raw_type == "session.status" and isinstance(retry_status, dict) and str(retry_status.get("type", "")).lower() == "retry":
         normalized_type = "provider.retry"
+    if (
+        any(token in raw_type for token in ("provider.retry", "model.retry", "rate.limit", "rate_limit", "ratelimit"))
+        or status in {"retry", "retrying", "rate_limit", "rate_limited", "ratelimited"}
+    ):
+        normalized_type = "provider.retry"
 
     task_id = _map_task_id(task_store, opencode_session_id, message_ids)
     s_permission_id = _sanitize_event_value(permission_id, 300)
@@ -335,10 +344,16 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     s_risk = _sanitize_event_value(risk_level, 100)
     s_text = _sanitize_event_value(text, max_chars)
     s_status = _sanitize_event_value(status, 100)
+    s_session_id = _sanitize_event_text(session_id, 300)
+    s_opencode_session_id = _sanitize_event_text(opencode_session_id, 300)
+    s_request_id = _sanitize_event_text(portal_request_id, 300)
+    s_raw_request_id = _sanitize_event_text(opencode_request_id, 300)
+    s_raw_type = _sanitize_event_text(raw_type, 200)
 
     data = {
         "raw_event_preview": _sanitize_event_value(raw_event, max_chars),
         "canonical_preview": _sanitize_event_value(canonical, max_chars),
+        "raw_type": s_raw_type,
         "permission_id": s_permission_id,
         "tool": s_tool,
         "input_preview": s_input,
@@ -358,12 +373,6 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     data["message_id"] = _sanitize_event_text(values.get("__part_message_id") or _raw_message_id_from_event(canonical, values), 300)
     data["part_id"] = _sanitize_event_text(values.get("__part_id") or _raw_part_id_from_event(canonical, values), 300)
 
-    s_session_id = _sanitize_event_text(session_id, 300)
-    s_opencode_session_id = _sanitize_event_text(opencode_session_id, 300)
-    s_request_id = _sanitize_event_text(portal_request_id, 300)
-    s_raw_request_id = _sanitize_event_text(opencode_request_id, 300)
-    s_raw_type = _sanitize_event_text(raw_type, 200)
-
     evt = {
         "type": normalized_type,
         "event_type": normalized_type,
@@ -375,20 +384,24 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         "state": "received",
         "summary": normalized_type,
         "data": data,
+        "metadata": {"raw_type": s_raw_type},
         "created_at": utc_now_iso(),
         "ts": time.time(),
     }
+    if data.get("message_id"):
+        evt["opencode_message_id"] = data["message_id"]
     if s_raw_request_id:
         evt["raw_request_id"] = s_raw_request_id
         evt["opencode_request_id"] = s_raw_request_id
         evt["data"]["raw_request_id"] = s_raw_request_id
         evt["data"]["opencode_request_id"] = s_raw_request_id
     if normalized_type == "provider.retry":
+        retry_data = retry_status if isinstance(retry_status, dict) else {}
         evt["state"] = "retrying"
         evt["summary"] = "Provider API retry"
-        evt["data"]["message"] = _sanitize_event_value(retry_status.get("message"), max_chars)
-        evt["data"]["attempt"] = retry_status.get("attempt")
-        evt["data"]["next"] = retry_status.get("next")
+        evt["data"]["message"] = _sanitize_event_value(retry_data.get("message") or output_preview or text or status, max_chars)
+        evt["data"]["attempt"] = retry_data.get("attempt")
+        evt["data"]["next"] = retry_data.get("next")
         evt["data"]["raw_type"] = s_raw_type
         evt["data"]["diagnostic_hint"] = "OpenCode provider API retrying. Check runtime profile LLM provider/model/api_key/base_url/proxy."
     if task_id:
@@ -477,6 +490,24 @@ class OpenCodeEventBridge:
     def status_snapshot(self) -> dict[str, Any]:
         return {"enabled": self.enabled, "running": self.running, "connected": self.connected, "reconnects": self.reconnects, "last_event_at": self.last_event_at, "last_error": self.last_error, "last_raw_type": self.last_raw_type}
 
+    async def _publish_lifecycle_event(self, event_type: str, *, error: str = "") -> None:
+        payload = {
+            "type": event_type,
+            "event_type": event_type,
+            "engine": "opencode",
+            "state": "connected" if event_type in {"event_bridge.connected", "event_bridge.reconnected"} else "disconnected",
+            "summary": event_type,
+            "created_at": utc_now_iso(),
+            "ts": time.time(),
+            "reconnects": self.reconnects,
+        }
+        if error:
+            payload["error"] = error
+            payload["data"] = {"error": error, "reconnects": self.reconnects}
+        else:
+            payload["data"] = {"reconnects": self.reconnects}
+        await self.event_bus.publish(payload)
+
     async def publish_raw_event(self, raw_event: dict) -> dict | None:
         canonical = _canonical(raw_event)
         raw_type = _event_type(raw_event, canonical)
@@ -531,7 +562,11 @@ class OpenCodeEventBridge:
         if not event:
             return None
         if self.request_binding_store is not None and session_id:
-            binding = self.request_binding_store.resolve(opencode_session_id=session_id, message_id=message_id, task_id=str(event.get("task_id") or ""))
+            task_id = str(event.get("task_id") or "")
+            if (message_id or task_id) and hasattr(self.request_binding_store, "resolve_exact"):
+                binding = self.request_binding_store.resolve_exact(opencode_session_id=session_id, message_id=message_id, task_id=task_id)
+            else:
+                binding = self.request_binding_store.resolve(opencode_session_id=session_id, message_id=message_id, task_id=task_id)
             if binding is not None:
                 event["session_id"] = binding.portal_session_id
                 event["request_id"] = binding.request_id
@@ -569,9 +604,11 @@ class OpenCodeEventBridge:
             while True:
                 try:
                     self.connected = True
+                    await self._publish_lifecycle_event("event_bridge.reconnected" if self.reconnects else "event_bridge.connected")
                     async for raw in self.client.event_stream(global_events=True, timeout_seconds=None):
                         await self.publish_raw_event(raw)
                     self.connected = False
+                    await self._publish_lifecycle_event("event_bridge.disconnected")
                     self.reconnects += 1
                     await asyncio.sleep(backoff)
                     backoff = min(self.settings.event_bridge_max_backoff_seconds, backoff * 2)
@@ -582,7 +619,7 @@ class OpenCodeEventBridge:
                     self.last_error = _sanitize_event_value(str(exc), 300)
                     if not isinstance(self.last_error, str):
                         self.last_error = "[redacted]"
-                    await self.event_bus.publish({"type": "event_bridge.disconnected", "event_type": "event_bridge.disconnected", "engine": "opencode", "created_at": utc_now_iso(), "ts": time.time(), "error": self.last_error})
+                    await self._publish_lifecycle_event("event_bridge.disconnected", error=self.last_error)
                     self.reconnects += 1
                     await asyncio.sleep(backoff)
                     backoff = min(self.settings.event_bridge_max_backoff_seconds, backoff * 2)

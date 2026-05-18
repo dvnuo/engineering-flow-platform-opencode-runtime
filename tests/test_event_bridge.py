@@ -60,8 +60,10 @@ async def test_normalizes_tool_events(tmp_path, monkeypatch):
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     s = await bridge.publish_raw_event({"type": "tool.start"})
     c = await bridge.publish_raw_event({"type": "tool.complete"})
+    f = await bridge.publish_raw_event({"type": "message.part.updated", "part": {"type": "tool", "status": "error", "tool": "bash"}})
     assert s["type"] == "tool.started"
     assert c["type"] == "tool.completed"
+    assert f["type"] == "tool.failed"
 
 
 def test_create_app_does_not_auto_start_bridge_for_injected_fake_client(tmp_path, monkeypatch):
@@ -138,6 +140,28 @@ def test_message_part_delta_requires_assistant_role_and_text_part(tmp_path, monk
     assert event["data"]["part_type"] == "text"
 
 
+def test_reasoning_delta_maps_to_llm_thinking(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    paths = ensure_state_dirs(settings)
+    event = normalize_opencode_event({"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "reasoning text"}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="assistant", part_meta={"type": "reasoning", "ignored": False, "synthetic": False})
+    assert event["type"] == "llm_thinking"
+    assert event["raw_type"] == "message.part.delta"
+    assert event["data"]["message"] == "reasoning text"
+    assert event["opencode_message_id"] == "m-assistant"
+
+
+def test_reasoning_delta_uses_canonical_part_metadata_when_cache_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    paths = ensure_state_dirs(settings)
+    event = normalize_opencode_event({"payload": {"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "thinking", "part": {"id": "p1", "messageID": "m-assistant", "type": "reasoning"}}}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="assistant", part_meta={})
+    assert event["type"] == "llm_thinking"
+    assert event["data"]["message"] == "thinking"
+
+
 def test_message_part_delta_user_role_not_streamed(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
@@ -146,6 +170,17 @@ def test_message_part_delta_user_role_not_streamed(tmp_path, monkeypatch):
     event = normalize_opencode_event({"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-user", "partID": "p1", "field": "text", "delta": "hi"}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="user", part_meta={"type": "text", "ignored": False, "synthetic": False})
     assert event["type"] != "message.delta"
     assert not event["data"].get("delta")
+
+
+def test_unknown_event_maps_to_opencode_raw_with_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    paths = ensure_state_dirs(settings)
+    event = normalize_opencode_event({"type": "some.new.event", "sessionID": "oc-1", "value": "ok"}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings)
+    assert event["type"] == "opencode.raw"
+    assert event["metadata"]["raw_type"] == "some.new.event"
+    assert event["data"]["raw_type"] == "some.new.event"
 
 
 def test_message_part_delta_with_missing_metadata_still_becomes_message_delta(tmp_path, monkeypatch):
@@ -338,6 +373,32 @@ async def test_session_status_retry_normalized_provider_retry(tmp_path, monkeypa
     assert event["state"] == "retrying"
     assert event["data"]["attempt"] == 14
     assert "Cannot connect to API" in event["data"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_provider_retry_raw_event_normalized(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({"type": "provider.retry", "status": "retrying", "message": "rate limited"})
+    assert event["type"] == "provider.retry"
+    assert event["state"] == "retrying"
+    assert event["data"]["raw_type"] == "provider.retry"
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_lifecycle_events_are_published(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    bus = EventBus()
+    sub = bus.subscribe({})
+    bridge = OpenCodeEventBridge(settings, FakeClient(), bus, SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    await bridge._publish_lifecycle_event("event_bridge.connected")
+    got = await asyncio.wait_for(sub.queue.get(), timeout=1)
+    assert got["type"] == "event_bridge.connected"
+    assert got["state"] == "connected"
 
 
 

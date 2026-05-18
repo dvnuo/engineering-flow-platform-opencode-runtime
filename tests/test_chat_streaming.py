@@ -1,12 +1,12 @@
 import json
-from efp_opencode_adapter.app_keys import EVENT_BUS_KEY, OPENCODE_CLIENT_KEY
+from efp_opencode_adapter.app_keys import EVENT_BUS_KEY, OPENCODE_CLIENT_KEY, REQUEST_BINDING_STORE_KEY
 import asyncio
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from aiohttp import web
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
-from efp_opencode_adapter.opencode_client import OpenCodeClientError
+from efp_opencode_adapter.opencode_client import OpenCodeClientError, OpenCodeTransportTimeout
 from efp_opencode_adapter.chat_api import SSEClientDisconnected, _safe_write_eof, _write_sse
 from test_t06_helpers import FakeOpenCodeClient
 
@@ -18,16 +18,140 @@ class SlowFake(FakeOpenCodeClient):
         if self.fail: raise OpenCodeClientError('boom')
         return {"messages":[{"role":"assistant","content":"ok"}]}
 
+
+class StreamSubmitTimeoutRecoveredFake(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.timed_out = False
+        self.user_message_id = ""
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.timed_out = True
+        self.user_message_id = message_id or "u-timeout"
+        raise OpenCodeTransportTimeout("POST", f"/session/{session_id}/message", 300, asyncio.TimeoutError())
+
+    async def get_session_status(self, timeout_seconds=30):
+        return {"sessions": {"ses-1": {"state": "idle"}}}
+
+    async def list_messages(self, session_id):
+        if self.timed_out:
+            return [
+                {"id": self.user_message_id, "role": "user", "parts": [{"type": "text", "text": "m"}]},
+                {"id": "a-recovered", "role": "assistant", "parts": [{"type": "text", "text": "stream recovered"}]},
+            ]
+        return []
+
+
+class StreamAutoContinueFake(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {"message": {"info": {"id": "a-progress", "role": "assistant"}, "parts": [{"type": "text", "text": "I am reading the repository..."}]}}
+        return {"message": {"info": {"id": "a-final", "role": "assistant"}, "parts": [{"type": "text", "text": "final stream answer"}]}}
+
+
+def _sse_events(body: str) -> list[tuple[str, dict]]:
+    events = []
+    for chunk in body.strip().split("\n\n"):
+        event_name = ""
+        data = ""
+        for line in chunk.splitlines():
+            if line.startswith("event: "):
+                event_name = line.removeprefix("event: ")
+            elif line.startswith("data: "):
+                data = line.removeprefix("data: ")
+        if event_name and data:
+            events.append((event_name, json.loads(data)))
+    return events
+
 @pytest.mark.asyncio
 async def test_chat_stream_forwards_runtime_event_before_final(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
     fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
     t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-1','request_id':'req-stream-1'}))
     await fake.entered.wait()
-    await app[EVENT_BUS_KEY].publish({'type':'tool.started','session_id':'portal-stream-1','request_id':'raw-opencode-tool-call-id-not-portal-request','tool':'efp_test_tool','engine':'opencode','raw_type':'tool.start'})
+    await app[EVENT_BUS_KEY].publish({'type':'tool.started','session_id':'portal-stream-1','request_id':'req-stream-1','tool':'efp_test_tool','engine':'opencode','raw_type':'tool.start'})
     fake.release.set(); resp=await t; body=await resp.text()
     assert body.index('tool.started') < body.index('event: final')
     await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_started_heartbeat_runtime_event_and_final(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = SlowFake()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    try:
+        task = asyncio.create_task(c.post("/api/chat/stream", json={"message": "m", "session_id": "portal-stream-start", "request_id": "req-stream-start"}))
+        await fake.entered.wait()
+        await app[EVENT_BUS_KEY].publish({"type": "tool.started", "session_id": "portal-stream-start", "request_id": "req-stream-start", "tool": "efp_test_tool", "engine": "opencode"})
+        fake.release.set()
+        resp = await task
+        body = await resp.text()
+        events = _sse_events(body)
+        names = [name for name, _payload in events]
+        assert names[:3] == ["chat.started", "heartbeat", "runtime_event"]
+        started_payload = events[0][1]
+        assert started_payload["session_id"] == "portal-stream-start"
+        assert started_payload["request_id"] == "req-stream-start"
+        assert started_payload["chatlog_id"] == "req-stream-start"
+        heartbeat_payload = events[1][1]
+        assert heartbeat_payload["completion_state"] == "running"
+        assert "elapsed_seconds" in heartbeat_payload
+        assert "last_event_at" in heartbeat_payload
+        assert "tool.started" in body
+        final_payload = next(payload for name, payload in events if name == "final")
+        assert final_payload["completion_state"]
+    finally:
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_timeout_recovery_before_final(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "0.05")
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.001")
+    c = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=StreamSubmitTimeoutRecoveredFake())))
+    await c.start_server()
+    try:
+        resp = await c.post("/api/chat/stream", json={"message": "m", "session_id": "portal-stream-timeout", "request_id": "req-stream-timeout"})
+        body = await resp.text()
+        assert "chat.timeout_recovery.started" in body
+        assert body.index("chat.timeout_recovery.started") < body.index("event: final")
+        events = _sse_events(body)
+        final_payload = next(payload for name, payload in events if name == "final")
+        assert final_payload["completion_state"] == "completed"
+        assert final_payload["response"] == "stream recovered"
+    finally:
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_continuation_events_before_final(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    c = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=StreamAutoContinueFake())))
+    await c.start_server()
+    try:
+        resp = await c.post("/api/chat/stream", json={"message": "m", "session_id": "portal-stream-continuation", "request_id": "req-stream-continuation"})
+        body = await resp.text()
+        assert "continuation.started" in body
+        assert "continuation.prompt_sent" in body
+        assert "continuation.completed" in body
+        assert body.index("continuation.started") < body.index("event: final")
+        events = _sse_events(body)
+        final_payload = next(payload for name, payload in events if name == "final")
+        assert final_payload["completion_state"] == "completed"
+        assert final_payload["metadata"]["continuation"]["turns_attempted"] == 1
+    finally:
+        await c.close()
 
 @pytest.mark.asyncio
 async def test_chat_stream_sends_delta_event_for_assistant_delta(tmp_path, monkeypatch):
@@ -35,7 +159,7 @@ async def test_chat_stream_sends_delta_event_for_assistant_delta(tmp_path, monke
     fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
     t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-2','request_id':'req-stream-2'}))
     await fake.entered.wait()
-    await app[EVENT_BUS_KEY].publish({'type':'assistant_delta','session_id':'portal-stream-2','request_id':'raw-message-part-id','data':{'delta':'hello delta'},'engine':'opencode','raw_type':'message.part.delta'})
+    await app[EVENT_BUS_KEY].publish({'type':'assistant_delta','session_id':'portal-stream-2','request_id':'req-stream-2','data':{'delta':'hello delta'},'engine':'opencode','raw_type':'message.part.delta'})
     fake.release.set(); resp=await t; body=await resp.text()
     assert 'event: delta' in body and 'hello delta' in body and body.index('event: delta') < body.index('event: final')
     await c.close()
@@ -62,6 +186,91 @@ async def test_chat_stream_respects_explicit_portal_request_id(tmp_path, monkeyp
     assert 'should not appear' not in body
     await c.close()
 
+
+@pytest.mark.asyncio
+async def test_chat_stream_does_not_forward_raw_event_from_other_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = SlowFake()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    try:
+        task = asyncio.create_task(c.post("/api/chat/stream", json={"message": "m", "session_id": "s-stream-isolation", "request_id": "req-current"}))
+        await fake.entered.wait()
+        await app[EVENT_BUS_KEY].publish({
+            "type": "message.delta",
+            "session_id": "s-stream-isolation",
+            "request_id": "req-other",
+            "raw_type": "message.part.delta",
+            "data": {"delta": "SHOULD_NOT_APPEAR", "message_role": "assistant", "raw_type": "message.part.delta"},
+        })
+        await app[EVENT_BUS_KEY].publish({
+            "type": "message.delta",
+            "session_id": "s-stream-isolation",
+            "request_id": "req-current",
+            "raw_type": "message.part.delta",
+            "data": {"delta": "SHOULD_APPEAR", "message_role": "assistant", "raw_type": "message.part.delta"},
+        })
+        fake.release.set()
+        resp = await task
+        body = await resp.text()
+        assert "SHOULD_APPEAR" in body
+        assert "SHOULD_NOT_APPEAR" not in body
+    finally:
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_allows_raw_event_when_exact_binding_matches_current_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = SlowFake()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[REQUEST_BINDING_STORE_KEY].bind_message("ses-1", "msg-current", "s-stream-binding", "req-current")
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    try:
+        task = asyncio.create_task(c.post("/api/chat/stream", json={"message": "m", "session_id": "s-stream-binding", "request_id": "req-current"}))
+        await fake.entered.wait()
+        await app[EVENT_BUS_KEY].publish({
+            "type": "message.delta",
+            "session_id": "s-stream-binding",
+            "request_id": "msg-current",
+            "opencode_session_id": "ses-1",
+            "raw_type": "message.part.delta",
+            "data": {"message_id": "msg-current", "delta": "BOUND_DELTA", "message_role": "assistant"},
+        })
+        fake.release.set()
+        resp = await task
+        body = await resp.text()
+        assert "BOUND_DELTA" in body
+    finally:
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_drops_request_scoped_event_without_request_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = SlowFake()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    try:
+        task = asyncio.create_task(c.post("/api/chat/stream", json={"message": "m", "session_id": "s-stream-isolation", "request_id": "req-current"}))
+        await fake.entered.wait()
+        await app[EVENT_BUS_KEY].publish({
+            "type": "tool.completed",
+            "session_id": "s-stream-isolation",
+            "raw_type": "tool.complete",
+            "data": {"tool": "bash"},
+        })
+        fake.release.set()
+        resp = await task
+        body = await resp.text()
+        assert "tool.completed" not in body
+        assert "\"tool\": \"bash\"" not in body
+    finally:
+        await c.close()
+
 @pytest.mark.asyncio
 async def test_chat_stream_immediate_error_does_not_wait_for_heartbeat(tmp_path, monkeypatch):
     import time
@@ -79,7 +288,7 @@ async def test_chat_stream_immediate_error_does_not_wait_for_heartbeat(tmp_path,
 
 class RaceFake(FakeOpenCodeClient):
     async def send_message(self, session_id, **kwargs):
-        await self._bus.publish({'type':'tool.completed','session_id':'portal-race-1','request_id':'raw-opencode-tool-call-id','tool':'efp_race_tool','raw_type':'tool.complete'})
+        await self._bus.publish({'type':'tool.completed','session_id':'portal-race-1','request_id':'req-race-1','tool':'efp_race_tool','raw_type':'tool.complete'})
         return {"messages":[{"role":"assistant","content":"ok"}]}
 
 
@@ -195,7 +404,7 @@ async def test_chat_stream_client_disconnect_does_not_cancel_run_task_or_leak_su
     try:
         t = asyncio.create_task(c.post('/api/chat/stream', json={'message': 'm', 'session_id': 'portal-disconnect-1', 'request_id': 'req-disconnect-1'}))
         await fake.entered.wait()
-        await app[EVENT_BUS_KEY].publish({'type': 'assistant_delta', 'session_id': 'portal-disconnect-1', 'request_id': 'raw-message-part-id', 'data': {'delta': 'hello'}})
+        await app[EVENT_BUS_KEY].publish({'type': 'assistant_delta', 'session_id': 'portal-disconnect-1', 'request_id': 'req-disconnect-1', 'data': {'delta': 'hello'}})
         fake.release.set()
         resp = await t
         assert resp.status == 200
@@ -254,9 +463,9 @@ async def test_chat_stream_filters_noise_events_and_keeps_useful_events(tmp_path
         {'type':'session.updated','session_id':'portal-stream-filter-1'},
         {'type':'opencode.step.finished','session_id':'portal-stream-filter-1'},
         {'type':'unknown.debug','session_id':'portal-stream-filter-1','request_id':''},
-        {'type':'message.delta','session_id':'portal-stream-filter-1','request_id':'raw-id','raw_type':'message.part.updated','data':{'delta':'Hi'}},
-        {'type':'message.delta','session_id':'portal-stream-filter-1','request_id':'raw-id','raw_type':'message.part.delta','data':{'delta':'Yo','message_role':'assistant','part_type':'text'}},
-        {'type':'llm_thinking','session_id':'portal-stream-filter-1','request_id':'raw-id','data':{'message':'thinking'}},
+        {'type':'message.delta','session_id':'portal-stream-filter-1','request_id':'req-stream-filter-1','raw_type':'message.part.updated','data':{'delta':'Hi'}},
+        {'type':'message.delta','session_id':'portal-stream-filter-1','request_id':'req-stream-filter-1','raw_type':'message.part.delta','data':{'delta':'Yo','message_role':'assistant','part_type':'text'}},
+        {'type':'llm_thinking','session_id':'portal-stream-filter-1','request_id':'req-stream-filter-1','data':{'message':'thinking'}},
     ]:
         await app[EVENT_BUS_KEY].publish(evt)
     fake.release.set(); resp=await t; body=await resp.text()
@@ -316,7 +525,7 @@ async def test_chat_stream_does_not_duplicate_real_and_synthetic_delta(tmp_path,
     fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
     t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-dup-1','request_id':'req-stream-dup-1'}))
     await fake.entered.wait()
-    await app[EVENT_BUS_KEY].publish({'type':'message.delta','session_id':'portal-stream-dup-1','request_id':'raw-1','raw_type':'message.part.delta','data':{'delta':'Hi','message_role':'assistant','part_type':'text'}})
+    await app[EVENT_BUS_KEY].publish({'type':'message.delta','session_id':'portal-stream-dup-1','request_id':'req-stream-dup-1','raw_type':'message.part.delta','data':{'delta':'Hi','message_role':'assistant','part_type':'text'}})
     await app[EVENT_BUS_KEY].publish({'type':'assistant_delta','session_id':'portal-stream-dup-1','request_id':'req-stream-dup-1','synthetic_final_delta':True,'data':{'delta':'Hi','synthetic_final_delta':True}})
     fake.release.set(); resp=await t; body=await resp.text()
     assert body.count('event: delta') == 1
@@ -329,7 +538,7 @@ async def test_chat_stream_blocks_message_part_updated_delta_echo(tmp_path, monk
     fake=SlowFake(); app=create_app(Settings.from_env(), opencode_client=fake); c=TestClient(TestServer(app)); await c.start_server()
     t=asyncio.create_task(c.post('/api/chat/stream', json={'message':'m','session_id':'portal-stream-echo-1','request_id':'req-stream-echo-1'}))
     await fake.entered.wait()
-    await app[EVENT_BUS_KEY].publish({'type':'message.delta','session_id':'portal-stream-echo-1','request_id':'raw-1','raw_type':'message.part.updated','data':{'delta':'hi'}})
+    await app[EVENT_BUS_KEY].publish({'type':'message.delta','session_id':'portal-stream-echo-1','request_id':'req-stream-echo-1','raw_type':'message.part.updated','data':{'delta':'hi'}})
     fake.release.set(); resp=await t; body=await resp.text()
     assert 'event: delta\ndata: {"delta": "hi"' not in body
     await c.close()
@@ -345,7 +554,7 @@ async def test_chat_stream_blocks_message_part_delta_without_assistant_role(tmp_
     try:
         t = asyncio.create_task(c.post("/api/chat/stream", json={"message": "m", "session_id": "portal-stream-missing-role-1", "request_id": "req-stream-missing-role-1"}))
         await fake.entered.wait()
-        await app[EVENT_BUS_KEY].publish({"type": "message.delta", "session_id": "portal-stream-missing-role-1", "request_id": "raw-1", "raw_type": "message.part.delta", "data": {"delta": "hi"}})
+        await app[EVENT_BUS_KEY].publish({"type": "message.delta", "session_id": "portal-stream-missing-role-1", "request_id": "req-stream-missing-role-1", "raw_type": "message.part.delta", "data": {"delta": "hi"}})
         fake.release.set()
         resp = await t
         body = await resp.text()

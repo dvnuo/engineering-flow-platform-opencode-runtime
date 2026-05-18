@@ -67,6 +67,18 @@ class RequestBindingStore:
             return binding
         return None
 
+    def resolve_exact(self, opencode_session_id: str, message_id: str = "", task_id: str = "", include_completed: bool = False) -> RequestBinding | None:
+        if not include_completed:
+            self.prune_expired()
+        binding = None
+        if message_id:
+            binding = self._by_message.get((opencode_session_id, message_id))
+        if binding is None and task_id:
+            binding = self._by_task.get((opencode_session_id, task_id))
+        if binding and (include_completed or not binding.completed) and binding.expires_at > time.time():
+            return binding
+        return None
+
     def complete(self, request_id: str) -> None:
         for binding in list(self._active.values()) + list(self._by_message.values()) + list(self._by_task.values()):
             if binding.request_id == request_id:
