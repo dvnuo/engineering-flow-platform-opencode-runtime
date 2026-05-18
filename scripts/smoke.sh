@@ -96,14 +96,9 @@ docker exec "${NAME}" javac -version
 docker exec "${NAME}" mvn -v
 docker exec "${NAME}" jdk list
 docker exec "${NAME}" jdk current
-docker exec "${NAME}" jdk 8 java -version
-docker exec "${NAME}" jdk 17 java -version
 docker exec "${NAME}" jdk 21 java -version
-docker exec "${NAME}" jdk 25 java -version
-docker exec "${NAME}" mvn-jdk 8 -v
-docker exec "${NAME}" mvn-jdk 17 -v
+docker exec "${NAME}" mvn-jdk -v
 docker exec "${NAME}" mvn-jdk 21 -v
-docker exec "${NAME}" mvn-jdk 25 -v
 docker exec "${NAME}" test -f /root/.m2/settings.xml
 docker exec "${NAME}" test -f /root/.m2/toolchains.xml
 docker exec "${NAME}" bash -lc 'test "$(stat -c %a /root/.m2/settings.xml)" = "600"'

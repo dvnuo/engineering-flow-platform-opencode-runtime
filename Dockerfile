@@ -52,18 +52,13 @@ RUN set -eux; \
     openssh-client \
     tini \
     gh \
-    zulu8-jdk \
-    zulu17-jdk \
-    zulu21-jdk \
-    zulu25-jdk; \
+    zulu21-jdk; \
   mkdir -p /opt/jdks; \
-  for v in 8 17 21 25; do \
-    home="$(find /usr/lib/jvm -maxdepth 1 -type d -name "zulu${v}-ca-*" | sort | head -1)"; \
-    if [[ -z "$home" ]]; then home="$(find /usr/lib/jvm -maxdepth 1 -type d -name "zulu${v}*" | sort | head -1)"; fi; \
-    test -n "$home"; \
-    test -x "$home/bin/java"; \
-    ln -sfn "$home" "/opt/jdks/zulu${v}"; \
-  done; \
+  home="$(find /usr/lib/jvm -maxdepth 1 -type d -name "zulu21-ca-*" | sort | head -1)"; \
+  if [[ -z "$home" ]]; then home="$(find /usr/lib/jvm -maxdepth 1 -type d -name "zulu21*" | sort | head -1)"; fi; \
+  test -n "$home"; \
+  test -x "$home/bin/java"; \
+  ln -sfn "$home" /opt/jdks/zulu21; \
   node --version | grep -E "^v${NODE_MAJOR}\\."; \
   npm --version; \
   git --version; \
@@ -71,14 +66,8 @@ RUN set -eux; \
   test "$(npm root -g)" = "/usr/local/lib/node_modules"; \
   rm -rf /var/lib/apt/lists/*
 
-ENV JAVA8_HOME=/opt/jdks/zulu8
-ENV JAVA17_HOME=/opt/jdks/zulu17
 ENV JAVA21_HOME=/opt/jdks/zulu21
-ENV JAVA25_HOME=/opt/jdks/zulu25
-ENV JDK8_HOME=/opt/jdks/zulu8
-ENV JDK17_HOME=/opt/jdks/zulu17
 ENV JDK21_HOME=/opt/jdks/zulu21
-ENV JDK25_HOME=/opt/jdks/zulu25
 ENV JAVA_HOME=/opt/jdks/zulu21
 
 RUN set -eux; \
@@ -108,15 +97,13 @@ usage() {
 Usage:
   jdk list
   jdk current
-  jdk <8|17|21|25> <command> [args...]
+  jdk 21 <command> [args...]
 USAGE
 }
 
 case "${1:-}" in
   list)
-    for version in 8 17 21 25; do
-      printf "%s\t%s\n" "${version}" "/opt/jdks/zulu${version}"
-    done
+    printf "21\t/opt/jdks/zulu21\n"
     exit 0
     ;;
   current)
@@ -124,19 +111,20 @@ case "${1:-}" in
     java -version
     exit 0
     ;;
-  8|17|21|25)
-    version="$1"
+  21)
     shift
     ;;
   *)
+    if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+      echo "Only Zulu JDK 21 is installed in this runtime." >&2
+      exit 2
+    fi
     usage
     exit 2
     ;;
 esac
 
-home="/opt/jdks/zulu${version}"
-test -x "${home}/bin/java"
-export JAVA_HOME="${home}"
+export JAVA_HOME=/opt/jdks/zulu21
 export PATH="${JAVA_HOME}/bin:/opt/maven/bin:${PATH}"
 
 if [[ "$#" -eq 0 ]]; then
@@ -150,15 +138,14 @@ cat > /usr/local/bin/mvn-jdk <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="21"
-if [[ "$#" -gt 0 && "$1" =~ ^(8|17|21|25)$ ]]; then
-  version="$1"
+if [[ "$#" -gt 0 && "$1" == "21" ]]; then
   shift
+elif [[ "$#" -gt 0 && "$1" =~ ^[0-9]+$ ]]; then
+  echo "Only Zulu JDK 21 is installed in this runtime." >&2
+  exit 2
 fi
 
-home="/opt/jdks/zulu${version}"
-test -x "${home}/bin/java"
-export JAVA_HOME="${home}"
+export JAVA_HOME=/opt/jdks/zulu21
 export PATH="${JAVA_HOME}/bin:/opt/maven/bin:${PATH}"
 exec mvn "$@"
 SCRIPT
@@ -184,23 +171,13 @@ cat > /root/.m2/toolchains.xml <<'XML'
             xsi:schemaLocation="http://maven.apache.org/TOOLCHAINS/1.1.0 https://maven.apache.org/xsd/toolchains-1.1.0.xsd">
   <toolchain>
     <type>jdk</type>
-    <provides><version>8</version><vendor>azul</vendor></provides>
-    <configuration><jdkHome>/opt/jdks/zulu8</jdkHome></configuration>
-  </toolchain>
-  <toolchain>
-    <type>jdk</type>
-    <provides><version>17</version><vendor>azul</vendor></provides>
-    <configuration><jdkHome>/opt/jdks/zulu17</jdkHome></configuration>
-  </toolchain>
-  <toolchain>
-    <type>jdk</type>
-    <provides><version>21</version><vendor>azul</vendor></provides>
-    <configuration><jdkHome>/opt/jdks/zulu21</jdkHome></configuration>
-  </toolchain>
-  <toolchain>
-    <type>jdk</type>
-    <provides><version>25</version><vendor>azul</vendor></provides>
-    <configuration><jdkHome>/opt/jdks/zulu25</jdkHome></configuration>
+    <provides>
+      <version>21</version>
+      <vendor>azul</vendor>
+    </provides>
+    <configuration>
+      <jdkHome>/opt/jdks/zulu21</jdkHome>
+    </configuration>
   </toolchain>
 </toolchains>
 XML
@@ -215,10 +192,10 @@ RUN set -eux; \
   javac -version; \
   mvn -v; \
   jdk list; \
-  mvn-jdk 8 -v; \
-  mvn-jdk 17 -v; \
-  mvn-jdk 21 -v; \
-  mvn-jdk 25 -v
+  jdk current; \
+  jdk 21 java -version; \
+  mvn-jdk -v; \
+  mvn-jdk 21 -v
 
 RUN set -eux; \
   npm install -g "opencode-ai@${OPENCODE_VERSION}"; \

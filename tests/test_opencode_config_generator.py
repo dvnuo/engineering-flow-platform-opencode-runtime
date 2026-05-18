@@ -154,13 +154,17 @@ def test_write_opencode_config_writes_java_maven_instructions(tmp_path, monkeypa
     assert str(settings.atlassian_instructions_path) in written["instructions"]
     assert str(settings.java_maven_instructions_path) in written["instructions"]
     content = settings.java_maven_instructions_path.read_text(encoding="utf-8")
-    assert "Azul Zulu JDK 8, 17, 21, and 25" in content
-    assert "Zulu JDK 8" in content
-    assert "Zulu JDK 17" in content
     assert "Zulu JDK 21" in content
-    assert "Zulu JDK 25" in content
-    assert "Default JDK 21" in content
+    assert "JAVA_HOME=/opt/jdks/zulu21" in content
     assert "mvn-jdk" in content
-    assert "jdeps" in content
-    assert "jlink" in content
+    assert "mvn -B -ntp" in content
+    assert "/root/.m2/settings.xml" in content
+    assert "/root/.m2/toolchains.xml" in content
     assert "/workspace" in content
+    assert "Zulu JDK 8" not in content
+    assert "Zulu JDK 17" not in content
+    assert "Zulu JDK 25" not in content
+    assert "jdk 17" not in content
+    assert "mvn-jdk 8" not in content
+    assert "mvn-jdk 17" not in content
+    assert "mvn-jdk 25" not in content
