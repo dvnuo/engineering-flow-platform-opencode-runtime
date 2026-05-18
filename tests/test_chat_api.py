@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.opencode_client import OpenCodeClientError, OpenCodeTransportTimeout
 from efp_opencode_adapter.settings import Settings
-from efp_opencode_adapter.app_keys import ATTACHMENT_SERVICE_KEY, SESSION_STORE_KEY, REQUEST_BINDING_STORE_KEY, USER_DISPLAY_STORE_KEY
+from efp_opencode_adapter.app_keys import ATTACHMENT_SERVICE_KEY, EVENT_BUS_KEY, SESSION_STORE_KEY, REQUEST_BINDING_STORE_KEY, USER_DISPLAY_STORE_KEY
 from efp_opencode_adapter import chat_api
 from efp_opencode_adapter.chat_api import _consume_background_chat_task, _is_stream_relevant_event
 from efp_opencode_adapter.skill_invocation import SkillDecision
@@ -1553,8 +1553,18 @@ async def test_chat_auto_continue_progress_then_final(tmp_path, monkeypatch):
     assert payload["continuation_count"] == 1
     assert payload["response"] == "final answer"
     assert not payload["incomplete_reason"]
+    continuation_metadata = payload["metadata"]["continuation"]
+    assert continuation_metadata["enabled"] is True
+    assert continuation_metadata["turns_attempted"] == 1
+    assert continuation_metadata["max_turns"] >= 1
+    assert continuation_metadata["debug"][0]["message_id"].startswith("msg")
+    assert "signature_before" in continuation_metadata["debug"][0]
+    assert "signature_after" in continuation_metadata["debug"][0]
     types = [e.get("type") for e in payload["runtime_events"]]
     assert "continuation.started" in types and "continuation.completed" in types
+    continuation_event = next(e for e in payload["runtime_events"] if e.get("type") == "continuation.completed")
+    for key in ("event_type", "request_id", "session_id", "turn_index", "message_id", "reason", "state", "created_at", "metadata"):
+        assert key in continuation_event
     await client.close()
 
 
@@ -1681,7 +1691,10 @@ async def test_chat_auto_continue_empty_timeout_no_progress_stops(tmp_path, monk
     assert payload["completion_state"] == "incomplete"
     assert "no_progress_timeout" in payload["incomplete_reason"]
     assert payload["continuation_count"] == 1
-    assert any(e.get("type") == "continuation.no_progress" for e in payload["runtime_events"])
+    no_progress_event = next(e for e in payload["runtime_events"] if e.get("type") == "continuation.no_progress")
+    assert no_progress_event["state"] == "incomplete"
+    assert no_progress_event["metadata"]["no_progress_timeout_seconds"] == 0.001
+    assert "signature_after" in no_progress_event["metadata"]
     await client.close()
 
 
@@ -1698,6 +1711,55 @@ class EmptyTimeoutThenFinalClient(FakeOpenCodeClient):
 
     async def list_messages(self, session_id):
         return []
+
+
+class RuntimeProgressNoFinalClient(FakeOpenCodeClient):
+    def __init__(self, *, session_id: str, request_id: str):
+        super().__init__()
+        self.bus = None
+        self.portal_session_id = session_id
+        self.portal_request_id = request_id
+        self.progress_events = 0
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        return {}
+
+    async def list_messages(self, session_id):
+        if self.bus is not None:
+            self.progress_events += 1
+            await self.bus.publish(
+                {
+                    "type": "message.delta",
+                    "session_id": self.portal_session_id,
+                    "request_id": self.portal_request_id,
+                    "raw_type": "message.part.delta",
+                    "data": {"delta": f"working {self.progress_events}"},
+                }
+            )
+        return []
+
+
+@pytest.mark.asyncio
+async def test_chat_auto_continue_runtime_events_count_as_progress(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.005")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.001")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "2")
+    monkeypatch.setenv("EFP_CHAT_NO_PROGRESS_TIMEOUT_SECONDS", "0.05")
+    fake = RuntimeProgressNoFinalClient(session_id="s-runtime-progress", request_id="r-runtime-progress")
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    fake.bus = app[EVENT_BUS_KEY]
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-runtime-progress", "request_id": "r-runtime-progress"})).json()
+    assert payload["ok"] is False
+    assert payload["completion_state"] == "incomplete"
+    assert payload["incomplete_reason"] == "auto_continue_max_turns_reached"
+    assert payload["continuation_count"] == 2
+    assert not any(e.get("type") == "continuation.no_progress" for e in payload["runtime_events"])
+    assert fake.progress_events > 0
+    assert payload["metadata"]["continuation"]["debug"][-1]["last_progress_event_type"] == "message.delta"
+    await client.close()
 
 
 class SubmitTimeoutRecoveredClient(FakeOpenCodeClient):
@@ -1892,6 +1954,15 @@ async def test_chat_auto_continue_uses_checkpoint_prompt_and_respects_configured
     types = [e.get("type") for e in payload["runtime_events"]]
     assert "continuation.prompt_sent" in types
     assert "continuation.max_turns_reached" in types
+    prompt_events = [e for e in payload["runtime_events"] if e.get("type") == "continuation.prompt_sent"]
+    assert prompt_events
+    assert all(e["metadata"]["is_original_user_prompt"] is False for e in prompt_events)
+    assert all("ORIGINAL USER PROMPT" not in e["metadata"]["prompt_preview"] for e in prompt_events)
+    assert all(len(e["metadata"]["prompt_preview"]) <= 500 for e in prompt_events)
+    chatlog = await (await client.get("/api/sessions/s-cont-prompt/chatlog")).json()
+    chatlog_types = [e.get("type") for e in chatlog["runtime_events"]]
+    assert "continuation.prompt_sent" in chatlog_types
+    assert "continuation.max_turns_reached" in chatlog_types
     await client.close()
 
 
@@ -1909,6 +1980,10 @@ async def test_chat_auto_continue_max_turns_reached(tmp_path, monkeypatch):
     assert payload["completion_state"] == "incomplete"
     assert "auto_continue_max_turns_reached" in payload["incomplete_reason"]
     assert payload["continuation_count"] == 2
+    max_turns_event = next(e for e in payload["runtime_events"] if e.get("type") == "continuation.max_turns_reached")
+    assert max_turns_event["turn_index"] == 3
+    assert max_turns_event["metadata"]["max_turns"] == 2
+    assert payload["metadata"]["continuation"]["turns_attempted"] == 2
     await client.close()
 
 
@@ -1937,6 +2012,10 @@ async def test_chat_auto_continue_failed_event(tmp_path, monkeypatch):
     payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-cont-fail"})).json()
     types = [e.get("type") for e in payload["runtime_events"]]
     assert "continuation.failed" in types
+    failed_event = next(e for e in payload["runtime_events"] if e.get("type") == "continuation.failed")
+    assert failed_event["state"] == "failed"
+    assert failed_event["metadata"]["error_type"] == "RuntimeError"
+    assert payload["metadata"]["continuation"]["debug"][-1]["state"] == "failed"
     assert not (payload["ok"] is True and payload["response"] == "")
     assert payload["ok"] is False
     assert payload["completion_state"] in {"incomplete", "error"}

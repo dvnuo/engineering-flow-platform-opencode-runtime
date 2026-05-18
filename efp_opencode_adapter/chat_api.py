@@ -339,6 +339,72 @@ def _deadline_expired(deadline: float) -> bool:
     return asyncio.get_running_loop().time() >= deadline
 
 
+CHAT_PROGRESS_EVENT_TYPES = {
+    "assistant_delta",
+    "message.delta",
+    "llm_thinking",
+    "tool.started",
+    "tool.completed",
+    "tool.failed",
+    "permission_request",
+    "permission_resolved",
+    "provider.retry",
+    "chat.timeout_recovery.poll",
+    "chat.timeout_recovery.recovered",
+    "continuation.completed",
+}
+
+
+def _should_mark_progress(event_type: str, data: dict[str, Any] | None = None) -> bool:
+    metadata = (data or {}).get("metadata") if isinstance((data or {}).get("metadata"), dict) else {}
+    if event_type == "continuation.completed":
+        return bool((data or {}).get("changed_signature") or metadata.get("changed_signature"))
+    return (
+        event_type in CHAT_PROGRESS_EVENT_TYPES
+        or event_type.startswith("tool.")
+        or event_type.startswith("permission")
+        or event_type.startswith("provider.retry")
+    )
+
+
+def _touch_progress(progress_state: dict[str, Any] | None, *, event_type: str, data: dict[str, Any] | None = None) -> None:
+    if progress_state is not None and _should_mark_progress(event_type, data):
+        progress_state["last_progress_at"] = asyncio.get_running_loop().time()
+        progress_state["last_event_type"] = event_type
+        progress_state["count"] = int(progress_state.get("count") or 0) + 1
+
+
+def _event_belongs_to_chat(event: dict[str, Any], *, session_id: str, request_id: str) -> bool:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    event_session_id = event.get("session_id") or event.get("portal_session_id") or data.get("session_id")
+    if event_session_id and str(event_session_id) != session_id:
+        return False
+    event_portal_request_id = event.get("portal_request_id") or data.get("portal_request_id")
+    if event_portal_request_id:
+        return str(event_portal_request_id) == request_id
+    event_request_id = event.get("request_id") or data.get("request_id")
+    if not event_request_id:
+        return True
+    if str(event_request_id) == request_id:
+        return True
+    return bool(event.get("raw_type") or data.get("raw_type") or event.get("opencode_request_id") or data.get("opencode_request_id"))
+
+
+def _drain_progress_events(sub: Any, *, session_id: str, request_id: str, progress_state: dict[str, Any]) -> None:
+    if sub is None:
+        return
+    while True:
+        try:
+            event = sub.queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        if not isinstance(event, dict) or not _event_belongs_to_chat(event, session_id=session_id, request_id=request_id):
+            continue
+        event_type = str(event.get("type") or event.get("event_type") or "")
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        _touch_progress(progress_state, event_type=event_type, data=data)
+
+
 async def _publish_chat_runtime_event(
     *,
     runtime_events: list[dict[str, Any]],
@@ -351,6 +417,7 @@ async def _publish_chat_runtime_event(
     state: str = "running",
     summary: str = "",
     data: dict[str, Any] | None = None,
+    progress_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "type": event_type,
@@ -368,6 +435,70 @@ async def _publish_chat_runtime_event(
     event = add_trace_context(payload, trace_context)
     runtime_events.append(event)
     await bus.publish(event)
+    _touch_progress(progress_state, event_type=event_type, data=payload["data"] if isinstance(payload["data"], dict) else {})
+    return event
+
+
+async def _publish_continuation_event(
+    *,
+    runtime_events: list[dict[str, Any]],
+    bus,
+    trace_context: dict[str, str],
+    chatlog_store: Any | None,
+    opencode_session_id: str,
+    event_type: str,
+    request_id: str,
+    session_id: str,
+    chatlog_id: str | None,
+    turn_index: int,
+    message_id: str | None = None,
+    reason: str | None = None,
+    state: str | None = None,
+    summary: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    progress_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    safe_metadata = safe_preview(metadata or {}, 1000)
+    if not isinstance(safe_metadata, dict):
+        safe_metadata = {}
+    created_at = utc_now_iso()
+    payload = {
+        "type": event_type,
+        "event_type": event_type,
+        "engine": "opencode",
+        "session_id": session_id,
+        "request_id": request_id,
+        "opencode_session_id": opencode_session_id,
+        "turn_index": turn_index,
+        "message_id": message_id or "",
+        "reason": reason or "",
+        "state": state or "running",
+        "summary": safe_preview(summary or event_type, 500),
+        "metadata": safe_metadata,
+        "data": {
+            **safe_metadata,
+            "event_type": event_type,
+            "request_id": request_id,
+            "session_id": session_id,
+            "turn_index": turn_index,
+            "message_id": message_id or "",
+            "reason": reason or "",
+            "state": state or "running",
+            "created_at": created_at,
+            "metadata": safe_metadata,
+        },
+        "created_at": created_at,
+        "ts": time.time(),
+    }
+    event = add_trace_context(payload, trace_context)
+    runtime_events.append(event)
+    await bus.publish(event)
+    if chatlog_store is not None:
+        try:
+            chatlog_store.append_event(session_id, request_id=chatlog_id or request_id, event=event, runtime=True)
+        except Exception:
+            pass
+    _touch_progress(progress_state, event_type=event_type, data=safe_metadata)
     return event
 
 
@@ -958,190 +1089,322 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         assistant_text = str(completion_probe.get("text") or extract_assistant_text(response_payload) or "")
         incomplete_reason = str(completion_probe.get("reason") or "")
         last_sig = _completion_progress_signature(completion_probe, assistant_text, waited_messages)
-        last_progress_at = asyncio.get_running_loop().time()
+        loop = asyncio.get_running_loop()
+        progress_state: dict[str, Any] = {"last_progress_at": loop.time(), "last_event_type": "initial_probe", "count": 0}
         allow_continue, continue_reason = _should_auto_continue(completion_state, completion_probe, assistant_text, settings)
-        while allow_continue:
-            if completion_state in {"completed", "success", "blocked", "error", "empty_final"}:
-                break
-            if _deadline_expired(wall_deadline):
-                completion_state = "incomplete"
-                incomplete_reason = "wall_timeout"
-                await _publish_chat_runtime_event(
+        progress_sub = bus.subscribe({"session_id": portal_session_id})
+        try:
+            while allow_continue:
+                _drain_progress_events(progress_sub, session_id=portal_session_id, request_id=request_id, progress_state=progress_state)
+                if completion_state in {"completed", "success", "blocked", "error", "empty_final"}:
+                    break
+                if _deadline_expired(wall_deadline):
+                    completion_state = "incomplete"
+                    incomplete_reason = "wall_timeout"
+                    await _publish_continuation_event(
+                        runtime_events=runtime_events,
+                        bus=bus,
+                        trace_context=trace_context,
+                        chatlog_store=chatlog_store,
+                        event_type="continuation.wall_timeout",
+                        session_id=portal_session_id,
+                        request_id=request_id,
+                        chatlog_id=request_id,
+                        opencode_session_id=record.opencode_session_id,
+                        turn_index=continuation_count + 1,
+                        reason=continue_reason,
+                        state="incomplete",
+                        summary="Auto-continuation stopped because the chat wall timeout was reached.",
+                        metadata={
+                            "wall_timeout_seconds": settings.chat_total_wall_timeout_seconds,
+                            "last_progress_at": progress_state["last_progress_at"],
+                            "last_progress_event_type": progress_state.get("last_event_type", ""),
+                            "signature_before": _signature_hash(last_sig),
+                        },
+                        progress_state=progress_state,
+                    )
+                    break
+                if continuation_count >= settings.chat_auto_continue_max_turns:
+                    completion_state = "incomplete"
+                    incomplete_reason = "auto_continue_max_turns_reached"
+                    await _publish_continuation_event(
+                        runtime_events=runtime_events,
+                        bus=bus,
+                        trace_context=trace_context,
+                        chatlog_store=chatlog_store,
+                        event_type="continuation.max_turns_reached",
+                        session_id=portal_session_id,
+                        request_id=request_id,
+                        chatlog_id=request_id,
+                        opencode_session_id=record.opencode_session_id,
+                        turn_index=continuation_count + 1,
+                        reason=continue_reason,
+                        state="incomplete",
+                        summary="Auto-continuation reached the configured turn limit.",
+                        metadata={
+                            "max_turns": settings.chat_auto_continue_max_turns,
+                            "turns_attempted": continuation_count,
+                            "last_progress_at": progress_state["last_progress_at"],
+                            "last_progress_event_type": progress_state.get("last_event_type", ""),
+                            "signature_before": _signature_hash(last_sig),
+                        },
+                        progress_state=progress_state,
+                    )
+                    break
+                last_progress_at = float(progress_state["last_progress_at"])
+                if settings.chat_auto_continue_no_progress_stop and (loop.time() - last_progress_at) >= float(settings.chat_no_progress_timeout_seconds):
+                    completion_state = "incomplete"
+                    incomplete_reason = "no_progress_timeout"
+                    await _publish_continuation_event(
+                        runtime_events=runtime_events,
+                        bus=bus,
+                        trace_context=trace_context,
+                        chatlog_store=chatlog_store,
+                        event_type="continuation.no_progress",
+                        session_id=portal_session_id,
+                        request_id=request_id,
+                        chatlog_id=request_id,
+                        opencode_session_id=record.opencode_session_id,
+                        turn_index=continuation_count + 1,
+                        reason=continue_reason,
+                        state="incomplete",
+                        summary="Auto-continuation stopped because no assistant/tool progress was observed.",
+                        metadata={
+                            "last_progress_at": last_progress_at,
+                            "last_progress_event_type": progress_state.get("last_event_type", ""),
+                            "no_progress_timeout_seconds": settings.chat_no_progress_timeout_seconds,
+                            "signature_before": _signature_hash(last_sig),
+                            "signature_after": _signature_hash(last_sig),
+                        },
+                        progress_state=progress_state,
+                    )
+                    break
+
+                continuation_count += 1
+                cont_id = new_opencode_message_id()
+                if binding_store is not None:
+                    binding_store.bind_message(record.opencode_session_id, cont_id, portal_session_id, request_id, kind="continuation")
+                turn_started_at = utc_now_iso()
+                turn_started_loop = loop.time()
+                signature_before = last_sig
+                await _publish_continuation_event(
                     runtime_events=runtime_events,
                     bus=bus,
                     trace_context=trace_context,
-                    event_type="continuation.wall_timeout",
+                    chatlog_store=chatlog_store,
+                    event_type="continuation.started",
                     session_id=portal_session_id,
                     request_id=request_id,
+                    chatlog_id=request_id,
                     opencode_session_id=record.opencode_session_id,
-                    state="incomplete",
-                    summary="Auto-continuation stopped because the chat wall timeout was reached.",
-                    data={"turn_index": continuation_count + 1, "wall_timeout_seconds": settings.chat_total_wall_timeout_seconds},
+                    turn_index=continuation_count,
+                    message_id=cont_id,
+                    reason=continue_reason,
+                    state="running",
+                    summary="Auto-continuation turn started.",
+                    metadata={
+                        "started_at": turn_started_at,
+                        "trigger_reason": continue_reason,
+                        "previous_completion_state": completion_state,
+                        "previous_incomplete_reason": incomplete_reason,
+                        "signature_before": _signature_hash(signature_before),
+                    },
+                    progress_state=progress_state,
                 )
-                break
-            if continuation_count >= settings.chat_auto_continue_max_turns:
-                completion_state = "incomplete"
-                incomplete_reason = "auto_continue_max_turns_reached"
-                await _publish_chat_runtime_event(
+                timeout_recovery_debug = {"attempted": False, "state": "not_needed", "reason": ""}
+                try:
+                    before_messages = await client.list_messages(record.opencode_session_id)
+                    continuation_prompt = settings.chat_auto_continue_checkpoint_prompt if settings.chat_auto_continue_checkpoint_enabled else settings.chat_auto_continue_prompt
+                    continuation_parts = [{"type": "text", "text": continuation_prompt, "metadata": {"efp_internal": "auto_continue", "portal_request_id": request_id, "continuation_index": continuation_count}}]
+                    await _publish_continuation_event(
+                        runtime_events=runtime_events,
+                        bus=bus,
+                        trace_context=trace_context,
+                        chatlog_store=chatlog_store,
+                        event_type="continuation.prompt_sent",
+                        session_id=portal_session_id,
+                        request_id=request_id,
+                        chatlog_id=request_id,
+                        opencode_session_id=record.opencode_session_id,
+                        turn_index=continuation_count,
+                        message_id=cont_id,
+                        reason=continue_reason,
+                        state="running",
+                        summary="Auto-continuation prompt sent.",
+                        metadata={
+                            "prompt_preview": safe_preview(continuation_prompt, 500),
+                            "prompt_length": len(continuation_prompt),
+                            "checkpoint_enabled": bool(settings.chat_auto_continue_checkpoint_enabled),
+                            "is_original_user_prompt": False,
+                        },
+                        progress_state=progress_state,
+                    )
+                    continuation_response_payload = await _send_message(client, record.opencode_session_id, parts=continuation_parts, model=model, agent=agent, system=system, message_id=cont_id)
+                    _drain_progress_events(progress_sub, session_id=portal_session_id, request_id=request_id, progress_state=progress_state)
+                    continuation_wait_timeout = min(float(settings.chat_completion_timeout_seconds), _remaining_seconds(wall_deadline))
+                    completion_probe, after_messages = await _wait_for_assistant_completion(client=client, opencode_session_id=record.opencode_session_id, response_payload=continuation_response_payload, before_messages=before_messages, timeout_seconds=continuation_wait_timeout, poll_seconds=settings.chat_completion_poll_seconds)
+                    _drain_progress_events(progress_sub, session_id=portal_session_id, request_id=request_id, progress_state=progress_state)
+                    if _deadline_expired(wall_deadline) and completion_probe.get("completion_state") not in {"completed", "success", "blocked", "error", "empty_final"}:
+                        diagnostics = completion_probe.get("diagnostics") if isinstance(completion_probe.get("diagnostics"), dict) else {}
+                        completion_probe = {**completion_probe, "completion_state": "incomplete", "reason": "wall_timeout", "diagnostics": {**diagnostics, "wall_timeout_seconds": settings.chat_total_wall_timeout_seconds}}
+                    latest_response_payload = continuation_response_payload
+                    latest_waited_messages = after_messages
+                except OpenCodeTransportTimeout as exc:
+                    if not settings.chat_timeout_recovery_enabled:
+                        raise
+                    completion_probe, after_messages, submit_timeout_recovery = await _recover_after_submit_timeout(
+                        client=client,
+                        opencode_session_id=record.opencode_session_id,
+                        portal_session_id=portal_session_id,
+                        request_id=request_id,
+                        timeout_exc=exc,
+                        settings=settings,
+                        runtime_events=runtime_events,
+                        bus=bus,
+                        trace_context=trace_context,
+                        before_assistant_message_ids=set(extract_assistant_message_ids(before_messages)),
+                        before_snapshot_unreliable=False,
+                        wall_deadline=wall_deadline,
+                    )
+                    _drain_progress_events(progress_sub, session_id=portal_session_id, request_id=request_id, progress_state=progress_state)
+                    timeout_recovery_debug = {
+                        "attempted": True,
+                        "state": "recovered" if submit_timeout_recovery.get("recovered") else "exhausted",
+                        "reason": submit_timeout_recovery.get("reason", ""),
+                        "polls": submit_timeout_recovery.get("polls", 0),
+                    }
+                    continuation_response_payload = {"messages": after_messages, "timeout_recovery": submit_timeout_recovery}
+                    latest_response_payload = continuation_response_payload
+                    latest_waited_messages = after_messages
+                except Exception as exc:
+                    completed_at = utc_now_iso()
+                    failed_debug = {
+                        "turn_index": continuation_count,
+                        "index": continuation_count,
+                        "completion_state": "incomplete",
+                        "reason": "auto_continue_failed",
+                        "message_id": cont_id,
+                        "started_at": turn_started_at,
+                        "completed_at": completed_at,
+                        "state": "failed",
+                        "last_progress_at": progress_state["last_progress_at"],
+                        "last_progress_event_type": progress_state.get("last_event_type", ""),
+                        "duration_seconds": round(max(0.0, loop.time() - turn_started_loop), 3),
+                        "signature_before": _signature_hash(signature_before),
+                        "signature_after": _signature_hash(last_sig),
+                        "changed_signature": False,
+                        "changed_signature_hash": _signature_hash(last_sig),
+                        "timeout_recovery": timeout_recovery_debug,
+                        "error_type": type(exc).__name__,
+                        "error_summary": safe_preview(str(exc), 300),
+                    }
+                    continuation_debug.append(failed_debug)
+                    await _publish_continuation_event(
+                        runtime_events=runtime_events,
+                        bus=bus,
+                        trace_context=trace_context,
+                        chatlog_store=chatlog_store,
+                        event_type="continuation.failed",
+                        session_id=portal_session_id,
+                        request_id=request_id,
+                        chatlog_id=request_id,
+                        opencode_session_id=record.opencode_session_id,
+                        turn_index=continuation_count,
+                        message_id=cont_id,
+                        reason=continue_reason,
+                        state="failed",
+                        summary="Auto-continuation failed.",
+                        metadata={k: v for k, v in failed_debug.items() if k != "text_preview"},
+                        progress_state=progress_state,
+                    )
+                    completion_state = "incomplete"
+                    incomplete_reason = "auto_continue_failed"
+                    break
+
+                assistant_text = str(completion_probe.get("text") or extract_assistant_text(continuation_response_payload) or assistant_text)
+                completion_state = str(completion_probe.get("completion_state") or completion_state)
+                new_sig = _completion_progress_signature(completion_probe, assistant_text, after_messages)
+                changed_signature = new_sig != last_sig
+                if changed_signature:
+                    progress_state["last_progress_at"] = loop.time()
+                    progress_state["last_event_type"] = "assistant_signature_changed"
+                    progress_state["count"] = int(progress_state.get("count") or 0) + 1
+                completed_at = utc_now_iso()
+                debug_entry = {
+                    "turn_index": continuation_count,
+                    "index": continuation_count,
+                    "completion_state": completion_state,
+                    "reason": completion_probe.get("reason"),
+                    "message_id": cont_id,
+                    "started_at": turn_started_at,
+                    "completed_at": completed_at,
+                    "state": "completed" if completion_state in {"completed", "success"} else completion_state,
+                    "last_progress_at": progress_state["last_progress_at"],
+                    "last_progress_event_type": progress_state.get("last_event_type", ""),
+                    "duration_seconds": round(max(0.0, loop.time() - turn_started_loop), 3),
+                    "signature_before": _signature_hash(signature_before),
+                    "signature_after": _signature_hash(new_sig),
+                    "changed_signature": changed_signature,
+                    "changed_signature_hash": _signature_hash(new_sig),
+                    "timeout_recovery": timeout_recovery_debug,
+                    "text_preview": safe_preview(assistant_text, 200),
+                }
+                continuation_debug.append(debug_entry)
+                await _publish_continuation_event(
                     runtime_events=runtime_events,
                     bus=bus,
                     trace_context=trace_context,
-                    event_type="continuation.max_turns_reached",
+                    chatlog_store=chatlog_store,
+                    event_type="continuation.completed",
                     session_id=portal_session_id,
                     request_id=request_id,
+                    chatlog_id=request_id,
                     opencode_session_id=record.opencode_session_id,
-                    state="incomplete",
-                    summary="Auto-continuation reached the configured turn limit.",
-                    data={"max_turns": settings.chat_auto_continue_max_turns, "reason": continue_reason},
+                    turn_index=continuation_count,
+                    message_id=cont_id,
+                    reason=str(completion_probe.get("reason") or continue_reason or ""),
+                    state="success" if completion_state in {"completed", "success"} else completion_state,
+                    summary="Auto-continuation turn completed.",
+                    metadata={k: v for k, v in debug_entry.items() if k != "text_preview"},
+                    progress_state=progress_state,
                 )
-                break
-            if settings.chat_auto_continue_no_progress_stop and (asyncio.get_running_loop().time() - last_progress_at) >= float(settings.chat_no_progress_timeout_seconds):
-                completion_state = "incomplete"
-                incomplete_reason = "no_progress_timeout"
-                await _publish_chat_runtime_event(
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    event_type="continuation.no_progress",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=record.opencode_session_id,
-                    state="incomplete",
-                    summary="Auto-continuation stopped because no assistant/tool progress was observed.",
-                    data={"turn_index": continuation_count + 1, "last_progress_at": last_progress_at, "no_progress_timeout_seconds": settings.chat_no_progress_timeout_seconds},
-                )
-                break
-            continuation_count += 1
-            cont_id = new_opencode_message_id()
-            if binding_store is not None:
-                binding_store.bind_message(record.opencode_session_id, cont_id, portal_session_id, request_id, kind="continuation")
-            turn_started_at = utc_now_iso()
-            await _publish_chat_runtime_event(
-                runtime_events=runtime_events,
-                bus=bus,
-                trace_context=trace_context,
-                event_type="continuation.started",
-                session_id=portal_session_id,
-                request_id=request_id,
-                opencode_session_id=record.opencode_session_id,
-                summary="Auto-continuation turn started.",
-                data={"turn_index": continuation_count, "message_id": cont_id, "reason": continue_reason, "started_at": turn_started_at},
-            )
-            before_messages = await client.list_messages(record.opencode_session_id)
-            try:
-                continuation_prompt = settings.chat_auto_continue_checkpoint_prompt if settings.chat_auto_continue_checkpoint_enabled else settings.chat_auto_continue_prompt
-                continuation_parts = [{"type": "text", "text": continuation_prompt, "metadata": {"efp_internal": "auto_continue", "portal_request_id": request_id, "continuation_index": continuation_count}}]
-                await _publish_chat_runtime_event(
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    event_type="continuation.prompt_sent",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=record.opencode_session_id,
-                    summary="Auto-continuation prompt sent.",
-                    data={"turn_index": continuation_count, "message_id": cont_id, "reason": continue_reason},
-                )
-                continuation_response_payload = await _send_message(client, record.opencode_session_id, parts=continuation_parts, model=model, agent=agent, system=system, message_id=cont_id)
-                continuation_wait_timeout = min(float(settings.chat_completion_timeout_seconds), _remaining_seconds(wall_deadline))
-                completion_probe, after_messages = await _wait_for_assistant_completion(client=client, opencode_session_id=record.opencode_session_id, response_payload=continuation_response_payload, before_messages=before_messages, timeout_seconds=continuation_wait_timeout, poll_seconds=settings.chat_completion_poll_seconds)
-                if _deadline_expired(wall_deadline) and completion_probe.get("completion_state") not in {"completed", "success", "blocked", "error", "empty_final"}:
-                    diagnostics = completion_probe.get("diagnostics") if isinstance(completion_probe.get("diagnostics"), dict) else {}
-                    completion_probe = {**completion_probe, "completion_state": "incomplete", "reason": "wall_timeout", "diagnostics": {**diagnostics, "wall_timeout_seconds": settings.chat_total_wall_timeout_seconds}}
-                latest_response_payload = continuation_response_payload
-                latest_waited_messages = after_messages
-            except OpenCodeTransportTimeout as exc:
-                if not settings.chat_timeout_recovery_enabled:
-                    raise
-                completion_probe, after_messages, submit_timeout_recovery = await _recover_after_submit_timeout(
-                    client=client,
-                    opencode_session_id=record.opencode_session_id,
-                    portal_session_id=portal_session_id,
-                    request_id=request_id,
-                    timeout_exc=exc,
-                    settings=settings,
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    before_assistant_message_ids=set(extract_assistant_message_ids(before_messages)),
-                    before_snapshot_unreliable=False,
-                    wall_deadline=wall_deadline,
-                )
-                continuation_response_payload = {"messages": after_messages, "timeout_recovery": submit_timeout_recovery}
-                latest_response_payload = continuation_response_payload
-                latest_waited_messages = after_messages
-            except Exception as exc:
-                await _publish_chat_runtime_event(
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    event_type="continuation.failed",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=record.opencode_session_id,
-                    state="failed",
-                    summary="Auto-continuation failed.",
-                    data={"turn_index": continuation_count, "message_id": cont_id, "error": safe_preview(str(exc), 300)},
-                )
-                completion_state = "incomplete"
-                incomplete_reason = "auto_continue_failed"
-                break
-            assistant_text = str(completion_probe.get("text") or extract_assistant_text(continuation_response_payload) or assistant_text)
-            completion_state = str(completion_probe.get("completion_state") or completion_state)
-            new_sig = _completion_progress_signature(completion_probe, assistant_text, after_messages)
-            changed_signature = new_sig != last_sig
-            if changed_signature:
-                last_progress_at = asyncio.get_running_loop().time()
-            debug_entry = {
-                "turn_index": continuation_count,
-                "index": continuation_count,
-                "completion_state": completion_state,
-                "reason": completion_probe.get("reason"),
-                "message_id": cont_id,
-                "started_at": turn_started_at,
-                "completed_at": utc_now_iso(),
-                "state": completion_state,
-                "last_progress_at": last_progress_at,
-                "changed_signature": changed_signature,
-                "changed_signature_hash": _signature_hash(new_sig),
-                "text_preview": safe_preview(assistant_text, 200),
-            }
-            continuation_debug.append(debug_entry)
-            await _publish_chat_runtime_event(
-                runtime_events=runtime_events,
-                bus=bus,
-                trace_context=trace_context,
-                event_type="continuation.completed",
-                session_id=portal_session_id,
-                request_id=request_id,
-                opencode_session_id=record.opencode_session_id,
-                state="success" if completion_state in {"completed", "success"} else completion_state,
-                summary="Auto-continuation turn completed.",
-                data={k: v for k, v in debug_entry.items() if k != "text_preview"},
-            )
-            if completion_state in {"completed", "success"}:
-                incomplete_reason = ""
-                break
-            if str(completion_probe.get("reason") or "") == "wall_timeout":
-                completion_state = "incomplete"
-                incomplete_reason = "wall_timeout"
-                await _publish_chat_runtime_event(
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    event_type="continuation.wall_timeout",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=record.opencode_session_id,
-                    state="incomplete",
-                    summary="Auto-continuation stopped because the chat wall timeout was reached.",
-                    data={"turn_index": continuation_count, "wall_timeout_seconds": settings.chat_total_wall_timeout_seconds},
-                )
-                break
-            last_sig = new_sig
-            allow_continue, continue_reason = _should_auto_continue(completion_state, completion_probe, assistant_text, settings)
-            if completion_state not in {"completed", "success"}:
-                incomplete_reason = str(completion_probe.get("reason") or continue_reason or "")
+                if completion_state in {"completed", "success"}:
+                    incomplete_reason = ""
+                    break
+                if str(completion_probe.get("reason") or "") == "wall_timeout":
+                    completion_state = "incomplete"
+                    incomplete_reason = "wall_timeout"
+                    await _publish_continuation_event(
+                        runtime_events=runtime_events,
+                        bus=bus,
+                        trace_context=trace_context,
+                        chatlog_store=chatlog_store,
+                        event_type="continuation.wall_timeout",
+                        session_id=portal_session_id,
+                        request_id=request_id,
+                        chatlog_id=request_id,
+                        opencode_session_id=record.opencode_session_id,
+                        turn_index=continuation_count,
+                        message_id=cont_id,
+                        reason="wall_timeout",
+                        state="incomplete",
+                        summary="Auto-continuation stopped because the chat wall timeout was reached.",
+                        metadata={
+                            "wall_timeout_seconds": settings.chat_total_wall_timeout_seconds,
+                            "last_progress_at": progress_state["last_progress_at"],
+                            "last_progress_event_type": progress_state.get("last_event_type", ""),
+                            "signature_before": _signature_hash(signature_before),
+                            "signature_after": _signature_hash(new_sig),
+                        },
+                        progress_state=progress_state,
+                    )
+                    break
+                last_sig = new_sig
+                allow_continue, continue_reason = _should_auto_continue(completion_state, completion_probe, assistant_text, settings)
+                if completion_state not in {"completed", "success"}:
+                    incomplete_reason = str(completion_probe.get("reason") or continue_reason or "")
+        finally:
+            bus.unsubscribe(progress_sub)
         if completion_state in {"completed", "success"}:
             incomplete_reason = ""
         if completion_state != "completed" and not incomplete_reason:
@@ -1238,8 +1501,14 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         provider = provider_for_trace
         usage_record = usage_tracker.record_chat(session_id=portal_session_id, request_id=request_id, model=model, provider=provider, response_payload=response_payload, input_text=message, output_text=assistant_text)
         usage_record["request_id"] = trace_context.get("request_id", usage_record.get("request_id", ""))
+        continuation_metadata = {
+            "enabled": bool(settings.chat_auto_continue_enabled),
+            "turns_attempted": continuation_count,
+            "max_turns": int(settings.chat_auto_continue_max_turns),
+            "debug": continuation_debug,
+        }
 
-        llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(_redact_attachment_payloads_for_debug(response_payload), 2000), "trace_context": trace_context, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids}, "attachments": attachment_debug}
+        llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(_redact_attachment_payloads_for_debug(response_payload), 2000), "trace_context": trace_context, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids}, "attachments": attachment_debug, "continuation": continuation_metadata, "continuations": continuation_debug}
         if submit_timeout_recovery:
             llm_debug["timeout_recovery"] = submit_timeout_recovery
         if skill_debug:
@@ -1267,7 +1536,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.failed", latest_event_state="error", request_id=request_id, summary=str(exc), runtime_events=runtime_events, metadata={"engine": "opencode", "trace_context": trace_context})
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
 
-    out = {"ok": ok, "completion_state": completion_state, "incomplete_reason": incomplete_reason, "session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids, "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "continuation_count": continuation_count, "auto_continue_enabled": settings.chat_auto_continue_enabled, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context, "attachments": attachment_debug, "completion_probe": completion_probe, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids}, "continuations": continuation_debug}}
+    out = {"ok": ok, "completion_state": completion_state, "incomplete_reason": incomplete_reason, "session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids, "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "continuation_count": continuation_count, "auto_continue_enabled": settings.chat_auto_continue_enabled, "metadata": {"continuation": continuation_metadata}, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context, "attachments": attachment_debug, "completion_probe": completion_probe, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids}, "continuation": continuation_metadata, "continuations": continuation_debug}}
     if submit_timeout_recovery:
         out["_llm_debug"]["timeout_recovery"] = submit_timeout_recovery
     if message_id_detection_error_before:

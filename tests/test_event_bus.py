@@ -54,6 +54,29 @@ async def test_event_bus_replay_limit_behavior():
 
 
 @pytest.mark.asyncio
+async def test_event_bus_replay_after_last_event_at():
+    bus = EventBus(replay_limit=10, replay_ttl_seconds=60)
+    await bus.publish({"type": "one", "session_id": "s1", "created_at": "2026-05-18T00:00:00+00:00"})
+    await bus.publish({"type": "two", "session_id": "s1", "created_at": "2026-05-18T00:00:01+00:00"})
+    await bus.publish({"type": "three", "session_id": "s1", "created_at": "2026-05-18T00:00:02+00:00"})
+
+    replayed = bus.recent_events(session_id="s1", last_event_at="2026-05-18T00:00:01+00:00")
+
+    assert [event["type"] for event in replayed] == ["three"]
+
+
+@pytest.mark.asyncio
+async def test_event_bus_replay_ignores_invalid_last_event_at():
+    bus = EventBus(replay_limit=10, replay_ttl_seconds=60)
+    await bus.publish({"type": "one", "session_id": "s1", "created_at": "2026-05-18T00:00:00+00:00"})
+    await bus.publish({"type": "two", "session_id": "s1", "created_at": "2026-05-18T00:00:01+00:00"})
+
+    replayed = bus.recent_events(session_id="s1", last_event_at="not-a-date")
+
+    assert [event["type"] for event in replayed] == ["one", "two"]
+
+
+@pytest.mark.asyncio
 async def test_event_bus_replay_ttl_behavior(monkeypatch):
     now = 1000.0
     monkeypatch.setattr("efp_opencode_adapter.event_bus.time.time", lambda: now)

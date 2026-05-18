@@ -91,3 +91,24 @@ async def test_events_ws_replay_limit(tmp_path, monkeypatch):
 
     await ws.close()
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_events_ws_replay_after_last_event_at(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await app[EVENT_BUS_KEY].publish({"type": "one", "session_id": "portal-last", "created_at": "2026-05-18T00:00:00+00:00"})
+    await app[EVENT_BUS_KEY].publish({"type": "two", "session_id": "portal-last", "created_at": "2026-05-18T00:00:01+00:00"})
+    await app[EVENT_BUS_KEY].publish({"type": "three", "session_id": "portal-last", "created_at": "2026-05-18T00:00:02+00:00"})
+
+    ws = await client.ws_connect("/api/events?session_id=portal-last&replay=1&last_event_at=2026-05-18T00:00:01Z")
+    assert (await ws.receive_json())["type"] == "connected"
+    event = await ws.receive_json(timeout=2)
+
+    assert event["type"] == "three"
+
+    await ws.close()
+    await client.close()

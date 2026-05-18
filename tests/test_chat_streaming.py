@@ -42,6 +42,18 @@ class StreamSubmitTimeoutRecoveredFake(FakeOpenCodeClient):
         return []
 
 
+class StreamAutoContinueFake(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {"message": {"info": {"id": "a-progress", "role": "assistant"}, "parts": [{"type": "text", "text": "I am reading the repository..."}]}}
+        return {"message": {"info": {"id": "a-final", "role": "assistant"}, "parts": [{"type": "text", "text": "final stream answer"}]}}
+
+
 def _sse_events(body: str) -> list[tuple[str, dict]]:
     events = []
     for chunk in body.strip().split("\n\n"):
@@ -116,6 +128,28 @@ async def test_chat_stream_emits_timeout_recovery_before_final(tmp_path, monkeyp
         final_payload = next(payload for name, payload in events if name == "final")
         assert final_payload["completion_state"] == "completed"
         assert final_payload["response"] == "stream recovered"
+    finally:
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_continuation_events_before_final(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    c = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=StreamAutoContinueFake())))
+    await c.start_server()
+    try:
+        resp = await c.post("/api/chat/stream", json={"message": "m", "session_id": "portal-stream-continuation", "request_id": "req-stream-continuation"})
+        body = await resp.text()
+        assert "continuation.started" in body
+        assert "continuation.prompt_sent" in body
+        assert "continuation.completed" in body
+        assert body.index("continuation.started") < body.index("event: final")
+        events = _sse_events(body)
+        final_payload = next(payload for name, payload in events if name == "final")
+        assert final_payload["completion_state"] == "completed"
+        assert final_payload["metadata"]["continuation"]["turns_attempted"] == 1
     finally:
         await c.close()
 

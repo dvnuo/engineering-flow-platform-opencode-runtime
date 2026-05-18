@@ -5,6 +5,7 @@ import copy
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from itertools import count
 from typing import Any
 
@@ -98,8 +99,10 @@ class EventBus:
         request_id: str = "",
         limit: int | None = None,
         types: set[str] | None = None,
+        last_event_at: str | None = None,
     ) -> list[dict[str, Any]]:
         now = time.time()
+        last_event_ts = _parse_event_time(last_event_at)
         buckets: list[deque[tuple[float, int, dict[str, Any]]]] = []
         if session_id:
             bucket = self._recent_by_session.get(session_id)
@@ -123,8 +126,11 @@ class EventBus:
                 event_type = str(event.get("type") or event.get("event_type") or "")
                 if types and event_type not in types:
                     continue
+                event_ts = _event_sort_time(event, ts)
+                if last_event_ts is not None and event_ts <= last_event_ts:
+                    continue
                 items.append((ts, seq, event))
-        items.sort(key=lambda item: (item[0], item[1]))
+        items.sort(key=lambda item: (_event_sort_time(item[2], item[0]), item[1]))
         max_items = self.replay_limit if limit is None else max(0, min(int(limit), self.replay_limit))
         if max_items:
             items = items[-max_items:]
@@ -147,6 +153,22 @@ def _parse_types(raw: str | None) -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
+def _parse_event_time(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        return datetime.fromisoformat(raw).timestamp()
+    except Exception:
+        return None
+
+
+def _event_sort_time(event: dict[str, Any], fallback: float) -> float:
+    parsed = _parse_event_time(str(event.get("created_at") or ""))
+    return parsed if parsed is not None else fallback
+
+
 async def events_ws_handler(request: web.Request) -> web.WebSocketResponse:
     bus: EventBus = request.app[EVENT_BUS_KEY]
     filters = {k: request.query.get(k, "") for k in ALLOWED_FILTER_KEYS}
@@ -166,6 +188,7 @@ async def events_ws_handler(request: web.Request) -> web.WebSocketResponse:
             request_id=filters.get("request_id", ""),
             limit=replay_limit,
             types=types or None,
+            last_event_at=request.query.get("last_event_at"),
         ):
             await ws.send_json(event)
 
