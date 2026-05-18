@@ -24,7 +24,17 @@ bash scripts/smoke.sh
 This image expects prebuilt custom tool binaries in `runtime-tools/` before
 `docker build`. See `docs/CUSTOM_TOOLS_IMAGE.md`.
 
+## Java and Maven image support
+The runtime image includes Azul Zulu JDK 8, 17, 21, and 25. Zulu JDK 21 is the
+default `JAVA_HOME`. Apache Maven 3.9.16 is installed at `/opt/maven`, with
+`mvn`, `jdk`, and `mvn-jdk` available on `PATH`.
+
+The build pipeline must generate `runtime-maven/settings.xml` before
+`docker build`. Do not commit the real settings file; use
+`runtime-maven/settings.xml.example` as the minimal local template.
+
 ## Docs
 - Runtime contract: `docs/RUNTIME_CONTRACT.md`
 - Observability: `docs/OBSERVABILITY.md`
 - Testing guide: `docs/TESTING.md`
+- Java/Maven image: `docs/JAVA_MAVEN_IMAGE.md`
