@@ -391,6 +391,7 @@ def _binding_matches_request(
     binding_store: Any | None = None,
     opencode_session_id: str = "",
     request_id_candidate: str = "",
+    include_completed_binding: bool = False,
 ) -> bool:
     if binding_store is None or not opencode_session_id or not hasattr(binding_store, "resolve_exact"):
         return False
@@ -409,13 +410,13 @@ def _binding_matches_request(
     for candidate in message_candidates:
         if not candidate:
             continue
-        binding = binding_store.resolve_exact(opencode_session_id, message_id=str(candidate))
+        binding = binding_store.resolve_exact(opencode_session_id, message_id=str(candidate), include_completed=include_completed_binding)
         if binding is not None:
             return binding.request_id == request_id
     for candidate in task_candidates:
         if not candidate:
             continue
-        binding = binding_store.resolve_exact(opencode_session_id, task_id=str(candidate))
+        binding = binding_store.resolve_exact(opencode_session_id, task_id=str(candidate), include_completed=include_completed_binding)
         if binding is not None:
             return binding.request_id == request_id
     return False
@@ -1764,7 +1765,22 @@ def _event_dedupe_key(event: dict[str, Any]) -> tuple:
     return (event.get("type"), event.get("session_id"), event.get("request_id"), event.get("task_id"), event.get("tool"), event.get("permission_id"), event.get("raw_type"), data.get("status"), data.get("delta"), raw_hash)
 
 
-def _is_stream_relevant_event(event: dict[str, Any], *, session_id: str, request_id: str) -> bool:
+STREAM_SESSION_LEVEL_EVENT_TYPES = {
+    "event_bridge.connected",
+    "event_bridge.disconnected",
+    "event_bridge.reconnected",
+    "stream.started",
+}
+
+
+def _is_stream_relevant_event(
+    event: dict[str, Any],
+    *,
+    session_id: str,
+    request_id: str,
+    binding_store: Any | None = None,
+    opencode_session_id: str = "",
+) -> bool:
     data = event.get("data") if isinstance(event.get("data"), dict) else {}
     event_type = str(event.get("type") or event.get("event_type") or "")
     if event_type in {"opencode.sync", "opencode.message.updated", "session.updated", "session.status", "session.idle", "session.diff"}:
@@ -1782,25 +1798,32 @@ def _is_stream_relevant_event(event: dict[str, Any], *, session_id: str, request
     event_session_id = event.get("session_id") or event.get("portal_session_id") or data.get("session_id")
     event_portal_request_id = event.get("portal_request_id") or data.get("portal_request_id")
     event_request_id = event.get("request_id") or data.get("request_id")
-    has_bridge_raw_type = bool(event.get("raw_type") or data.get("raw_type"))
 
     if event_session_id:
         if str(event_session_id) != session_id:
             return False
-    elif request_scoped:
+    elif request_scoped and event_type != "stream.started":
         return False
+
+    if event_type == "stream.started":
+        return True
 
     if event_portal_request_id:
         if str(event_portal_request_id) != request_id:
             return False
     elif event_request_id:
-        if str(event_request_id) != request_id and not has_bridge_raw_type:
+        if str(event_request_id) != request_id and not _binding_matches_request(
+            event,
+            data,
+            request_id=request_id,
+            binding_store=binding_store,
+            opencode_session_id=opencode_session_id or str(event.get("opencode_session_id") or data.get("opencode_session_id") or ""),
+            request_id_candidate=str(event_request_id),
+            include_completed_binding=True,
+        ):
             return False
-    elif request_scoped and event_type != "stream.started" and not has_bridge_raw_type:
-        return False
-
-    if event_type == "stream.started":
-        return True
+    elif request_scoped:
+        return event_type in STREAM_SESSION_LEVEL_EVENT_TYPES
 
     if request_scoped:
         if event_type in {"assistant_delta", "message.delta"}:
@@ -1954,7 +1977,15 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         }
 
     async def _forward(event: dict[str, Any]) -> None:
-        if not _is_stream_relevant_event(event, session_id=session_id, request_id=req_id):
+        record = request.app[SESSION_STORE_KEY].get(session_id)
+        current_opencode_session_id = record.opencode_session_id if record is not None else ""
+        if not _is_stream_relevant_event(
+            event,
+            session_id=session_id,
+            request_id=req_id,
+            binding_store=binding_store,
+            opencode_session_id=current_opencode_session_id,
+        ):
             return
         key = _event_dedupe_key(event)
         if key in seen:
