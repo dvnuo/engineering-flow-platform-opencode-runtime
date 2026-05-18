@@ -10,3 +10,5 @@ build/
 node_modules/
 runtime-tools/*
 !runtime-tools/.gitkeep
+/runtime-maven/settings.xml
+!/runtime-maven/.gitkeep
