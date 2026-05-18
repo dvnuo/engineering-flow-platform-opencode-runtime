@@ -47,17 +47,32 @@ def test_dockerfile_installs_java_maven_runtime_tools():
     root = Path(__file__).resolve().parents[1]
     text = (root / "Dockerfile").read_text(encoding="utf-8")
     for token in [
-        "zulu8-jdk",
-        "zulu17-jdk",
         "zulu21-jdk",
-        "zulu25-jdk",
         "ARG MAVEN_VERSION=3.9.16",
         "COPY ${MAVEN_SETTINGS_DIR}/settings.xml",
         "cat > /usr/local/bin/jdk",
         "cat > /usr/local/bin/mvn-jdk",
         "ENV JAVA_HOME=/opt/jdks/zulu21",
+        "ENV JAVA21_HOME=/opt/jdks/zulu21",
+        "ENV JDK21_HOME=/opt/jdks/zulu21",
     ]:
         assert token in text
+    for token in [
+        "zulu8-jdk",
+        "zulu17-jdk",
+        "zulu25-jdk",
+        "ENV JAVA8_HOME=",
+        "ENV JAVA17_HOME=",
+        "ENV JAVA25_HOME=",
+        "ENV JDK8_HOME=",
+        "ENV JDK17_HOME=",
+        "ENV JDK25_HOME=",
+        "for v in 8 17 21 25",
+        "mvn-jdk 8 -v",
+        "mvn-jdk 17 -v",
+        "mvn-jdk 25 -v",
+    ]:
+        assert token not in text
 
 
 def test_dockerfile_installs_only_opencode_runtime_package():

@@ -24,18 +24,44 @@ Available Bash commands: `jira`, `confluence`.
 
 JAVA_MAVEN_INSTRUCTIONS_CONTENT = """# Java and Maven
 
-Available JDKs: Azul Zulu JDK 8, 17, 21, and 25. This includes Zulu JDK 8, Zulu JDK 17, Zulu JDK 21, and Zulu JDK 25.
+This runtime includes Azul Zulu JDK 21 and Apache Maven.
 
-- Default JDK 21 is active through `JAVA_HOME=/opt/jdks/zulu21`.
-- Direct JDK tools are available on PATH from the default JDK 21.
-- Maven settings.xml is available at `/root/.m2/settings.xml`.
-- Maven toolchains.xml is available at `/root/.m2/toolchains.xml`.
-- Prefer `mvn -B -ntp` for Maven commands.
-- Use `jdk` to run a command with a specific JDK, for example `jdk 17 javac -version`.
-- For another JDK, use `jdk <8|17|21|25> <command>`.
-- Use `mvn-jdk` to run Maven with a specific JDK, for example `mvn-jdk 8 -B -ntp test`.
-- Examples: `jdeps --version`, `jlink --version`, `jcmd -h`, `jdk 17 jdeps --version`, `jdk 25 jlink --version`.
-- Work under `/workspace` or `/workspace/repos/<repo>`.
+Available JDK:
+- Azul Zulu JDK 21: /opt/jdks/zulu21
+
+Default:
+- JAVA_HOME=/opt/jdks/zulu21
+- java, javac, jar, Maven, and direct JDK tools use Zulu JDK 21.
+
+Available commands:
+- java
+- javac
+- jar
+- mvn
+- jdk
+- mvn-jdk
+
+Maven:
+- Maven settings.xml is /root/.m2/settings.xml.
+- Maven toolchains.xml is /root/.m2/toolchains.xml.
+- Prefer mvn -B -ntp for automated agent work.
+
+Usage:
+- java -version
+- javac -version
+- mvn -v
+- jdk list
+- jdk current
+- jdk 21 java -version
+- mvn-jdk -v
+- mvn-jdk 21 -B -ntp test
+- jdeps --version
+- jlink --version
+- jcmd -h
+
+Rules:
+- Work under /workspace or /workspace/repos/.
+- Only Zulu JDK 21 is installed in this runtime.
 """
 
 

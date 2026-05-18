@@ -99,10 +99,14 @@ def test_runtime_env_sets_java_maven_defaults(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     env = build_runtime_env_from_config(s, {}).env
     assert env["JAVA_HOME"] == "/opt/jdks/zulu21"
-    assert env["JAVA8_HOME"] == "/opt/jdks/zulu8"
-    assert env["JAVA17_HOME"] == "/opt/jdks/zulu17"
     assert env["JAVA21_HOME"] == "/opt/jdks/zulu21"
-    assert env["JAVA25_HOME"] == "/opt/jdks/zulu25"
+    assert env["JDK21_HOME"] == "/opt/jdks/zulu21"
+    assert "JAVA8_HOME" not in env
+    assert "JAVA17_HOME" not in env
+    assert "JAVA25_HOME" not in env
+    assert "JDK8_HOME" not in env
+    assert "JDK17_HOME" not in env
+    assert "JDK25_HOME" not in env
     assert env["MAVEN_HOME"] == "/opt/maven"
     assert env["MAVEN_CONFIG"] == "/root/.m2"
     assert env["MAVEN_SETTINGS_PATH"] == "/root/.m2/settings.xml"
@@ -227,6 +231,20 @@ def test_strip_managed_external_env_removes_old_secret_but_keeps_path(monkeypatc
     monkeypatch.setenv("PATH", "/usr/bin")
     stripped = strip_managed_external_env(os.environ)
     assert "JIRA_TOKEN" not in stripped
+    assert stripped["PATH"] == "/usr/bin"
+
+
+def test_strip_managed_external_env_removes_old_jdk_env_but_keeps_path(monkeypatch):
+    monkeypatch.setenv("JAVA8_HOME", "/bad/zulu8")
+    monkeypatch.setenv("JAVA17_HOME", "/bad/zulu17")
+    monkeypatch.setenv("JAVA25_HOME", "/bad/zulu25")
+    monkeypatch.setenv("JDK8_HOME", "/bad/zulu8")
+    monkeypatch.setenv("JDK17_HOME", "/bad/zulu17")
+    monkeypatch.setenv("JDK25_HOME", "/bad/zulu25")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    stripped = strip_managed_external_env(os.environ)
+    for key in ("JAVA8_HOME", "JAVA17_HOME", "JAVA25_HOME", "JDK8_HOME", "JDK17_HOME", "JDK25_HOME"):
+        assert key not in stripped
     assert stripped["PATH"] == "/usr/bin"
 
 

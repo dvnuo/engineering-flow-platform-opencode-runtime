@@ -40,16 +40,24 @@ def test_smoke_script_prepares_and_validates_java_maven_runtime():
         'docker exec "${NAME}" mvn -v',
         'docker exec "${NAME}" jdk list',
         'docker exec "${NAME}" jdk current',
-        'docker exec "${NAME}" mvn-jdk 8 -v',
-        'docker exec "${NAME}" mvn-jdk 17 -v',
+        'docker exec "${NAME}" jdk 21 java -version',
+        'docker exec "${NAME}" mvn-jdk -v',
         'docker exec "${NAME}" mvn-jdk 21 -v',
-        'docker exec "${NAME}" mvn-jdk 25 -v',
         'docker exec "${NAME}" test -f /root/.m2/settings.xml',
         'docker exec "${NAME}" test -f /root/.m2/toolchains.xml',
         'stat -c %a /root/.m2/settings.xml',
         'stat -c %a /root/.m2/toolchains.xml',
     ]:
         assert token in script
+    for token in [
+        "mvn-jdk 8 -v",
+        "mvn-jdk 17 -v",
+        "mvn-jdk 25 -v",
+        "jdk 8 java -version",
+        "jdk 17 java -version",
+        "jdk 25 java -version",
+    ]:
+        assert token not in script
 
 
 def test_smoke_script_does_not_reference_removed_external_tool_contract_knobs():
