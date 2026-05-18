@@ -4,6 +4,15 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+DEFAULT_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT = (
+    "Continue the same user request from the current OpenCode session state.\n"
+    "Do not repeat completed work.\n"
+    "First inspect current repository/session state if needed.\n"
+    "Continue from the last visible checkpoint.\n"
+    "If you are near a natural stopping point, produce a concise checkpoint summary with completed work, files changed, commands/tests run, blockers, and next step."
+)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -46,10 +55,19 @@ class Settings:
     chat_completion_timeout_seconds: float = 300.0
     chat_completion_poll_seconds: float = 1.0
     chat_submit_timeout_seconds: float = 300.0
+    chat_total_wall_timeout_seconds: float = 21600.0
+    chat_timeout_recovery_enabled: bool = True
+    chat_timeout_recovery_max_seconds: float = 900.0
+    chat_timeout_recovery_poll_seconds: float = 2.0
     chat_auto_continue_enabled: bool = True
     chat_auto_continue_max_turns: int = 3
-    chat_auto_continue_prompt: str = "Continue the previous task from exactly where you stopped. Do not repeat completed work. Keep using tools if needed. Stop only when you can provide a final user-visible answer, or clearly state the blocker. Do not answer with a progress-only sentence."
+    chat_auto_continue_checkpoint_enabled: bool = True
+    chat_auto_continue_checkpoint_prompt: str = DEFAULT_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT
+    chat_auto_continue_prompt: str = DEFAULT_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT
     chat_auto_continue_no_progress_stop: bool = True
+    chat_no_progress_timeout_seconds: float = 1800.0
+    event_replay_limit: int = 500
+    event_replay_ttl_seconds: float = 21600.0
     opencode_permission_mode: str = "workspace_full_access"
     opencode_allow_bash_all: bool = True
 
@@ -82,10 +100,19 @@ class Settings:
             chat_completion_timeout_seconds=float(os.getenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "300")),
             chat_completion_poll_seconds=max(0.1, float(os.getenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "1.0"))),
             chat_submit_timeout_seconds=max(300.0, float(os.getenv("EFP_CHAT_SUBMIT_TIMEOUT_SECONDS", os.getenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "300")))),
+            chat_total_wall_timeout_seconds=max(1.0, float(os.getenv("EFP_CHAT_TOTAL_WALL_TIMEOUT_SECONDS", "21600"))),
+            chat_timeout_recovery_enabled=_env_bool("EFP_CHAT_TIMEOUT_RECOVERY_ENABLED", True),
+            chat_timeout_recovery_max_seconds=max(0.0, float(os.getenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "900"))),
+            chat_timeout_recovery_poll_seconds=max(0.1, float(os.getenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "2.0"))),
             chat_auto_continue_enabled=_env_bool("EFP_CHAT_AUTO_CONTINUE_ENABLED", True),
             chat_auto_continue_max_turns=max(0, int(os.getenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "3"))),
-            chat_auto_continue_prompt=os.getenv("EFP_CHAT_AUTO_CONTINUE_PROMPT", "Continue the previous task from exactly where you stopped. Do not repeat completed work. Keep using tools if needed. Stop only when you can provide a final user-visible answer, or clearly state the blocker. Do not answer with a progress-only sentence."),
+            chat_auto_continue_checkpoint_enabled=_env_bool("EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_ENABLED", True),
+            chat_auto_continue_checkpoint_prompt=os.getenv("EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT", os.getenv("EFP_CHAT_AUTO_CONTINUE_PROMPT", DEFAULT_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT)),
+            chat_auto_continue_prompt=os.getenv("EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT", os.getenv("EFP_CHAT_AUTO_CONTINUE_PROMPT", DEFAULT_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT)),
             chat_auto_continue_no_progress_stop=_env_bool("EFP_CHAT_AUTO_CONTINUE_NO_PROGRESS_STOP", True),
+            chat_no_progress_timeout_seconds=max(1.0, float(os.getenv("EFP_CHAT_NO_PROGRESS_TIMEOUT_SECONDS", "1800"))),
+            event_replay_limit=max(0, int(os.getenv("EFP_EVENT_REPLAY_LIMIT", "500"))),
+            event_replay_ttl_seconds=max(1.0, float(os.getenv("EFP_EVENT_REPLAY_TTL_SECONDS", "21600"))),
             opencode_permission_mode=_normalize_opencode_permission_mode(os.getenv("EFP_OPENCODE_PERMISSION_MODE", "workspace_full_access")),
             opencode_allow_bash_all=_env_bool("EFP_OPENCODE_ALLOW_BASH_ALL", True),
         )
