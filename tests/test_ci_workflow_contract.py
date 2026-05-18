@@ -19,3 +19,23 @@ def test_docker_smoke_contracts():
     assert 'RUN_RUNTIME_CONTRACT_TESTS' in wf
     assert 'RUNTIME_CONTRACT_ENABLE_CHAT' not in wf
     assert 'RUNTIME_CONTRACT_ENABLE_TASKS' not in wf
+
+
+def test_docker_smoke_job_prepares_stub_build_context():
+    jobs = _workflow()['jobs']
+    job = jobs['docker-smoke']
+    assert job['runs-on'] == 'ubuntu-latest'
+    assert job['needs'] == 'unit-tests'
+    assert job['timeout-minutes'] in {25, 35}
+    wf = (Path(__file__).resolve().parents[1]/'.github/workflows/ci.yml').read_text()
+    for token in [
+        'runtime-tools/jira',
+        'runtime-tools/confluence',
+        'runtime-maven/settings.xml',
+        'jira schema issue.map-csv',
+        'jira schema issue.bulk-create',
+        'confluence schema anything',
+        'bash scripts/smoke.sh',
+    ]:
+        assert token in wf
+    assert 'engineering-flow-platform-tools' not in wf

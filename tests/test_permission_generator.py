@@ -27,8 +27,24 @@ def test_baseline_safety():
     pp = default_permission_baseline(permission_mode="profile_policy", allow_bash_all=False)
     assert pp["*"] == "ask"
     assert pp["edit"] == "ask" and pp["write"] == "ask"
+    assert pp["bash"]["*"] == "ask"
     assert pp["bash"]["git *"] == "allow"
     assert pp["bash"]["gh *"] == "allow"
+    for pattern in [
+        "mvn *",
+        "mvn-jdk *",
+        "jdk *",
+        "java *",
+        "jcmd *",
+        "jdeps *",
+        "jlink *",
+        "jpackage *",
+        "jarsigner *",
+        "jstack *",
+        "jmap *",
+        "jps *",
+    ]:
+        assert pp["bash"][pattern] == "allow"
 
 
 def test_denied_actions_can_deny_builtin_read_and_websearch():

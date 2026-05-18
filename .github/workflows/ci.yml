@@ -31,3 +31,66 @@ jobs:
           exit "${status}"
     env:
       RUN_RUNTIME_CONTRACT_TESTS: '1'
+  docker-smoke:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare smoke build context
+        run: |
+          set -euo pipefail
+          mkdir -p runtime-tools runtime-maven
+          cat > runtime-tools/jira <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          case "${1:-}" in
+            version)
+              echo '{"ok":true,"version":"stub"}'
+              ;;
+            commands)
+              echo '{"ok":true,"commands":[]}'
+              ;;
+            schema)
+              echo '{"ok":true,"schema":{"type":"object"}}'
+              ;;
+            *)
+              echo '{"ok":true,"stub":true}'
+              ;;
+          esac
+          SH
+          cat > runtime-tools/confluence <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          case "${1:-}" in
+            version)
+              echo '{"ok":true,"version":"stub"}'
+              ;;
+            commands)
+              echo '{"ok":true,"commands":[]}'
+              ;;
+            schema)
+              echo '{"ok":true,"schema":{"type":"object"}}'
+              ;;
+            *)
+              echo '{"ok":true,"stub":true}'
+              ;;
+          esac
+          SH
+          chmod 0755 runtime-tools/jira runtime-tools/confluence
+          runtime-tools/jira version --json >/dev/null
+          runtime-tools/jira commands --json >/dev/null
+          runtime-tools/jira schema issue.map-csv --json >/dev/null
+          runtime-tools/jira schema issue.bulk-create --json >/dev/null
+          runtime-tools/confluence version --json >/dev/null
+          runtime-tools/confluence commands --json >/dev/null
+          runtime-tools/confluence schema anything --json >/dev/null
+          cat > runtime-maven/settings.xml <<'XML'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
+          </settings>
+          XML
+      - name: Run Docker smoke
+        run: bash scripts/smoke.sh

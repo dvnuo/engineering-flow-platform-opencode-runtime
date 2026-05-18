@@ -27,6 +27,31 @@ def test_smoke_script_checks_atlassian_cli_schema_commands():
         assert token in script
 
 
+def test_smoke_script_prepares_and_validates_java_maven_runtime():
+    script = _script()
+    for token in [
+        "prepare_maven_settings()",
+        "runtime-maven",
+        "SMOKE_CREATED_MAVEN_SETTINGS=1",
+        'rm -f "${MAVEN_SETTINGS_PATH}"',
+        '--build-arg MAVEN_SETTINGS_DIR="${MAVEN_SETTINGS_DIR}"',
+        'docker exec "${NAME}" java -version',
+        'docker exec "${NAME}" javac -version',
+        'docker exec "${NAME}" mvn -v',
+        'docker exec "${NAME}" jdk list',
+        'docker exec "${NAME}" jdk current',
+        'docker exec "${NAME}" mvn-jdk 8 -v',
+        'docker exec "${NAME}" mvn-jdk 17 -v',
+        'docker exec "${NAME}" mvn-jdk 21 -v',
+        'docker exec "${NAME}" mvn-jdk 25 -v',
+        'docker exec "${NAME}" test -f /root/.m2/settings.xml',
+        'docker exec "${NAME}" test -f /root/.m2/toolchains.xml',
+        'stat -c %a /root/.m2/settings.xml',
+        'stat -c %a /root/.m2/toolchains.xml',
+    ]:
+        assert token in script
+
+
 def test_smoke_script_does_not_reference_removed_external_tool_contract_knobs():
     script = _script()
     forbidden = [

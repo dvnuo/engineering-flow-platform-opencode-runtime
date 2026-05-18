@@ -14,7 +14,10 @@ def test_build_opencode_config_defaults(tmp_path, monkeypatch):
     assert cfg["share"] == "disabled"
     assert cfg["server"] == {"hostname": "127.0.0.1", "port": 4096}
     assert "permission" in cfg and "efp-main" in cfg["agent"]
-    assert cfg["instructions"] == [str(settings.atlassian_instructions_path)]
+    assert cfg["instructions"] == [
+        str(settings.atlassian_instructions_path),
+        str(settings.java_maven_instructions_path),
+    ]
     assert "model" not in cfg["agent"]["efp-main"]
     assert "prompt" not in cfg["agent"]["efp-main"]
     assert cfg["agent"]["efp-main"]["permission"] == {}
@@ -136,3 +139,28 @@ def test_write_opencode_config_writes_generic_atlassian_instructions(tmp_path, m
     assert "confluence" in content
     assert "--json" in content
     assert "EFP" not in content
+
+
+def test_write_opencode_config_writes_java_maven_instructions(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "workspace/.opencode/opencode.json"))
+    settings = Settings.from_env()
+    cfg, _, _ = build_opencode_config(settings, None)
+
+    write_opencode_config(settings, cfg)
+
+    written = json.loads(settings.opencode_config_path.read_text(encoding="utf-8"))
+    assert str(settings.atlassian_instructions_path) in written["instructions"]
+    assert str(settings.java_maven_instructions_path) in written["instructions"]
+    content = settings.java_maven_instructions_path.read_text(encoding="utf-8")
+    assert "Azul Zulu JDK 8, 17, 21, and 25" in content
+    assert "Zulu JDK 8" in content
+    assert "Zulu JDK 17" in content
+    assert "Zulu JDK 21" in content
+    assert "Zulu JDK 25" in content
+    assert "Default JDK 21" in content
+    assert "mvn-jdk" in content
+    assert "jdeps" in content
+    assert "jlink" in content
+    assert "/workspace" in content

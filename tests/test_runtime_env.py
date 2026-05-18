@@ -95,6 +95,19 @@ def test_empty_config_does_not_emit_external_json(tmp_path, monkeypatch):
     assert "EFP_CONFLUENCE_INSTANCES_JSON" not in env
 
 
+def test_runtime_env_sets_java_maven_defaults(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    env = build_runtime_env_from_config(s, {}).env
+    assert env["JAVA_HOME"] == "/opt/jdks/zulu21"
+    assert env["JAVA8_HOME"] == "/opt/jdks/zulu8"
+    assert env["JAVA17_HOME"] == "/opt/jdks/zulu17"
+    assert env["JAVA21_HOME"] == "/opt/jdks/zulu21"
+    assert env["JAVA25_HOME"] == "/opt/jdks/zulu25"
+    assert env["MAVEN_HOME"] == "/opt/maven"
+    assert env["MAVEN_CONFIG"] == "/root/.m2"
+    assert env["MAVEN_SETTINGS_PATH"] == "/root/.m2/settings.xml"
+
+
 def test_redacted_github_placeholder_not_in_json_or_env(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     env = build_runtime_env_from_config(s, {"github": {"enabled": True, "api_token": "***REDACTED***", "base_url": "https://ghe"}}).env
@@ -221,4 +234,3 @@ def test_runtime_env_sets_disable_claude_prompt_default(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     env = build_runtime_env_from_config(s, {}).env
     assert env["OPENCODE_DISABLE_CLAUDE_CODE_PROMPT"] == "1"
-

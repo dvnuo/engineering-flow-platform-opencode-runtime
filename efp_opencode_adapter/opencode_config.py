@@ -22,6 +22,22 @@ Available Bash commands: `jira`, `confluence`.
 - Use Confluence commands similarly for documentation operations, inspecting schemas and target pages or spaces before writing.
 """
 
+JAVA_MAVEN_INSTRUCTIONS_CONTENT = """# Java and Maven
+
+Available JDKs: Azul Zulu JDK 8, 17, 21, and 25. This includes Zulu JDK 8, Zulu JDK 17, Zulu JDK 21, and Zulu JDK 25.
+
+- Default JDK 21 is active through `JAVA_HOME=/opt/jdks/zulu21`.
+- Direct JDK tools are available on PATH from the default JDK 21.
+- Maven settings.xml is available at `/root/.m2/settings.xml`.
+- Maven toolchains.xml is available at `/root/.m2/toolchains.xml`.
+- Prefer `mvn -B -ntp` for Maven commands.
+- Use `jdk` to run a command with a specific JDK, for example `jdk 17 javac -version`.
+- For another JDK, use `jdk <8|17|21|25> <command>`.
+- Use `mvn-jdk` to run Maven with a specific JDK, for example `mvn-jdk 8 -B -ntp test`.
+- Examples: `jdeps --version`, `jlink --version`, `jcmd -h`, `jdk 17 jdeps --version`, `jdk 25 jlink --version`.
+- Work under `/workspace` or `/workspace/repos/<repo>`.
+"""
+
 
 def normalize_opencode_provider_id(provider: str | None) -> str:
     raw = str(provider or "").strip().lower()
@@ -93,7 +109,10 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
         "share": "disabled",
         "server": {"hostname": "127.0.0.1", "port": 4096},
         "permission": permission,
-        "instructions": [str(settings.atlassian_instructions_path)],
+        "instructions": [
+            str(settings.atlassian_instructions_path),
+            str(settings.java_maven_instructions_path),
+        ],
         "agent": {
             "efp-main": {
                 "description": "Portal managed OpenCode primary agent",
@@ -118,6 +137,7 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
 
 def write_opencode_config(settings: Settings, config: dict) -> None:
     write_atlassian_instructions(settings)
+    write_java_maven_instructions(settings)
     path = settings.opencode_config_path
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = Path(f"{path}.tmp")
@@ -130,6 +150,15 @@ def write_atlassian_instructions(settings: Settings) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = Path(f"{path}.tmp")
     tmp_path.write_text(ATLASSIAN_INSTRUCTIONS_CONTENT, encoding="utf-8")
+    tmp_path.replace(path)
+    return path
+
+
+def write_java_maven_instructions(settings: Settings) -> Path:
+    path = settings.java_maven_instructions_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = Path(f"{path}.tmp")
+    tmp_path.write_text(JAVA_MAVEN_INSTRUCTIONS_CONTENT, encoding="utf-8")
     tmp_path.replace(path)
     return path
 
