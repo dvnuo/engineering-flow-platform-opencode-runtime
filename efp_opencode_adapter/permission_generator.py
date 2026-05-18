@@ -61,7 +61,35 @@ def profile_policy_permission_baseline() -> dict[str, Any]:
         "confluence space list*": "allow",
         "confluence *": "ask",
     }
+    java_maven_bash = {
+        "java": "allow",
+        "java *": "allow",
+        "javac": "allow",
+        "javac *": "allow",
+        "jar": "allow",
+        "jar *": "allow",
+        "javadoc": "allow",
+        "javadoc *": "allow",
+        "jshell": "allow",
+        "jshell *": "allow",
+        "keytool": "allow",
+        "keytool *": "allow",
+        "jdk": "allow",
+        "jdk *": "allow",
+        "mvn": "allow",
+        "mvn *": "allow",
+        "mvn-jdk": "allow",
+        "mvn-jdk *": "allow",
+        "./mvnw": "allow",
+        "./mvnw *": "allow",
+        "mvnw": "allow",
+        "mvnw *": "allow",
+        "bash ./mvnw *": "allow",
+        "sh ./mvnw *": "allow",
+        "chmod +x ./mvnw": "allow",
+    }
     bash = {"*": "ask", "git *": "allow", "gh *": "allow", "git status*": "allow", "git diff*": "allow", "git log*": "allow"}
+    bash.update(java_maven_bash)
     bash.update(atlassian_bash)
     return {
         "*": "ask", "read": "allow", "glob": "allow", "grep": "allow", "edit": "ask", "write": "ask",
