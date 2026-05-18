@@ -25,6 +25,10 @@ build context into `/root/.m2/settings.xml`, and Docker build generates
 `/root/.m2/toolchains.xml` for JDK 8, 17, 21, and 25. Both files are installed
 with mode `0600`.
 
+CI runs a Docker smoke job that builds the image, starts the runtime, verifies
+Java and Maven commands, and audits that both Maven settings and toolchains
+files keep mode `0600`.
+
 The expected build context path is `runtime-maven/settings.xml`. The Dockerfile
 also supports:
 
@@ -49,6 +53,16 @@ mvn-jdk 8 -B -ntp test
 mvn-jdk 17 -B -ntp verify
 mvn-jdk 21 -B -ntp package
 mvn-jdk 25 -v
+```
+
+Direct JDK tools from the default JDK 21 are also on `PATH`:
+
+```bash
+jdeps --version
+jlink --version
+jcmd -h
+jdk 17 jdeps --version
+jdk 25 jlink --version
 ```
 
 Prefer `mvn -B -ntp` for Maven commands in automated agent work.
