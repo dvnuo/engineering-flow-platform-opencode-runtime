@@ -5,7 +5,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from efp_opencode_adapter.server import create_app
-from efp_opencode_adapter.opencode_client import OpenCodeClientError
+from efp_opencode_adapter.opencode_client import OpenCodeClientError, OpenCodeTransportTimeout
 from efp_opencode_adapter.settings import Settings
 from efp_opencode_adapter.app_keys import ATTACHMENT_SERVICE_KEY, SESSION_STORE_KEY, REQUEST_BINDING_STORE_KEY, USER_DISPLAY_STORE_KEY
 from efp_opencode_adapter import chat_api
@@ -1673,14 +1673,15 @@ async def test_chat_auto_continue_empty_timeout_no_progress_stops(tmp_path, monk
     monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
     monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
     monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "3")
+    monkeypatch.setenv("EFP_CHAT_NO_PROGRESS_TIMEOUT_SECONDS", "0.001")
     client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=EmptyTimeoutNoProgressClient())))
     await client.start_server()
     payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-empty-timeout"})).json()
     assert payload["ok"] is False
     assert payload["completion_state"] == "incomplete"
-    assert "auto_continue_no_progress" in payload["incomplete_reason"]
+    assert "no_progress_timeout" in payload["incomplete_reason"]
     assert payload["continuation_count"] == 1
-    assert payload["_llm_debug"]["continuations"][-1]["stopped_reason"] == "auto_continue_no_progress"
+    assert any(e.get("type") == "continuation.no_progress" for e in payload["runtime_events"])
     await client.close()
 
 
@@ -1697,6 +1698,109 @@ class EmptyTimeoutThenFinalClient(FakeOpenCodeClient):
 
     async def list_messages(self, session_id):
         return []
+
+
+class SubmitTimeoutRecoveredClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.timed_out = False
+        self.pending_user_id = ""
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.timed_out = True
+        self.pending_user_id = message_id or "u-timeout"
+        raise OpenCodeTransportTimeout("POST", f"/session/{session_id}/message", 300, asyncio.TimeoutError())
+
+    async def get_session_status(self, timeout_seconds=30):
+        return {"sessions": {"ses-1": {"state": "idle"}}}
+
+    async def list_messages(self, session_id):
+        if self.timed_out:
+            return [
+                {"id": self.pending_user_id, "role": "user", "parts": [{"type": "text", "text": "q"}]},
+                {"id": "a-recovered", "role": "assistant", "parts": [{"type": "text", "text": "Recovered answer"}]},
+            ]
+        return []
+
+
+@pytest.mark.asyncio
+async def test_chat_submit_timeout_recovers_from_messages_without_502(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "0.05")
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.001")
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=SubmitTimeoutRecoveredClient())))
+    await client.start_server()
+    response = await client.post("/api/chat", json={"message": "q", "session_id": "s-recovered", "request_id": "r-recovered"})
+    payload = await response.json()
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert payload["completion_state"] == "completed"
+    assert payload["response"] == "Recovered answer"
+    types = [e.get("type") for e in payload["runtime_events"]]
+    assert "chat.timeout_recovery.started" in types
+    assert "chat.timeout_recovery.recovered" in types
+    assert "execution.failed" not in types
+    assert payload["_llm_debug"]["timeout_recovery"]["recovered"] is True
+    await client.close()
+
+
+class SubmitTimeoutExhaustedClient(FakeOpenCodeClient):
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        raise OpenCodeTransportTimeout("POST", f"/session/{session_id}/message", 300, asyncio.TimeoutError())
+
+    async def get_session_status(self, timeout_seconds=30):
+        return {"sessions": {"ses-1": {"state": "running"}}}
+
+    async def list_messages(self, session_id):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_chat_submit_timeout_recovery_exhausted_returns_incomplete(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.001")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_ENABLED", "false")
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=SubmitTimeoutExhaustedClient())))
+    await client.start_server()
+    response = await client.post("/api/chat", json={"message": "q", "session_id": "s-timeout-exhausted", "request_id": "r-timeout-exhausted"})
+    payload = await response.json()
+    assert response.status == 200
+    assert payload["ok"] is False
+    assert payload["completion_state"] == "incomplete"
+    assert payload["incomplete_reason"] == "submit_timeout_recovery_exhausted"
+    types = [e.get("type") for e in payload["runtime_events"]]
+    assert "chat.timeout_recovery.started" in types
+    assert "chat.timeout_recovery.poll" in types
+    assert "chat.timeout_recovery.exhausted" in types
+    assert "execution.failed" not in types
+    await client.close()
+
+
+class WallTimeoutClient(FakeOpenCodeClient):
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        return {"message": {"id": "a-progress", "role": "assistant", "parts": [{"type": "text", "text": "I am reading the repository..."}]}}
+
+    async def list_messages(self, session_id):
+        return [{"id": "a-progress", "role": "assistant", "parts": [{"type": "text", "text": "I am reading the repository..."}]}]
+
+
+@pytest.mark.asyncio
+async def test_chat_wall_timeout_returns_incomplete_not_502(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_TOTAL_WALL_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=WallTimeoutClient())))
+    await client.start_server()
+    response = await client.post("/api/chat", json={"message": "q", "session_id": "s-wall-timeout"})
+    payload = await response.json()
+    assert response.status == 200
+    assert payload["ok"] is False
+    assert payload["completion_state"] == "incomplete"
+    assert payload["incomplete_reason"] == "wall_timeout"
+    assert any(e.get("type") == "continuation.wall_timeout" for e in payload["runtime_events"])
+    await client.close()
 
 
 @pytest.mark.asyncio
@@ -1746,6 +1850,49 @@ class AlwaysIncompleteProgressClient(FakeOpenCodeClient):
 
     async def list_messages(self, session_id):
         return []
+
+
+class ContinuationPromptCaptureClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+        self.sent_texts: list[str] = []
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.calls += 1
+        self.sent_texts.append(parts[0].get("text", ""))
+        return {
+            "message": {
+                "info": {"id": f"a-progress-{self.calls}", "role": "assistant"},
+                "parts": [{"type": "text", "text": "I am reading the repository..."}],
+            }
+        }
+
+    async def list_messages(self, session_id):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_chat_auto_continue_uses_checkpoint_prompt_and_respects_configured_max_turns(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "5")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_NO_PROGRESS_STOP", "false")
+    fake = ContinuationPromptCaptureClient()
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=fake)))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "ORIGINAL USER PROMPT", "session_id": "s-cont-prompt"})).json()
+    assert payload["completion_state"] == "incomplete"
+    assert payload["continuation_count"] == 5
+    assert payload["incomplete_reason"] == "auto_continue_max_turns_reached"
+    assert fake.sent_texts[0] == "ORIGINAL USER PROMPT"
+    assert all(text != "ORIGINAL USER PROMPT" for text in fake.sent_texts[1:])
+    assert all("Continue the same user request" in text for text in fake.sent_texts[1:])
+    types = [e.get("type") for e in payload["runtime_events"]]
+    assert "continuation.prompt_sent" in types
+    assert "continuation.max_turns_reached" in types
+    await client.close()
 
 
 @pytest.mark.asyncio
