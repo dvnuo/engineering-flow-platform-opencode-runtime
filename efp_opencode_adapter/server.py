@@ -64,6 +64,7 @@ from .sessions_api import (
     clear_sessions_handler,
     delete_message_from_here_handler,
     delete_session_handler,
+    edit_message_async_handler,
     edit_message_handler,
     get_session_handler,
     list_sessions_handler,
@@ -382,6 +383,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_post("/api/clear", clear_sessions_handler)
     app.router.add_get("/api/sessions/{session_id}/chatlog", session_chatlog_handler)
     app.router.add_post("/api/sessions/{session_id}/rename", rename_session_handler)
+    app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/edit/async", edit_message_async_handler)
     app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/edit", edit_message_handler)
     app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/delete-from-here", delete_message_from_here_handler)
     app.router.add_get("/api/sessions/{session_id}", get_session_handler)
