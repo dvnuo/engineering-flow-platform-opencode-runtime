@@ -19,6 +19,27 @@ class OpenCodeClientError(Exception):
         super().__init__(message)
         self.status = status
         self.payload = payload
+        self.is_transport_timeout = False
+
+
+class OpenCodeTransportTimeout(OpenCodeClientError):
+    def __init__(self, method: str, path: str, timeout_seconds: float | int, exc: BaseException | None = None):
+        self.method = method
+        self.path = path
+        self.timeout_seconds = timeout_seconds
+        preview = _safe_error_preview(str(exc) or repr(exc)) if exc is not None else "request timed out"
+        super().__init__(
+            f"{method} {path} transport timeout after {timeout_seconds}s ({type(exc).__name__ if exc is not None else 'TimeoutError'}): {preview}",
+            status=None,
+            payload={
+                "exception_type": type(exc).__name__ if exc is not None else "TimeoutError",
+                "exception": preview,
+                "method": method,
+                "path": path,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+        self.is_transport_timeout = True
 
 
 def _format_transport_error(method: str, path: str, exc: BaseException) -> str:
@@ -160,7 +181,9 @@ class OpenCodeClient:
         if self._session is not None:
             try:
                 return await _run(self._session)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except asyncio.TimeoutError as exc:
+                raise OpenCodeTransportTimeout(method, path, timeout_seconds, exc) from exc
+            except aiohttp.ClientError as exc:
                 raise OpenCodeClientError(
                     _format_transport_error(method, path, exc),
                     status=None,
@@ -169,7 +192,9 @@ class OpenCodeClient:
         async with aiohttp.ClientSession() as session:
             try:
                 return await _run(session)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except asyncio.TimeoutError as exc:
+                raise OpenCodeTransportTimeout(method, path, timeout_seconds, exc) from exc
+            except aiohttp.ClientError as exc:
                 raise OpenCodeClientError(
                     _format_transport_error(method, path, exc),
                     status=None,
@@ -195,7 +220,9 @@ class OpenCodeClient:
         if self._session is not None:
             try:
                 return await _run(self._session)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except asyncio.TimeoutError as exc:
+                raise OpenCodeTransportTimeout(method, path, timeout_seconds, exc) from exc
+            except aiohttp.ClientError as exc:
                 raise OpenCodeClientError(
                     _format_transport_error(method, path, exc),
                     status=None,
@@ -204,7 +231,9 @@ class OpenCodeClient:
         async with aiohttp.ClientSession() as session:
             try:
                 return await _run(session)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except asyncio.TimeoutError as exc:
+                raise OpenCodeTransportTimeout(method, path, timeout_seconds, exc) from exc
+            except aiohttp.ClientError as exc:
                 raise OpenCodeClientError(
                     _format_transport_error(method, path, exc),
                     status=None,
@@ -372,6 +401,9 @@ class OpenCodeClient:
     async def get_session(self, session_id: str) -> dict:
         return await self._request_json("GET", f"/session/{session_id}")
 
+    async def get_session_status(self, timeout_seconds: int = 30) -> Any:
+        return await self._request_json("GET", "/session/status", timeout_seconds=timeout_seconds)
+
     async def patch_session(self, session_id: str, title: str) -> dict:
         data = await self._request_json("PATCH", f"/session/{session_id}", json={"title": title}, expected_statuses=(200, 204))
         return data if data is not None else {"id": session_id, "title": title}
@@ -386,6 +418,9 @@ class OpenCodeClient:
         if isinstance(data, dict):
             return data.get("messages") or data.get("data") or []
         return []
+
+    async def get_session_messages(self, session_id: str) -> list[dict]:
+        return await self.list_messages(session_id)
 
     async def get_message(self, session_id: str, message_id: str) -> dict:
         data = await self._request_json("GET", f"/session/{session_id}/message/{message_id}")

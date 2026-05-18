@@ -8,6 +8,7 @@ from aiohttp.test_utils import TestServer
 
 from efp_opencode_adapter.opencode_client import OpenCodeClient
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
+from efp_opencode_adapter.opencode_client import OpenCodeTransportTimeout
 from efp_opencode_adapter.opencode_client import _safe_error_preview
 from efp_opencode_adapter.settings import Settings
 
@@ -375,6 +376,29 @@ async def test_send_message_includes_message_id_no_reply_and_tools(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_session_status_and_messages_alias(monkeypatch):
+    app = web.Application()
+
+    async def status(_request: web.Request):
+        return web.json_response({"sessions": {"ses-1": {"state": "running"}}})
+
+    async def messages(_request: web.Request):
+        return web.json_response({"messages": [{"id": "a1", "role": "assistant"}]})
+
+    app.router.add_get("/session/status", status)
+    app.router.add_get("/session/ses-1/message", messages)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+
+    assert await client.get_session_status() == {"sessions": {"ses-1": {"state": "running"}}}
+    assert await client.get_session_messages("ses-1") == [{"id": "a1", "role": "assistant"}]
+
+    await server.close()
+
+
+@pytest.mark.asyncio
 async def test_fork_session_posts_message_id(monkeypatch):
     app = web.Application()
     captured = {}
@@ -433,45 +457,81 @@ async def test_request_json_wraps_transport_error_as_opencode_client_error():
 
 
 @pytest.mark.asyncio
-async def test_request_json_with_status_wraps_timeout_as_opencode_client_error():
+async def test_request_json_with_status_wraps_timeout_as_transport_timeout():
     class InjectedTimeoutSession:
         def request(self, *args, **kwargs):
             raise asyncio.TimeoutError()
 
     client = OpenCodeClient(Settings.from_env(), session=InjectedTimeoutSession())  # type: ignore[arg-type]
-    with pytest.raises(OpenCodeClientError) as exc:
+    with pytest.raises(OpenCodeTransportTimeout) as exc:
         await client.abort_session("ses-1")
     assert exc.value.status is None
+    assert exc.value.is_transport_timeout is True
+    assert exc.value.method == "POST"
+    assert exc.value.path == "/session/ses-1/abort"
+    assert exc.value.timeout_seconds == 30
 
 
 @pytest.mark.asyncio
-async def test_request_json_transport_error_includes_exception_type_for_timeout():
+async def test_request_json_timeout_raises_transport_timeout_with_request_context():
     class InjectedTimeoutSession:
         def request(self, *args, **kwargs):
             raise asyncio.TimeoutError()
 
     client = OpenCodeClient(Settings.from_env(), session=InjectedTimeoutSession())  # type: ignore[arg-type]
-    with pytest.raises(OpenCodeClientError) as exc:
+    with pytest.raises(OpenCodeTransportTimeout) as exc:
         await client.list_tool_ids()
+    assert type(exc.value) is OpenCodeTransportTimeout
+    assert exc.value.is_transport_timeout is True
+    assert exc.value.method == "GET"
+    assert exc.value.path == "/experimental/tool/ids"
+    assert exc.value.timeout_seconds == 30
+    assert exc.value.payload["method"] == "GET"
+    assert exc.value.payload["path"] == "/experimental/tool/ids"
     message = str(exc.value)
-    assert "transport error" in message
+    assert "transport timeout after 30s" in message
     assert "TimeoutError" in message
     assert "TimeoutError()" in message
 
 
 @pytest.mark.asyncio
-async def test_request_json_with_status_transport_error_includes_exception_type_for_timeout():
+async def test_request_json_with_status_timeout_raises_transport_timeout_with_request_context():
     class InjectedTimeoutSession:
         def request(self, *args, **kwargs):
             raise asyncio.TimeoutError()
 
     client = OpenCodeClient(Settings.from_env(), session=InjectedTimeoutSession())  # type: ignore[arg-type]
-    with pytest.raises(OpenCodeClientError) as exc:
+    with pytest.raises(OpenCodeTransportTimeout) as exc:
         await client.abort_session("ses-1")
+    assert type(exc.value) is OpenCodeTransportTimeout
+    assert exc.value.method == "POST"
+    assert exc.value.path == "/session/ses-1/abort"
+    assert exc.value.timeout_seconds == 30
     message = str(exc.value)
-    assert "transport error" in message
+    assert "transport timeout after 30s" in message
     assert "TimeoutError" in message
     assert "TimeoutError()" in message
+
+
+@pytest.mark.asyncio
+async def test_send_message_timeout_is_not_converted_to_plain_client_error():
+    class InjectedTimeoutSession:
+        def request(self, *args, **kwargs):
+            raise asyncio.TimeoutError()
+
+    client = OpenCodeClient(Settings.from_env(), session=InjectedTimeoutSession())  # type: ignore[arg-type]
+    with pytest.raises(OpenCodeTransportTimeout) as exc:
+        await client.send_message(
+            "ses-1",
+            parts=[{"type": "text", "text": "hi"}],
+            model=None,
+            agent=None,
+            system=None,
+        )
+    assert type(exc.value) is OpenCodeTransportTimeout
+    assert exc.value.method == "POST"
+    assert exc.value.path == "/session/ses-1/message"
+    assert exc.value.timeout_seconds == 300
 
 
 @pytest.mark.asyncio
