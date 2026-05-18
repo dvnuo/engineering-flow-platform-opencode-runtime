@@ -4,6 +4,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
+from efp_opencode_adapter.app_keys import EVENT_BUS_KEY
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -38,4 +39,55 @@ async def test_events_ws(tmp_path, monkeypatch):
     assert got["session_id"] == "portal-filter"
     await ws.close()
     await ws2.close()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_events_ws_replay_and_type_filter(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await app[EVENT_BUS_KEY].publish({"type": "tool.started", "session_id": "portal-replay", "request_id": "req-replay", "data": {"tool": "bash"}})
+    await app[EVENT_BUS_KEY].publish({"type": "provider.retry", "session_id": "portal-replay", "request_id": "req-replay", "data": {"attempt": 1}})
+    await app[EVENT_BUS_KEY].publish({"type": "tool.completed", "session_id": "portal-replay", "request_id": "req-replay", "data": {"tool": "bash"}})
+
+    ws = await client.ws_connect("/api/events?session_id=portal-replay&replay=1&types=tool.started,tool.completed")
+    assert (await ws.receive_json())["type"] == "connected"
+    first = await ws.receive_json(timeout=2)
+    second = await ws.receive_json(timeout=2)
+
+    assert [first["type"], second["type"]] == ["tool.started", "tool.completed"]
+    assert first["metadata"]["replayed"] is True
+    assert second["metadata"]["replayed"] is True
+
+    await app[EVENT_BUS_KEY].publish({"type": "provider.retry", "session_id": "portal-replay", "request_id": "req-replay"})
+    await app[EVENT_BUS_KEY].publish({"type": "tool.completed", "session_id": "portal-replay", "request_id": "req-replay", "data": {"tool": "bash"}})
+    live = await ws.receive_json(timeout=2)
+    assert live["type"] == "tool.completed"
+
+    await ws.close()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_events_ws_replay_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await app[EVENT_BUS_KEY].publish({"type": "one", "request_id": "req-limit"})
+    await app[EVENT_BUS_KEY].publish({"type": "two", "request_id": "req-limit"})
+    await app[EVENT_BUS_KEY].publish({"type": "three", "request_id": "req-limit"})
+
+    ws = await client.ws_connect("/api/events?request_id=req-limit&replay=1&replay_limit=2")
+    assert (await ws.receive_json())["type"] == "connected"
+    first = await ws.receive_json(timeout=2)
+    second = await ws.receive_json(timeout=2)
+
+    assert [first["type"], second["type"]] == ["two", "three"]
+
+    await ws.close()
     await client.close()
