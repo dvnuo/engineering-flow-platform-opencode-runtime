@@ -106,4 +106,6 @@ docker exec "${NAME}" mvn-jdk 21 -v
 docker exec "${NAME}" mvn-jdk 25 -v
 docker exec "${NAME}" test -f /root/.m2/settings.xml
 docker exec "${NAME}" test -f /root/.m2/toolchains.xml
+docker exec "${NAME}" bash -lc 'test "$(stat -c %a /root/.m2/settings.xml)" = "600"'
+docker exec "${NAME}" bash -lc 'test "$(stat -c %a /root/.m2/toolchains.xml)" = "600"'
 echo "smoke passed"
