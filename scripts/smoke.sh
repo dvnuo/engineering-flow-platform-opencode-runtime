@@ -10,6 +10,7 @@ SKILLS_DIR="${ASSET_ROOT}/skills"
 MAVEN_SETTINGS_DIR="${MAVEN_SETTINGS_DIR:-runtime-maven}"
 MAVEN_SETTINGS_PATH="${MAVEN_SETTINGS_DIR}/settings.xml"
 SMOKE_CREATED_MAVEN_SETTINGS=0
+VOLUME_LABEL_OPT=""
 RUN_RUNTIME_CONTRACT_TESTS="${RUN_RUNTIME_CONTRACT_TESTS:-0}"
 RUNTIME_CONTRACT_BASE_URL="${RUNTIME_CONTRACT_BASE_URL:-http://localhost:8000}"
 RUNTIME_CONTRACT_TIMEOUT_SECONDS="${RUNTIME_CONTRACT_TIMEOUT_SECONDS:-120}"
@@ -20,6 +21,24 @@ require_runtime_tool() {
     echo "Build or copy prebuilt custom tool binaries before running smoke." >&2
     echo "See docs/CUSTOM_TOOLS_IMAGE.md" >&2
     exit 1
+  fi
+}
+prepare_container_runtime() {
+  if docker --version 2>/dev/null | grep -qi podman; then
+    VOLUME_LABEL_OPT="Z"
+  fi
+}
+volume_spec() {
+  local host="$1"
+  local container="$2"
+  local options="${3:-}"
+  if [[ -n "${VOLUME_LABEL_OPT}" ]]; then
+    options="${options:+${options},}${VOLUME_LABEL_OPT}"
+  fi
+  if [[ -n "${options}" ]]; then
+    printf "%s:%s:%s" "${host}" "${container}" "${options}"
+  else
+    printf "%s:%s" "${host}" "${container}"
   fi
 }
 prepare_maven_settings() {
@@ -59,9 +78,10 @@ trap cleanup EXIT
 
 require_runtime_tool jira
 require_runtime_tool confluence
+prepare_container_runtime
 prepare_maven_settings
 docker build --build-arg MAVEN_SETTINGS_DIR="${MAVEN_SETTINGS_DIR}" -t efp-opencode-runtime:test .
-docker run -d --name "${NAME}" -p 8000:8000 -e OPENCODE_DATA_DIR=/root/.local/share/opencode -e EFP_ADAPTER_STATE_DIR=/root/.local/share/efp-compat -v "${WORKSPACE_DIR}:/workspace" -v "${ADAPTER_STATE_DIR}:/root/.local/share/efp-compat" -v "${OPENCODE_STATE_DIR}:/root/.local/share/opencode" -v "${SKILLS_DIR}:/app/skills:ro" efp-opencode-runtime:test >/dev/null
+docker run -d --name "${NAME}" -p 8000:8000 -e OPENCODE_DATA_DIR=/root/.local/share/opencode -e EFP_ADAPTER_STATE_DIR=/root/.local/share/efp-compat -v "$(volume_spec "${WORKSPACE_DIR}" /workspace)" -v "$(volume_spec "${ADAPTER_STATE_DIR}" /root/.local/share/efp-compat)" -v "$(volume_spec "${OPENCODE_STATE_DIR}" /root/.local/share/opencode)" -v "$(volume_spec "${SKILLS_DIR}" /app/skills ro)" efp-opencode-runtime:test >/dev/null
 for _ in $(seq 1 60); do curl -fsS http://localhost:8000/health >"${HEALTH_FILE}" && break || true; sleep 1; done
 jq -e '.state.healthy == true' "${HEALTH_FILE}" >/dev/null
 curl -fsS http://localhost:8000/api/skills | jq -e '.count >= 1' >/dev/null
