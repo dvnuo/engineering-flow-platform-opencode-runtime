@@ -420,6 +420,89 @@ async def list_sessions_handler(request: web.Request) -> web.Response:
     )
 
 
+_FAILED_CHATLOG_STATUSES = {"failed", "error"}
+_FAILED_EVENT_TYPES = {"edit.failed", "chat.failed", "execution.failed", "error"}
+
+
+def _event_type(event: Any) -> str:
+    if not isinstance(event, dict):
+        return ""
+    return str(event.get("event_type") or event.get("type") or "")
+
+
+def _latest_runtime_event(runtime_events: Any) -> dict[str, Any]:
+    if not isinstance(runtime_events, list):
+        return {}
+    for event in reversed(runtime_events):
+        if isinstance(event, dict):
+            return event
+    return {}
+
+
+def _event_error(event: dict[str, Any]) -> str:
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    value = data.get("error") if isinstance(data, dict) else ""
+    return safe_preview(str(value), 1000) if value else ""
+
+
+def _latest_entry_error(latest: dict[str, Any], latest_event: dict[str, Any]) -> str:
+    context_state = latest.get("context_state") if isinstance(latest.get("context_state"), dict) else {}
+    llm_debug = latest.get("llm_debug") if isinstance(latest.get("llm_debug"), dict) else {}
+    for value in (
+        _event_error(latest_event),
+        context_state.get("summary"),
+        llm_debug.get("error"),
+        latest.get("error"),
+        latest.get("response"),
+        "regeneration failed",
+    ):
+        if isinstance(value, str) and value.strip():
+            return safe_preview(value.strip(), 1000)
+    return "regeneration failed"
+
+
+def _latest_session_runtime_status_metadata(chatlog_store, sid: str) -> dict[str, Any]:
+    if not chatlog_store or not hasattr(chatlog_store, "latest_entry"):
+        return {}
+    try:
+        latest = chatlog_store.latest_entry(sid)
+    except Exception:
+        return {}
+    if not isinstance(latest, dict):
+        return {}
+
+    status = str(latest.get("status") or "")
+    request_id = str(latest.get("request_id") or "")
+    latest_event = _latest_runtime_event(latest.get("runtime_events"))
+    latest_event_type = _event_type(latest_event)
+    failed = status.lower() in _FAILED_CHATLOG_STATUSES or latest_event_type in _FAILED_EVENT_TYPES
+    timestamp = str(latest.get("finished_at") or latest.get("created_at") or "")
+
+    if not failed:
+        out: dict[str, Any] = {}
+        if status:
+            out["chatlog_status"] = safe_preview(status, 100)
+        if request_id:
+            out["request_id"] = safe_preview(request_id, 200)
+        if timestamp:
+            out["latest_chatlog_at"] = safe_preview(timestamp, 100)
+        return out
+
+    error = _latest_entry_error(latest, latest_event)
+    event_type = latest_event_type if latest_event_type in _FAILED_EVENT_TYPES else "chat.failed"
+    return {
+        "latest_event_type": safe_preview(event_type, 100),
+        "latest_event_state": "error",
+        "completion_state": "error",
+        "request_id": safe_preview(request_id, 200),
+        "incomplete_reason": error,
+        "error": error,
+        "runtime_events": [safe_preview(latest_event, 1000)] if latest_event else [],
+        "chatlog_status": "failed",
+        "latest_chatlog_at": safe_preview(timestamp, 100) if timestamp else "",
+    }
+
+
 async def get_session_handler(request: web.Request) -> web.Response:
     sid = request.match_info["session_id"]
     store = request.app[SESSION_STORE_KEY]
@@ -446,6 +529,7 @@ async def get_session_handler(request: web.Request) -> web.Response:
                 "engine": "opencode",
                 "opencode_session_id": record.opencode_session_id,
                 "partial_recovery": record.partial_recovery,
+                **_latest_session_runtime_status_metadata(request.app.get(CHATLOG_STORE_KEY), sid),
             },
         }
     )
