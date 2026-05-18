@@ -7,6 +7,9 @@ WORKSPACE_DIR="${ASSET_ROOT}/workspace"
 ADAPTER_STATE_DIR="${ASSET_ROOT}/adapter-state"
 OPENCODE_STATE_DIR="${ASSET_ROOT}/opencode-state"
 SKILLS_DIR="${ASSET_ROOT}/skills"
+MAVEN_SETTINGS_DIR="${MAVEN_SETTINGS_DIR:-runtime-maven}"
+MAVEN_SETTINGS_PATH="${MAVEN_SETTINGS_DIR}/settings.xml"
+SMOKE_CREATED_MAVEN_SETTINGS=0
 RUN_RUNTIME_CONTRACT_TESTS="${RUN_RUNTIME_CONTRACT_TESTS:-0}"
 RUNTIME_CONTRACT_BASE_URL="${RUNTIME_CONTRACT_BASE_URL:-http://localhost:8000}"
 RUNTIME_CONTRACT_TIMEOUT_SECONDS="${RUNTIME_CONTRACT_TIMEOUT_SECONDS:-120}"
@@ -19,6 +22,20 @@ require_runtime_tool() {
     exit 1
   fi
 }
+prepare_maven_settings() {
+  if [[ -f "${MAVEN_SETTINGS_PATH}" ]]; then
+    return
+  fi
+  mkdir -p "${MAVEN_SETTINGS_DIR}"
+  cat > "${MAVEN_SETTINGS_PATH}" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
+</settings>
+XML
+  SMOKE_CREATED_MAVEN_SETTINGS=1
+}
 mkdir -p "${WORKSPACE_DIR}" "${ADAPTER_STATE_DIR}" "${OPENCODE_STATE_DIR}" "${SKILLS_DIR}/smoke_skill"
 cat > "${SKILLS_DIR}/smoke_skill/skill.md" <<'SKILL'
 ---
@@ -30,12 +47,20 @@ task_tools: []
 ---
 Smoke skill.
 SKILL
-cleanup(){ rm -f "${HEALTH_FILE}"||true; rm -rf "${ASSET_ROOT}"||true; docker rm -f "${NAME}" >/dev/null 2>&1 || true; }
+cleanup(){
+  rm -f "${HEALTH_FILE}"||true
+  rm -rf "${ASSET_ROOT}"||true
+  if [[ "${SMOKE_CREATED_MAVEN_SETTINGS}" == "1" ]]; then
+    rm -f "${MAVEN_SETTINGS_PATH}"||true
+  fi
+  docker rm -f "${NAME}" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 require_runtime_tool jira
 require_runtime_tool confluence
-docker build -t efp-opencode-runtime:test .
+prepare_maven_settings
+docker build --build-arg MAVEN_SETTINGS_DIR="${MAVEN_SETTINGS_DIR}" -t efp-opencode-runtime:test .
 docker run -d --name "${NAME}" -p 8000:8000 -e OPENCODE_DATA_DIR=/root/.local/share/opencode -e EFP_ADAPTER_STATE_DIR=/root/.local/share/efp-compat -v "${WORKSPACE_DIR}:/workspace" -v "${ADAPTER_STATE_DIR}:/root/.local/share/efp-compat" -v "${OPENCODE_STATE_DIR}:/root/.local/share/opencode" -v "${SKILLS_DIR}:/app/skills:ro" efp-opencode-runtime:test >/dev/null
 for _ in $(seq 1 60); do curl -fsS http://localhost:8000/health >"${HEALTH_FILE}" && break || true; sleep 1; done
 jq -e '.state.healthy == true' "${HEALTH_FILE}" >/dev/null
@@ -46,4 +71,19 @@ if [[ "${RUN_RUNTIME_CONTRACT_TESTS}" == "1" ]]; then
 fi
 docker exec "${NAME}" bash -lc 'git --version && gh --version'
 docker exec "${NAME}" bash -lc 'jira version --json >/dev/null && confluence version --json >/dev/null && jira commands --json >/dev/null && jira schema issue.map-csv --json >/dev/null && jira schema issue.bulk-create --json >/dev/null'
+docker exec "${NAME}" java -version
+docker exec "${NAME}" javac -version
+docker exec "${NAME}" mvn -v
+docker exec "${NAME}" jdk list
+docker exec "${NAME}" jdk current
+docker exec "${NAME}" jdk 8 java -version
+docker exec "${NAME}" jdk 17 java -version
+docker exec "${NAME}" jdk 21 java -version
+docker exec "${NAME}" jdk 25 java -version
+docker exec "${NAME}" mvn-jdk 8 -v
+docker exec "${NAME}" mvn-jdk 17 -v
+docker exec "${NAME}" mvn-jdk 21 -v
+docker exec "${NAME}" mvn-jdk 25 -v
+docker exec "${NAME}" test -f /root/.m2/settings.xml
+docker exec "${NAME}" test -f /root/.m2/toolchains.xml
 echo "smoke passed"
