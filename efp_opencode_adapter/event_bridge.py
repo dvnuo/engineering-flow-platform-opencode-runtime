@@ -562,7 +562,11 @@ class OpenCodeEventBridge:
         if not event:
             return None
         if self.request_binding_store is not None and session_id:
-            binding = self.request_binding_store.resolve(opencode_session_id=session_id, message_id=message_id, task_id=str(event.get("task_id") or ""))
+            task_id = str(event.get("task_id") or "")
+            if (message_id or task_id) and hasattr(self.request_binding_store, "resolve_exact"):
+                binding = self.request_binding_store.resolve_exact(opencode_session_id=session_id, message_id=message_id, task_id=task_id)
+            else:
+                binding = self.request_binding_store.resolve(opencode_session_id=session_id, message_id=message_id, task_id=task_id)
             if binding is not None:
                 event["session_id"] = binding.portal_session_id
                 event["request_id"] = binding.request_id

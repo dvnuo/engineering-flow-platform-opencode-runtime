@@ -65,6 +65,7 @@ class Settings:
     chat_auto_continue_checkpoint_prompt: str = DEFAULT_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT
     chat_auto_continue_prompt: str = DEFAULT_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT
     chat_auto_continue_no_progress_stop: bool = True
+    chat_auto_continue_after_running_timeout: bool = False
     chat_no_progress_timeout_seconds: float = 1800.0
     event_replay_limit: int = 500
     event_replay_ttl_seconds: float = 21600.0
@@ -110,6 +111,7 @@ class Settings:
             chat_auto_continue_checkpoint_prompt=os.getenv("EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT", os.getenv("EFP_CHAT_AUTO_CONTINUE_PROMPT", DEFAULT_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT)),
             chat_auto_continue_prompt=os.getenv("EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT", os.getenv("EFP_CHAT_AUTO_CONTINUE_PROMPT", DEFAULT_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT)),
             chat_auto_continue_no_progress_stop=_env_bool("EFP_CHAT_AUTO_CONTINUE_NO_PROGRESS_STOP", True),
+            chat_auto_continue_after_running_timeout=_env_bool("EFP_CHAT_AUTO_CONTINUE_AFTER_RUNNING_TIMEOUT", False),
             chat_no_progress_timeout_seconds=max(0.001, float(os.getenv("EFP_CHAT_NO_PROGRESS_TIMEOUT_SECONDS", "1800"))),
             event_replay_limit=max(0, int(os.getenv("EFP_EVENT_REPLAY_LIMIT", "500"))),
             event_replay_ttl_seconds=max(1.0, float(os.getenv("EFP_EVENT_REPLAY_TTL_SECONDS", "21600"))),

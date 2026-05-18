@@ -1762,6 +1762,71 @@ async def test_chat_auto_continue_runtime_events_count_as_progress(tmp_path, mon
     await client.close()
 
 
+class ForeignProgressNoFinalClient(FakeOpenCodeClient):
+    def __init__(self, *, session_id: str, events: list[dict]):
+        super().__init__()
+        self.bus = None
+        self.portal_session_id = session_id
+        self.events = events
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        return {}
+
+    async def list_messages(self, session_id):
+        if self.bus is not None:
+            for event in self.events:
+                await self.bus.publish({**event, "session_id": self.portal_session_id})
+        return []
+
+
+@pytest.mark.asyncio
+async def test_progress_events_from_other_request_do_not_count_as_progress(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.005")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.001")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "2")
+    monkeypatch.setenv("EFP_CHAT_NO_PROGRESS_TIMEOUT_SECONDS", "0.01")
+    fake = ForeignProgressNoFinalClient(
+        session_id="s-foreign-progress",
+        events=[
+            {"type": "message.delta", "request_id": "req-other", "raw_type": "message.part.delta", "data": {"delta": "other"}},
+            {"type": "tool.completed", "request_id": "req-other", "raw_type": "tool.complete"},
+        ],
+    )
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    fake.bus = app[EVENT_BUS_KEY]
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-foreign-progress", "request_id": "req-current"})).json()
+    assert payload["completion_state"] == "incomplete"
+    assert "no_progress_timeout" in payload["incomplete_reason"]
+    assert payload["metadata"]["continuation"]["debug"][-1]["last_progress_event_type"] != "message.delta"
+    assert not any(e.get("request_id") == "req-other" for e in payload["runtime_events"])
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_level_bridge_events_without_request_do_not_prevent_no_progress_for_request_specific_work(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.005")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.001")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "2")
+    monkeypatch.setenv("EFP_CHAT_NO_PROGRESS_TIMEOUT_SECONDS", "0.01")
+    fake = ForeignProgressNoFinalClient(
+        session_id="s-bridge-status",
+        events=[{"type": "event_bridge.connected", "engine": "opencode", "data": {"state": "connected"}}],
+    )
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    fake.bus = app[EVENT_BUS_KEY]
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "q", "session_id": "s-bridge-status", "request_id": "req-bridge-status"})).json()
+    assert payload["completion_state"] == "incomplete"
+    assert "no_progress_timeout" in payload["incomplete_reason"]
+    assert payload["metadata"]["continuation"]["debug"][-1]["last_progress_event_type"] != "event_bridge.connected"
+    await client.close()
+
+
 class SubmitTimeoutRecoveredClient(FakeOpenCodeClient):
     def __init__(self):
         super().__init__()
@@ -1817,6 +1882,26 @@ class SubmitTimeoutExhaustedClient(FakeOpenCodeClient):
         return []
 
 
+class SubmitTimeoutStillRunningAutoContinueClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+        self.sent_texts: list[str] = []
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.calls += 1
+        self.sent_texts.append(parts[0].get("text", ""))
+        if self.calls == 1:
+            raise OpenCodeTransportTimeout("POST", f"/session/{session_id}/message", 300, asyncio.TimeoutError())
+        return {"message": {"info": {"id": "a-cont", "role": "assistant"}, "parts": [{"type": "text", "text": "Recovered by explicit continuation"}]}}
+
+    async def get_session_status(self, timeout_seconds=30):
+        return {"sessions": {"ses-1": {"state": "running"}}}
+
+    async def list_messages(self, session_id):
+        return []
+
+
 @pytest.mark.asyncio
 async def test_chat_submit_timeout_recovery_exhausted_returns_incomplete(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
@@ -1836,6 +1921,56 @@ async def test_chat_submit_timeout_recovery_exhausted_returns_incomplete(tmp_pat
     assert "chat.timeout_recovery.poll" in types
     assert "chat.timeout_recovery.exhausted" in types
     assert "execution.failed" not in types
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_timeout_recovery_exhausted_still_running_suppresses_auto_continue_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.001")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_ENABLED", "true")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "5")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_AFTER_RUNNING_TIMEOUT", "false")
+    fake = SubmitTimeoutStillRunningAutoContinueClient()
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=fake)))
+    await client.start_server()
+    response = await client.post("/api/chat", json={"message": "ORIGINAL USER PROMPT", "session_id": "s-running-timeout", "request_id": "r-running-timeout"})
+    payload = await response.json()
+    assert response.status == 200
+    assert payload["completion_state"] == "incomplete"
+    assert "submit_timeout_recovery_exhausted" in payload["incomplete_reason"]
+    assert payload["continuation_count"] == 0
+    assert fake.calls == 1
+    types = [e.get("type") for e in payload["runtime_events"]]
+    assert "chat.timeout_recovery.exhausted" in types
+    assert "continuation.suppressed" in types
+    assert payload["metadata"]["diagnostics"]["opencode_may_still_be_running"] is True
+    assert payload["metadata"]["auto_continue_suppressed_reason"] == "submit_timeout_recovery_exhausted_still_running"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_timeout_recovery_exhausted_still_running_can_continue_when_explicitly_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.001")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.005")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_ENABLED", "true")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "1")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_AFTER_RUNNING_TIMEOUT", "true")
+    fake = SubmitTimeoutStillRunningAutoContinueClient()
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=fake)))
+    await client.start_server()
+    payload = await (await client.post("/api/chat", json={"message": "ORIGINAL USER PROMPT", "session_id": "s-running-timeout-enabled", "request_id": "r-running-timeout-enabled"})).json()
+    assert payload["continuation_count"] >= 1
+    assert fake.calls >= 2
+    assert fake.sent_texts[0] == "ORIGINAL USER PROMPT"
+    assert fake.sent_texts[1] != "ORIGINAL USER PROMPT"
+    assert "Continue the same user request" in fake.sent_texts[1]
+    started = next(e for e in payload["runtime_events"] if e.get("type") == "continuation.started")
+    assert started["metadata"]["overlap_risk_acknowledged"] is True
+    assert started["metadata"]["trigger_reason"] == "submit_timeout_recovery_exhausted_still_running"
     await client.close()
 
 
