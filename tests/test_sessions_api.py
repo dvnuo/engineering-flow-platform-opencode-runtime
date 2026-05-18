@@ -1,3 +1,4 @@
+import asyncio
 from copy import deepcopy
 
 import pytest
@@ -6,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.sessions_api import _extract_opencode_session_id, _to_efp_messages
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
-from efp_opencode_adapter.app_keys import SESSION_STORE_KEY, PORTAL_METADATA_CLIENT_KEY, CHATLOG_STORE_KEY
+from efp_opencode_adapter.app_keys import SESSION_STORE_KEY, PORTAL_METADATA_CLIENT_KEY, CHATLOG_STORE_KEY, TASK_BACKGROUND_TASKS_KEY
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
 
@@ -190,6 +191,124 @@ async def test_edit_second_user_message_preserves_first_assistant(tmp_path, monk
     assert _role_content_pairs(session["messages"]) == _role_content_pairs(edit_body["messages"])
     assert "echo: hi" in contents
     assert "how are you" not in contents
+    await client.close()
+
+
+class _BlockingAsyncEditClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.edit_send_started = asyncio.Event()
+        self.edit_send_release = asyncio.Event()
+        self.send_message_calls: list[dict] = []
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        user_text = parts[0].get("text", "") if parts and isinstance(parts[0], dict) else ""
+        self.send_message_calls.append({"session_id": session_id, "text": user_text, "message_id": message_id})
+        if user_text == "how are u??":
+            self.edit_send_started.set()
+            await self.edit_send_release.wait()
+        user = {"id": message_id or f"u-{len(self.messages[session_id])+1}", "role": "user", "parts": [{"type": "text", "text": user_text}]}
+        assistant = {
+            "id": f"a-{len(self.messages[session_id])+2}",
+            "role": "assistant",
+            "parts": [{"type": "text", "text": f"echo: {user_text}"}],
+        }
+        self.messages[session_id].extend([user, assistant])
+        return {"message": assistant, "usage": {"input_tokens": 10, "output_tokens": 5, "cost": 0.001}, "model": model or "test-model", "provider": "test-provider"}
+
+
+@pytest.mark.asyncio
+async def test_async_edit_returns_before_llm_completion(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _BlockingAsyncEditClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await client.post("/api/chat", json={"message": "hi", "session_id": "s1"})
+    second = await (await client.post("/api/chat", json={"message": "how are you", "session_id": "s1"})).json()
+    res = await asyncio.wait_for(
+        client.post(f"/api/sessions/s1/messages/{second['user_message_id']}/edit/async", json={"content": "how are u??"}),
+        timeout=0.5,
+    )
+    body = await res.json()
+
+    assert res.status == 202
+    assert body["success"] is True
+    assert body["accepted"] is True
+    assert body["async"] is True
+    assert body["completion_state"] == "pending"
+    assert body["request_id"]
+    assert body["replacement_user_message_id"]
+    assert body["assistant_message_id"] == ""
+    assert body["response"] == ""
+    assert body["metadata"]["prefix_validated"] is True
+    assert body["metadata"]["edit_async"] is True
+    assert body["metadata"]["background_started"] is True
+    assert _role_content_pairs(body["messages"]) == [
+        ("user", "hi"),
+        ("assistant", "echo: hi"),
+    ]
+    assert ("assistant", "echo: how are u??") not in _role_content_pairs(body["messages"])
+
+    tasks = list(app[TASK_BACKGROUND_TASKS_KEY])
+    assert tasks
+    await asyncio.wait_for(fake.edit_send_started.wait(), timeout=1)
+    assert fake.send_message_calls[-1]["message_id"] == body["replacement_user_message_id"]
+    fake.edit_send_release.set()
+    await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
+
+    session = await (await client.get("/api/sessions/s1")).json()
+    assert _role_content_pairs(session["messages"]) == [
+        ("user", "hi"),
+        ("assistant", "echo: hi"),
+        ("user", "how are u??"),
+        ("assistant", "echo: how are u??"),
+    ]
+    await client.close()
+
+
+class _TrackingSendClient(FakeOpenCodeClient):
+    def __init__(self, fork_mode: str = "include_boundary"):
+        super().__init__(fork_mode=fork_mode)
+        self.send_message_calls = 0
+
+    async def send_message(self, *args, **kwargs):
+        self.send_message_calls += 1
+        return await super().send_message(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_async_edit_prefix_mismatch_does_not_start_background_task(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _TrackingSendClient(fork_mode="all_forks_bad_prefix")
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await client.post("/api/chat", json={"message": "hi", "session_id": "s1"})
+    second = await (await client.post("/api/chat", json={"message": "how are you", "session_id": "s1"})).json()
+    old_opencode_session_id = app[SESSION_STORE_KEY].get("s1").opencode_session_id
+    old_messages = deepcopy(fake.messages[old_opencode_session_id])
+    send_calls_before_edit = fake.send_message_calls
+
+    res = await client.post(f"/api/sessions/s1/messages/{second['user_message_id']}/edit/async", json={"content": "how are u??"})
+    body = await res.json()
+
+    assert res.status == 409
+    assert body["error"] == "opencode_fork_prefix_mismatch"
+    assert fake.send_message_calls == send_calls_before_edit
+    assert app[TASK_BACKGROUND_TASKS_KEY] == set()
+    assert app[SESSION_STORE_KEY].get("s1").opencode_session_id == old_opencode_session_id
+    assert fake.messages[old_opencode_session_id] == old_messages
+
+    session = await (await client.get("/api/sessions/s1")).json()
+    assert _role_content_pairs(session["messages"]) == [
+        ("user", "hi"),
+        ("assistant", "echo: hi"),
+        ("user", "how are you"),
+        ("assistant", "echo: how are you"),
+    ]
     await client.close()
 
 

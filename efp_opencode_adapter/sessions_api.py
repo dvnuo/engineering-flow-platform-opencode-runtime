@@ -1,15 +1,27 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
+from uuid import uuid4
 
 from aiohttp import web
-from .app_keys import CHATLOG_STORE_KEY, OPENCODE_CLIENT_KEY, PORTAL_METADATA_CLIENT_KEY, SESSION_STORE_KEY, USER_DISPLAY_STORE_KEY
+from .app_keys import (
+    CHATLOG_STORE_KEY,
+    EVENT_BUS_KEY,
+    OPENCODE_CLIENT_KEY,
+    PORTAL_METADATA_CLIENT_KEY,
+    SESSION_STORE_KEY,
+    TASK_BACKGROUND_TASKS_KEY,
+    USER_DISPLAY_STORE_KEY,
+)
 
+from .chat_api import handle_chat_payload_for_app
 from .opencode_client import OpenCodeClientError
+from .opencode_ids import new_opencode_message_id
 from .opencode_message_adapter import message_to_visible_text, to_efp_message
-from .thinking_events import safe_preview
+from .thinking_events import safe_preview, utc_now_iso
 
 
 logger = logging.getLogger(__name__)
@@ -599,18 +611,293 @@ async def delete_message_from_here_handler(request: web.Request) -> web.Response
     })
 
 
+def _edit_content_from_body(body: dict[str, Any]) -> str:
+    for key in ("content", "new_content", "message"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _request_id_from_edit_body(body: dict[str, Any]) -> str:
+    value = body.get("request_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return str(uuid4())
+
+
+def _optional_body_str(body: dict[str, Any], key: str) -> str | None:
+    value = body.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _merged_async_edit_metadata(body: dict[str, Any], *, message_id: str, replacement_user_message_id: str) -> dict[str, Any]:
+    metadata = body.get("metadata")
+    out = dict(metadata) if isinstance(metadata, dict) else {}
+    out.update(
+        {
+            "edit": True,
+            "edited_message_id": message_id,
+            "replacement_user_message_id": replacement_user_message_id,
+            "source": "message_edit_async",
+        }
+    )
+    return out
+
+
+def _chatlog_runtime_events(chatlog_store, session_id: str, request_id: str) -> list[dict[str, Any]]:
+    if not chatlog_store or not hasattr(chatlog_store, "get"):
+        return []
+    try:
+        chatlog = chatlog_store.get(session_id)
+    except Exception:
+        return []
+    if not isinstance(chatlog, dict):
+        return []
+    entries = chatlog.get("entries")
+    if not isinstance(entries, list):
+        return []
+    for entry in reversed(entries):
+        if isinstance(entry, dict) and entry.get("request_id") == request_id:
+            events = entry.get("runtime_events")
+            return list(events) if isinstance(events, list) else []
+    return []
+
+
+async def _record_async_edit_failure(
+    app: web.Application,
+    *,
+    session_id: str,
+    request_id: str,
+    opencode_session_id: str,
+    edited_message_id: str,
+    replacement_user_message_id: str,
+    error: str,
+) -> None:
+    event = {
+        "type": "edit.failed",
+        "event_type": "edit.failed",
+        "state": "error",
+        "ok": False,
+        "completion_state": "error",
+        "session_id": session_id,
+        "request_id": request_id,
+        "opencode_session_id": opencode_session_id,
+        "created_at": utc_now_iso(),
+        "data": {
+            "error": safe_preview(error, 1000),
+            "edited_message_id": edited_message_id,
+            "replacement_user_message_id": replacement_user_message_id,
+            "source": "message_edit_async",
+        },
+    }
+    bus = app.get(EVENT_BUS_KEY)
+    if bus is not None and hasattr(bus, "publish"):
+        try:
+            await bus.publish(event)
+        except Exception:
+            logger.warning("failed to publish async edit failure event", exc_info=True)
+
+    chatlog_store = app.get(CHATLOG_STORE_KEY)
+    if chatlog_store is not None and hasattr(chatlog_store, "fail_entry"):
+        runtime_events = [*_chatlog_runtime_events(chatlog_store, session_id, request_id), event]
+        try:
+            chatlog_store.fail_entry(
+                session_id,
+                request_id=request_id,
+                error=error,
+                runtime_events=runtime_events,
+                context_state={
+                    "objective": "Async edit resend",
+                    "summary": safe_preview(error, 300),
+                    "current_state": "error",
+                    "next_step": "Retry edit after resolving the runtime error",
+                },
+                llm_debug={
+                    "engine": "opencode",
+                    "opencode_session_id": opencode_session_id,
+                    "edited_message_id": edited_message_id,
+                    "replacement_user_message_id": replacement_user_message_id,
+                    "source": "message_edit_async",
+                },
+            )
+        except Exception:
+            logger.warning("failed to record async edit failure in chatlog", exc_info=True)
+
+    portal_metadata = app.get(PORTAL_METADATA_CLIENT_KEY)
+    if portal_metadata is not None and hasattr(portal_metadata, "publish_session_metadata"):
+        try:
+            await portal_metadata.publish_session_metadata(
+                session_id=session_id,
+                latest_event_type="edit.failed",
+                latest_event_state="error",
+                request_id=request_id,
+                summary=safe_preview(error, 300),
+                runtime_events=[event],
+                metadata={
+                    "engine": "opencode",
+                    "opencode_session_id": opencode_session_id,
+                    "edited_message_id": edited_message_id,
+                    "replacement_user_message_id": replacement_user_message_id,
+                    "source": "message_edit_async",
+                },
+            )
+        except Exception:
+            logger.warning("failed to publish async edit failure metadata", exc_info=True)
+
+
+async def _run_async_edit_resend(
+    app: web.Application,
+    *,
+    payload: dict[str, Any],
+    session_id: str,
+    request_id: str,
+    opencode_session_id: str,
+    edited_message_id: str,
+    replacement_user_message_id: str,
+) -> None:
+    try:
+        await handle_chat_payload_for_app(app, payload)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        error = getattr(exc, "text", None) or str(exc) or exc.__class__.__name__
+        logger.exception(
+            "Async edit background resend failed",
+            extra={"session_id": session_id, "request_id": request_id, "edited_message_id": edited_message_id},
+        )
+        await _record_async_edit_failure(
+            app,
+            session_id=session_id,
+            request_id=request_id,
+            opencode_session_id=opencode_session_id,
+            edited_message_id=edited_message_id,
+            replacement_user_message_id=replacement_user_message_id,
+            error=error,
+        )
+
+
+def _track_background_task(app: web.Application, task: asyncio.Task) -> None:
+    task_set = app.get(TASK_BACKGROUND_TASKS_KEY)
+    if isinstance(task_set, set):
+        task_set.add(task)
+        task.add_done_callback(task_set.discard)
+
+
+async def _edit_message_async_from_body(request: web.Request, body: dict[str, Any]) -> web.Response:
+    sid = request.match_info["session_id"]
+    mid = request.match_info["message_id"]
+    content = _edit_content_from_body(body)
+    if not content:
+        raise _json_bad_request("content_required")
+
+    store = request.app[SESSION_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
+    record = store.get(sid)
+    if not record or record.deleted:
+        raise _json_not_found("session_not_found")
+    try:
+        old_messages = await client.list_messages(record.opencode_session_id)
+    except OpenCodeClientError as exc:
+        if exc.status == 404:
+            raise _json_not_found("opencode_session_not_found", detail=_opencode_detail(exc))
+        raise _json_bad_gateway("opencode_edit_failed", detail=_opencode_detail(exc))
+    except Exception as exc:
+        raise _json_bad_gateway("opencode_edit_failed", detail=_unexpected_upstream_detail(exc))
+
+    idx = _find_message_index(old_messages, mid)
+    if idx < 0:
+        raise _json_not_found("message_not_found")
+    if _message_role(old_messages[idx]) != "user":
+        raise _json_bad_request("only_user_message_edit_supported")
+
+    updated_record, new_messages, metadata = await _delete_from_here(
+        store=store,
+        client=client,
+        portal_session_id=sid,
+        message_id=mid,
+        allow_revert_fallback=bool(body.get("allow_revert_fallback", False)),
+    )
+    request_id = _request_id_from_edit_body(body)
+    replacement_user_message_id = new_opencode_message_id()
+    payload: dict[str, Any] = {
+        "message": content,
+        "session_id": sid,
+        "request_id": request_id,
+        "message_id": replacement_user_message_id,
+        "metadata": _merged_async_edit_metadata(
+            body,
+            message_id=mid,
+            replacement_user_message_id=replacement_user_message_id,
+        ),
+    }
+    model = _optional_body_str(body, "model")
+    agent = _optional_body_str(body, "agent")
+    system = _optional_body_str(body, "system")
+    if model:
+        payload["model_override"] = model
+    if agent:
+        payload["agent"] = agent
+    if system:
+        payload["system"] = system
+
+    task: asyncio.Task | None = None
+    try:
+        task = asyncio.create_task(
+            _run_async_edit_resend(
+                request.app,
+                payload=payload,
+                session_id=sid,
+                request_id=request_id,
+                opencode_session_id=updated_record.opencode_session_id,
+                edited_message_id=mid,
+                replacement_user_message_id=replacement_user_message_id,
+            )
+        )
+        _track_background_task(request.app, task)
+    except Exception as exc:
+        if task is not None:
+            task.cancel()
+        raise _json_bad_gateway("edit_async_background_start_failed", detail=_unexpected_upstream_detail(exc), metadata=metadata)
+
+    return web.json_response(
+        {
+            "success": True,
+            "accepted": True,
+            "async": True,
+            "completion_state": "pending",
+            "session_id": sid,
+            "message_id": mid,
+            "replacement_user_message_id": replacement_user_message_id,
+            "assistant_message_id": "",
+            "request_id": request_id,
+            "response": "",
+            "messages": _to_efp_messages(
+                new_messages,
+                display_store=request.app.get(USER_DISPLAY_STORE_KEY),
+                portal_session_id=sid,
+                opencode_session_id=updated_record.opencode_session_id,
+            ),
+            "metadata": {**metadata, "edit_async": True, "background_started": True},
+        },
+        status=202,
+    )
+
+
+async def edit_message_async_handler(request: web.Request) -> web.Response:
+    body = await _read_json_object(request)
+    return await _edit_message_async_from_body(request, body)
+
+
 async def edit_message_handler(request: web.Request) -> web.Response:
     sid = request.match_info["session_id"]
     mid = request.match_info["message_id"]
     body = await _read_json_object(request)
-    content = ""
-    for key in ("content", "new_content", "message"):
-        value = body.get(key)
-        if isinstance(value, str) and value.strip():
-            content = value.strip()
-            break
+    if body.get("async") is True:
+        return await _edit_message_async_from_body(request, body)
+    content = _edit_content_from_body(body)
     if not content:
-        raise web.HTTPBadRequest(text=json.dumps({"error": "content_required"}), content_type="application/json")
+        raise _json_bad_request("content_required")
     store = request.app[SESSION_STORE_KEY]
     client = request.app[OPENCODE_CLIENT_KEY]
     record = store.get(sid)

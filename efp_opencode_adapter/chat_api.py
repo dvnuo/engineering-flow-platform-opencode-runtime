@@ -392,7 +392,7 @@ async def _ensure_record_for_chat(*, client, store, portal_session_id: str, titl
     return recovered, True
 
 
-async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> dict[str, Any]:
+async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, Any]) -> dict[str, Any]:
     message = payload.get("message")
     if not isinstance(message, str) or not message.strip():
         raise _bad_request("message_required")
@@ -403,22 +403,22 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
     request_id = _request_id_from_payload(payload)
     title = _normalize_title(_optional_str(metadata.get("title")) or message[:60])
     model = _model_from_chat_payload(payload, metadata, runtime_profile)
-    agent = _optional_str(metadata.get("agent"))
-    system = _optional_str(metadata.get("system"))
+    agent = _optional_str(payload.get("agent")) or _optional_str(metadata.get("agent"))
+    system = _optional_str(payload.get("system")) or _optional_str(metadata.get("system"))
     if system:
         system = f"{system}{FINAL_RESPONSE_CONTRACT_SUFFIX}"
     else:
         system = FINAL_RESPONSE_CONTRACT_SUFFIX.strip()
     attachments = payload.get("attachments")
 
-    store = request.app[SESSION_STORE_KEY]
-    bus = request.app[EVENT_BUS_KEY]
-    client = request.app[OPENCODE_CLIENT_KEY]
-    chatlog_store = request.app[CHATLOG_STORE_KEY]
-    usage_tracker = request.app[USAGE_TRACKER_KEY]
-    portal_metadata_client = request.app[PORTAL_METADATA_CLIENT_KEY]
-    settings = request.app[SETTINGS_KEY]
-    binding_store = request.app.get(REQUEST_BINDING_STORE_KEY)
+    store = app[SESSION_STORE_KEY]
+    bus = app[EVENT_BUS_KEY]
+    client = app[OPENCODE_CLIENT_KEY]
+    chatlog_store = app[CHATLOG_STORE_KEY]
+    usage_tracker = app[USAGE_TRACKER_KEY]
+    portal_metadata_client = app[PORTAL_METADATA_CLIENT_KEY]
+    settings = app[SETTINGS_KEY]
+    binding_store = app.get(REQUEST_BINDING_STORE_KEY)
 
     runtime_events: list[dict[str, Any]] = []
     context_state = {"objective": message[:300], "summary": "OpenCode request accepted", "current_state": "running", "next_step": "Waiting for OpenCode assistant response", "constraints": [], "decisions": [], "open_loops": [], "budget": {"usage_percent": 0}}
@@ -462,7 +462,7 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
             before_snapshot_unreliable = True
         parts = [{"type": "text", "text": message}]
         attachment_debug = []
-        attachment_service = request.app.get(ATTACHMENT_SERVICE_KEY)
+        attachment_service = app.get(ATTACHMENT_SERVICE_KEY)
         if attachments:
             try:
                 attachment_parts, attachment_debug = build_opencode_attachment_parts(
@@ -480,14 +480,14 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
 
         invocation = parse_slash_invocation(message)
         skill_debug = None
-        requested_message_id = payload.get("message_id")
+        requested_message_id = payload.get("message_id") or payload.get("opencode_message_id")
         if is_opencode_message_id(requested_message_id):
             initial_user_message_id = str(requested_message_id)
         else:
             initial_user_message_id = new_opencode_message_id()
         if binding_store is not None:
             binding_store.bind_message(record.opencode_session_id, initial_user_message_id, portal_session_id, request_id, kind="chat")
-        display_store = request.app.get(USER_DISPLAY_STORE_KEY)
+        display_store = app.get(USER_DISPLAY_STORE_KEY)
         if display_store is not None:
             try:
                 slash_metadata = None
@@ -881,6 +881,10 @@ async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> 
     if binding_store is not None:
         binding_store.complete(request_id)
     return out
+
+
+async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> dict[str, Any]:
+    return await handle_chat_payload_for_app(request.app, payload)
 
 
 async def chat_handler(request: web.Request) -> web.Response:
