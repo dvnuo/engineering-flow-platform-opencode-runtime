@@ -29,6 +29,10 @@ def test_baseline_safety():
     assert pp["edit"] == "ask" and pp["write"] == "ask"
     assert pp["bash"]["git *"] == "allow"
     assert pp["bash"]["gh *"] == "allow"
+    assert pp["bash"]["mvn *"] == "allow"
+    assert pp["bash"]["mvn-jdk *"] == "allow"
+    assert pp["bash"]["jdk *"] == "allow"
+    assert pp["bash"]["java *"] == "allow"
 
 
 def test_denied_actions_can_deny_builtin_read_and_websearch():

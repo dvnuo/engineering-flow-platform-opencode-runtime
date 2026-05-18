@@ -43,6 +43,23 @@ def test_dockerfile_installs_node_22_from_ubuntu_base():
     assert 'node --version | grep -E "^v${NODE_MAJOR}\\\\."' in text
 
 
+def test_dockerfile_installs_java_maven_runtime_tools():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "Dockerfile").read_text(encoding="utf-8")
+    for token in [
+        "zulu8-jdk",
+        "zulu17-jdk",
+        "zulu21-jdk",
+        "zulu25-jdk",
+        "ARG MAVEN_VERSION=3.9.16",
+        "COPY ${MAVEN_SETTINGS_DIR}/settings.xml",
+        "cat > /usr/local/bin/jdk",
+        "cat > /usr/local/bin/mvn-jdk",
+        "ENV JAVA_HOME=/opt/jdks/zulu21",
+    ]:
+        assert token in text
+
+
 def test_dockerfile_installs_only_opencode_runtime_package():
     root = Path(__file__).resolve().parents[1]
     text = (root / "Dockerfile").read_text(encoding="utf-8")
