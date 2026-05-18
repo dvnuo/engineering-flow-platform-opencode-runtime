@@ -46,6 +46,8 @@ def test_smoke_script_prepares_and_validates_java_maven_runtime():
         'docker exec "${NAME}" mvn-jdk 25 -v',
         'docker exec "${NAME}" test -f /root/.m2/settings.xml',
         'docker exec "${NAME}" test -f /root/.m2/toolchains.xml',
+        'stat -c %a /root/.m2/settings.xml',
+        'stat -c %a /root/.m2/toolchains.xml',
     ]:
         assert token in script
 
