@@ -6,7 +6,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from aiohttp import web
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
-from efp_opencode_adapter.opencode_client import OpenCodeClientError
+from efp_opencode_adapter.opencode_client import OpenCodeClientError, OpenCodeTransportTimeout
 from efp_opencode_adapter.chat_api import SSEClientDisconnected, _safe_write_eof, _write_sse
 from test_t06_helpers import FakeOpenCodeClient
 
@@ -18,6 +18,44 @@ class SlowFake(FakeOpenCodeClient):
         if self.fail: raise OpenCodeClientError('boom')
         return {"messages":[{"role":"assistant","content":"ok"}]}
 
+
+class StreamSubmitTimeoutRecoveredFake(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.timed_out = False
+        self.user_message_id = ""
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.timed_out = True
+        self.user_message_id = message_id or "u-timeout"
+        raise OpenCodeTransportTimeout("POST", f"/session/{session_id}/message", 300, asyncio.TimeoutError())
+
+    async def get_session_status(self, timeout_seconds=30):
+        return {"sessions": {"ses-1": {"state": "idle"}}}
+
+    async def list_messages(self, session_id):
+        if self.timed_out:
+            return [
+                {"id": self.user_message_id, "role": "user", "parts": [{"type": "text", "text": "m"}]},
+                {"id": "a-recovered", "role": "assistant", "parts": [{"type": "text", "text": "stream recovered"}]},
+            ]
+        return []
+
+
+def _sse_events(body: str) -> list[tuple[str, dict]]:
+    events = []
+    for chunk in body.strip().split("\n\n"):
+        event_name = ""
+        data = ""
+        for line in chunk.splitlines():
+            if line.startswith("event: "):
+                event_name = line.removeprefix("event: ")
+            elif line.startswith("data: "):
+                data = line.removeprefix("data: ")
+        if event_name and data:
+            events.append((event_name, json.loads(data)))
+    return events
+
 @pytest.mark.asyncio
 async def test_chat_stream_forwards_runtime_event_before_final(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
@@ -28,6 +66,58 @@ async def test_chat_stream_forwards_runtime_event_before_final(tmp_path, monkeyp
     fake.release.set(); resp=await t; body=await resp.text()
     assert body.index('tool.started') < body.index('event: final')
     await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_started_heartbeat_runtime_event_and_final(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = SlowFake()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    try:
+        task = asyncio.create_task(c.post("/api/chat/stream", json={"message": "m", "session_id": "portal-stream-start", "request_id": "req-stream-start"}))
+        await fake.entered.wait()
+        await app[EVENT_BUS_KEY].publish({"type": "tool.started", "session_id": "portal-stream-start", "request_id": "req-stream-start", "tool": "efp_test_tool", "engine": "opencode"})
+        fake.release.set()
+        resp = await task
+        body = await resp.text()
+        events = _sse_events(body)
+        names = [name for name, _payload in events]
+        assert names[:3] == ["chat.started", "heartbeat", "runtime_event"]
+        started_payload = events[0][1]
+        assert started_payload["session_id"] == "portal-stream-start"
+        assert started_payload["request_id"] == "req-stream-start"
+        assert started_payload["chatlog_id"] == "req-stream-start"
+        heartbeat_payload = events[1][1]
+        assert heartbeat_payload["completion_state"] == "running"
+        assert "elapsed_seconds" in heartbeat_payload
+        assert "last_event_at" in heartbeat_payload
+        assert "tool.started" in body
+        final_payload = next(payload for name, payload in events if name == "final")
+        assert final_payload["completion_state"]
+    finally:
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_timeout_recovery_before_final(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "0.05")
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.001")
+    c = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=StreamSubmitTimeoutRecoveredFake())))
+    await c.start_server()
+    try:
+        resp = await c.post("/api/chat/stream", json={"message": "m", "session_id": "portal-stream-timeout", "request_id": "req-stream-timeout"})
+        body = await resp.text()
+        assert "chat.timeout_recovery.started" in body
+        assert body.index("chat.timeout_recovery.started") < body.index("event: final")
+        events = _sse_events(body)
+        final_payload = next(payload for name, payload in events if name == "final")
+        assert final_payload["completion_state"] == "completed"
+        assert final_payload["response"] == "stream recovered"
+    finally:
+        await c.close()
 
 @pytest.mark.asyncio
 async def test_chat_stream_sends_delta_event_for_assistant_delta(tmp_path, monkeypatch):

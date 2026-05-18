@@ -1298,7 +1298,7 @@ async def chat_handler(request: web.Request) -> web.Response:
 
 
 STREAM_HEARTBEAT_SECONDS = 15.0
-BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.delta", "llm_thinking", "opencode.reasoning", "provider.retry", "provider.status", "execution.started", "execution.completed", "execution.failed", "complete", "final", "error", "skill.detected", "skill.blocked", "skill.command.executed", "skill.command.failed", "skill.prompt_applied", "skill.completed", "skill.repository_checkout.completed", "skill.repository_checkout.failed"}
+BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.delta", "llm_thinking", "opencode.reasoning", "provider.retry", "provider.status", "execution.started", "execution.completed", "execution.failed", "complete", "final", "error", "event_bridge.connected", "event_bridge.disconnected", "event_bridge.reconnected", "skill.detected", "skill.blocked", "skill.command.executed", "skill.command.failed", "skill.prompt_applied", "skill.completed", "skill.repository_checkout.completed", "skill.repository_checkout.failed"}
 REQUEST_SCOPED_STREAM_EVENT_TYPES = {
     "message.delta",
     "llm_thinking",
@@ -1307,11 +1307,20 @@ REQUEST_SCOPED_STREAM_EVENT_TYPES = {
     "provider.retry",
     "provider.status",
     "continuation.started",
+    "continuation.prompt_sent",
     "continuation.completed",
     "continuation.failed",
+    "continuation.max_turns_reached",
+    "continuation.wall_timeout",
+    "continuation.no_progress",
+    "chat.timeout_recovery.started",
+    "chat.timeout_recovery.poll",
+    "chat.timeout_recovery.recovered",
+    "chat.timeout_recovery.exhausted",
     "chat.incomplete",
     "chat.blocked",
     "chat.empty_final",
+    "chat.failed",
 }
 
 
@@ -1567,6 +1576,18 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     stream_trace = build_trace_context(settings, request_id=req_id, session_id=session_id)
     client_disconnected = False
     sent_real_model_delta = False
+    stream_started_at = time.time()
+    last_event_at: str | float | None = None
+
+    def _heartbeat_payload() -> dict[str, Any]:
+        return {
+            "ok": True,
+            "elapsed_seconds": max(0.0, round(time.time() - stream_started_at, 3)),
+            "last_event_at": last_event_at,
+            "completion_state": "running",
+            "session_id": session_id,
+            "request_id": req_id,
+        }
 
     async def _forward(event: dict[str, Any]) -> None:
         if not _is_stream_relevant_event(event, session_id=session_id, request_id=req_id):
@@ -1575,6 +1596,8 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         if key in seen:
             return
         seen.add(key)
+        nonlocal last_event_at
+        last_event_at = event.get("created_at") or event.get("ts") or time.time()
         await _write_sse(resp, "runtime_event", event)
         nonlocal sent_real_model_delta
         if event.get("type") in {"assistant_delta", "message.delta"}:
@@ -1601,7 +1624,11 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     await _write_sse(resp, "delta", _stream_delta_payload(event, delta, session_id, req_id))
 
     try:
-        await _write_sse(resp, "runtime_event", add_trace_context({"type": "stream.started", "engine": "opencode", "session_id": session_id, "request_id": req_id, "created_at": utc_now_iso()}, stream_trace))
+        stream_started_event = add_trace_context({"type": "stream.started", "engine": "opencode", "session_id": session_id, "request_id": req_id, "chatlog_id": req_id, "created_at": utc_now_iso()}, stream_trace)
+        last_event_at = stream_started_event.get("created_at")
+        await _write_sse(resp, "chat.started", {"session_id": session_id, "request_id": req_id, "chatlog_id": req_id, "completion_state": "running"})
+        await _write_sse(resp, "heartbeat", _heartbeat_payload())
+        await _write_sse(resp, "runtime_event", stream_started_event)
         while not run_task.done():
             kind, event = await _wait_for_event_or_completion(sub.queue, run_task, STREAM_HEARTBEAT_SECONDS)
             if kind == "event" and event is not None:
@@ -1609,7 +1636,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 continue
             if kind == "completed":
                 break
-            await _write_sse(resp, "heartbeat", {"ok": True, "ts": time.time()})
+            await _write_sse(resp, "heartbeat", _heartbeat_payload())
 
         error_payload = None
         final_result = None
