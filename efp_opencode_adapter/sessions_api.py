@@ -531,6 +531,8 @@ async def _chat_run_session_metadata(chat_run_store: Any, client: Any, sid: str,
     active_run = chat_run_store.to_session_summary(active_record) if active_record is not None else None
     latest_run = chat_run_store.to_session_summary(latest_record) if latest_record is not None else None
     metadata: dict[str, Any] = {"active_run": active_run, "latest_run": latest_run}
+    if not active_run_stale_reason and active_record is None and latest_record is not None and getattr(latest_record, "status", "") == "stale":
+        active_run_stale_reason = str(getattr(latest_record, "incomplete_reason", "") or latest_record.metadata.get("validation_reason") or "opencode_not_active")
     if active_run_stale_reason:
         metadata["active_run_stale_reason"] = active_run_stale_reason
     if latest_record is not None and latest_record.last_response_text:
