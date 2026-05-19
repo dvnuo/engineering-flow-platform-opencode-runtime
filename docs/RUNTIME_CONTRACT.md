@@ -56,6 +56,12 @@ OpenCode is an implementation detail behind adapter APIs.
 ## Skills asset mapping
 - Portal provides skills only (`EFP_SKILLS_DIR`, default `/app/skills`).
 - Adapter syncs source skills into `/workspace/.opencode/skills` and writes `skills-index` state.
+- Source directory skills may use `<skill-name>/SKILL.md` (preferred) or legacy `<skill-name>/skill.md`.
+- Top-level Markdown skills with frontmatter remain supported.
+- OpenCode output always uses `/workspace/.opencode/skills/<normalized-name>/SKILL.md`.
+- Directory skill sidecar resources are recursively copied into the same output skill directory, including `scripts/`, `templates/`, `reference/`, `examples/`, and other regular files.
+- Source entry files are not copied as resources, cache directories are skipped, and symlinks are skipped.
+- Skills are synced during asset initialization and before managed OpenCode startup or restart.
 - `tools` / `task_tools` in source skill frontmatter are informational metadata only.
 - Source metadata is not interpreted as runtime executable wrapper mappings.
 

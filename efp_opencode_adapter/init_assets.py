@@ -7,7 +7,7 @@ from .agents_md import ensure_default_agents_md
 from .index_loader import read_json_file, load_skills_index
 from .opencode_config import build_opencode_config, merge_with_existing_config, write_opencode_config
 from .settings import Settings
-from .skill_sync import sync_skills
+from .skill_sync import sync_runtime_skills
 
 
 
@@ -24,12 +24,7 @@ def init_assets(settings: Settings) -> None:
     ]
     for d in required_dirs:
         d.mkdir(parents=True, exist_ok=True)
-    sync_skills(
-        settings.skills_dir,
-        settings.workspace_dir / ".opencode" / "skills",
-        settings.adapter_state_dir,
-        opencode_commands_dir=settings.workspace_dir / ".opencode" / "commands",
-    )
+    sync_runtime_skills(settings)
 
     ensure_default_agents_md(settings)
     _refresh_managed_opencode_config(settings)

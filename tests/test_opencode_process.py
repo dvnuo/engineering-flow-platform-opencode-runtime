@@ -35,6 +35,9 @@ class _FakeClient:
 async def test_managed_startup_runs_spawn_then_health_then_registry(monkeypatch):
     calls: list[str] = []
 
+    def fake_sync(_settings):
+        calls.append("sync")
+
     async def fake_spawn(*_args, **_kwargs):
         calls.append("spawn")
         return _FakeProcess()
@@ -44,10 +47,11 @@ async def test_managed_startup_runs_spawn_then_health_then_registry(monkeypatch)
         return {"status": "ok"}
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr("efp_opencode_adapter.opencode_process.sync_runtime_skills", fake_sync)
     settings = Settings.from_env()
     manager = OpenCodeProcessManager(settings, _FakeClient(calls), registry_check=fake_registry)
     status = await manager.start({}, reason="startup")
-    assert calls == ["spawn", "health", "registry"]
+    assert calls == ["sync", "spawn", "health", "registry"]
     assert status["health_ok"] is True
     assert status["registry_ok"] is True
     assert status["last_startup_error"] is None
@@ -57,6 +61,9 @@ async def test_managed_startup_runs_spawn_then_health_then_registry(monkeypatch)
 async def test_managed_startup_health_failure_skips_registry(monkeypatch):
     calls: list[str] = []
 
+    def fake_sync(_settings):
+        calls.append("sync")
+
     async def fake_spawn(*_args, **_kwargs):
         calls.append("spawn")
         return _FakeProcess()
@@ -66,11 +73,12 @@ async def test_managed_startup_health_failure_skips_registry(monkeypatch):
         return {"status": "ok"}
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr("efp_opencode_adapter.opencode_process.sync_runtime_skills", fake_sync)
     settings = Settings.from_env()
     manager = OpenCodeProcessManager(settings, _FakeClient(calls, fail_health=True), registry_check=fake_registry)
     with pytest.raises(RuntimeError, match="health failed"):
         await manager.start({}, reason="startup")
-    assert calls == ["spawn", "health"]
+    assert calls == ["sync", "spawn", "health"]
     assert manager.health_ok is False
     assert manager.registry_ok is False
     assert "health failed" in (manager.last_startup_error or "")
@@ -79,6 +87,9 @@ async def test_managed_startup_health_failure_skips_registry(monkeypatch):
 @pytest.mark.asyncio
 async def test_managed_startup_registry_failure_sets_diagnostics(monkeypatch):
     calls: list[str] = []
+
+    def fake_sync(_settings):
+        calls.append("sync")
 
     async def fake_spawn(*_args, **_kwargs):
         calls.append("spawn")
@@ -89,11 +100,12 @@ async def test_managed_startup_registry_failure_sets_diagnostics(monkeypatch):
         return {"status": "error", "error": "registry failed token=ghu_SECRET"}
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr("efp_opencode_adapter.opencode_process.sync_runtime_skills", fake_sync)
     settings = Settings.from_env()
     manager = OpenCodeProcessManager(settings, _FakeClient(calls), registry_check=fake_registry)
     with pytest.raises(RuntimeError, match="registry failed"):
         await manager.start({}, reason="startup")
-    assert calls == ["spawn", "health", "registry"]
+    assert calls == ["sync", "spawn", "health", "registry"]
     assert manager.health_ok is False
     assert manager.registry_ok is False
     assert "registry failed" in (manager.last_startup_error or "")
@@ -109,6 +121,7 @@ async def test_spawn_uses_workspace_cwd_and_localhost_port(monkeypatch, tmp_path
         return _FakeProcess()
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr("efp_opencode_adapter.opencode_process.sync_runtime_skills", lambda _settings: None)
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
     settings = Settings.from_env()
     async def fake_registry(_settings, _client):
@@ -118,3 +131,23 @@ async def test_spawn_uses_workspace_cwd_and_localhost_port(monkeypatch, tmp_path
     assert "--hostname" in captured['args'] and "127.0.0.1" in captured['args']
     assert "--port" in captured['args'] and "4096" in captured['args']
     assert captured['kwargs']["cwd"] == str(settings.workspace_dir)
+
+
+@pytest.mark.asyncio
+async def test_managed_startup_skill_sync_failure_is_recorded(monkeypatch):
+    calls: list[str] = []
+
+    def fake_sync(_settings):
+        raise ValueError("target skill directory already exists and is not managed by EFP: /workspace/.opencode/skills/demo")
+
+    async def fake_spawn(*_args, **_kwargs):
+        calls.append("spawn")
+        return _FakeProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr("efp_opencode_adapter.opencode_process.sync_runtime_skills", fake_sync)
+    manager = OpenCodeProcessManager(Settings.from_env(), _FakeClient(calls))
+    with pytest.raises(ValueError, match="target skill directory"):
+        await manager.start({}, reason="startup")
+    assert calls == []
+    assert "target skill directory" in (manager.last_startup_error or "")

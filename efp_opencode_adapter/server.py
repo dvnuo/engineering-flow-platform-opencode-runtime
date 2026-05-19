@@ -56,6 +56,7 @@ from .runtime_env import build_runtime_env_from_config, read_runtime_env_file, w
 from .git_cli_auth import write_git_gh_auth_assets
 from .opencode_process import OpenCodeProcessManager
 from .session_store import SessionStore
+from .skill_sync import sync_runtime_skills
 from .task_store import TaskStore
 from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_handler
 from .request_bindings import RequestBindingStore
@@ -149,6 +150,24 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     runtime_profile_id = payload.get("runtime_profile_id")
     revision = payload.get("revision")
     ensure_default_agents_md(settings)
+    try:
+        sync_runtime_skills(settings)
+    except Exception as exc:
+        detail = sanitize_public_secrets(str(exc))
+        if not isinstance(detail, str):
+            detail = str(detail)
+        return web.json_response(
+            {
+                "success": False,
+                "engine": "opencode",
+                "status": "failed",
+                "applied": False,
+                "error": "skill_sync_failed",
+                "detail": detail,
+                "status_endpoint": "/api/internal/runtime-profile/status",
+            },
+            status=500,
+        )
     generated_config, config_hash, updated_sections = build_opencode_config(settings, runtime_config)
     warnings: list[str] = []
     status = "failed"

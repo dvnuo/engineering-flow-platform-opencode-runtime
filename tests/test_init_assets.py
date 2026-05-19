@@ -40,3 +40,27 @@ def test_init_assets_missing_skills_dir_still_boots(tmp_path, monkeypatch):
     assert config.exists()
     payload = json.loads(config.read_text(encoding="utf-8"))
     assert "permission" in payload and "agent" in payload
+
+
+def test_init_assets_copies_skill_resources(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    skills = tmp_path / "skills"
+    state = tmp_path / "state"
+    config = workspace / ".opencode" / "opencode.json"
+
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(config))
+
+    source = skills / "demo"
+    (source / "scripts").mkdir(parents=True, exist_ok=True)
+    (source / "SKILL.md").write_text("---\nname: demo\ndescription: Demo\n---\n\nBody\n", encoding="utf-8")
+    (source / "scripts" / "run.py").write_text("print('run')\n", encoding="utf-8")
+
+    init_assets(Settings.from_env())
+
+    target = workspace / ".opencode" / "skills" / "demo"
+    assert (target / "SKILL.md").exists()
+    assert (target / "scripts" / "run.py").exists()
+    assert (target / "skill.md").exists() is False

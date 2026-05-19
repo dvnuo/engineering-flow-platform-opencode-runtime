@@ -29,14 +29,25 @@ class FakeOpenCodeClient:
         return {"success": False, "pending_restart": True, "status": 404}
 
 
+def _write_runtime_skill(skills_dir: Path, name: str = "demo") -> Path:
+    source = skills_dir / name
+    source.mkdir(parents=True, exist_ok=True)
+    source.joinpath("SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: Demo\n---\n\nBody\n",
+        encoding="utf-8",
+    )
+    return source
+
+
 @pytest.mark.asyncio
 async def test_apply_contract(tmp_path, monkeypatch):
-    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    workspace, state, skills = tmp_path / "workspace", tmp_path / "state", tmp_path / "skills"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
     monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
     state.mkdir(parents=True)
-    (state / "skills-index.json").write_text(json.dumps({"skills": [{"opencode_name": "alpha"}]}))
+    _write_runtime_skill(skills, "alpha")
     (state / "tools-index.json").write_text(json.dumps({"tools": [{"capability_id": "tool.read", "opencode_name": "efp_read", "policy_tags": ["read_only"]}, {"capability_id": "tool.update", "opencode_name": "efp_update", "policy_tags": ["mutation"]}]}))
 
     app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
@@ -224,12 +235,13 @@ async def test_profile_auth_failure_status_partially_applied(tmp_path, monkeypat
 
 @pytest.mark.asyncio
 async def test_apply_allowed_skills_reflects_capability_state(tmp_path, monkeypatch):
-    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    workspace, state, skills = tmp_path / "workspace", tmp_path / "state", tmp_path / "skills"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
     monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
     state.mkdir(parents=True)
-    (state / "skills-index.json").write_text(json.dumps({"skills": [{"opencode_name": "my-skill"}]}))
+    _write_runtime_skill(skills, "my-skill")
     app = create_app(Settings.from_env(), opencode_client=FakeAuthOnlyClient())
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -242,6 +254,30 @@ async def test_apply_allowed_skills_reflects_capability_state(tmp_path, monkeypa
     caps = await (await client.get("/api/capabilities")).json()
     skill = next(c for c in caps["capabilities"] if c.get("type") == "skill" and c.get("name") == "my-skill")
     assert skill["permission_state"] == "allowed"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_apply_syncs_skills_before_restart_or_config_generation(tmp_path, monkeypatch):
+    workspace, state, skills = tmp_path / "workspace", tmp_path / "state", tmp_path / "skills"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("EFP_SKILLS_DIR", str(skills))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    source = _write_runtime_skill(skills, "demo")
+    (source / "scripts").mkdir(parents=True, exist_ok=True)
+    (source / "scripts" / "run.py").write_text("print('run')\n", encoding="utf-8")
+
+    app = create_app(Settings.from_env(), opencode_client=FakeAuthOnlyClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    resp = await client.post("/api/internal/runtime-profile/apply", headers={"X-Portal-Author-Source": "portal"}, json={"config": {}})
+    body = await resp.json()
+
+    assert resp.status == 200
+    assert body["success"] is True
+    assert (workspace / ".opencode" / "skills" / "demo" / "scripts" / "run.py").exists()
+    assert not (workspace / ".opencode" / "skills" / "demo" / "skill.md").exists()
     await client.close()
 
 @pytest.mark.asyncio
