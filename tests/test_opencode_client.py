@@ -11,6 +11,7 @@ from efp_opencode_adapter.opencode_client import OpenCodeClientError
 from efp_opencode_adapter.opencode_client import OpenCodeTransportDisconnected
 from efp_opencode_adapter.opencode_client import OpenCodeTransportTimeout
 from efp_opencode_adapter.opencode_client import _safe_error_preview
+from efp_opencode_adapter.opencode_client import is_session_missing_error
 from efp_opencode_adapter.settings import Settings
 
 
@@ -441,6 +442,97 @@ async def test_get_session_status_and_messages_alias(monkeypatch):
     assert await client.get_session_status() == {"sessions": {"ses-1": {"state": "running"}}}
     assert await client.get_session_messages("ses-1") == [{"id": "a1", "role": "assistant"}]
 
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_session_status_session_children_and_abort_paths(monkeypatch):
+    app = web.Application()
+    calls: list[tuple[str, str]] = []
+
+    async def status(_request: web.Request):
+        calls.append(("GET", "/session/status"))
+        return web.json_response({"sessions": {"ses-1": {"state": "running"}}})
+
+    async def get_session(_request: web.Request):
+        calls.append(("GET", "/session/ses-1"))
+        return web.json_response({"id": "ses-1"})
+
+    async def children(_request: web.Request):
+        calls.append(("GET", "/session/ses-1/children"))
+        return web.json_response({"children": [{"id": "child-1"}]})
+
+    async def abort(_request: web.Request):
+        calls.append(("POST", "/session/ses-1/abort"))
+        return web.Response(status=204)
+
+    app.router.add_get("/session/status", status)
+    app.router.add_get("/session/ses-1", get_session)
+    app.router.add_get("/session/ses-1/children", children)
+    app.router.add_post("/session/ses-1/abort", abort)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+    client = OpenCodeClient(Settings.from_env())
+
+    assert await client.get_session_status() == {"sessions": {"ses-1": {"state": "running"}}}
+    assert await client.get_session("ses-1") == {"id": "ses-1"}
+    assert await client.list_session_children("ses-1") == [{"id": "child-1"}]
+    assert (await client.abort_session("ses-1"))["success"] is True
+    assert calls == [
+        ("GET", "/session/status"),
+        ("GET", "/session/ses-1"),
+        ("GET", "/session/ses-1/children"),
+        ("POST", "/session/ses-1/abort"),
+    ]
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_abort_session_tree_aborts_children_before_parent(monkeypatch):
+    app = web.Application()
+    abort_order: list[str] = []
+
+    async def root_children(_request: web.Request):
+        return web.json_response({"children": [{"id": "child-1"}, {"sessionID": "child-2"}]})
+
+    async def leaf_children(_request: web.Request):
+        return web.json_response({"children": []})
+
+    async def abort(request: web.Request):
+        abort_order.append(request.match_info["session_id"])
+        return web.Response(status=204)
+
+    app.router.add_get("/session/root/children", root_children)
+    app.router.add_get("/session/child-1/children", leaf_children)
+    app.router.add_get("/session/child-2/children", leaf_children)
+    app.router.add_post("/session/{session_id}/abort", abort)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+
+    out = await OpenCodeClient(Settings.from_env()).abort_session_tree("root")
+    assert out["success"] is True
+    assert out["aborted_session_ids"] == ["child-1", "child-2", "root"]
+    assert abort_order == ["child-1", "child-2", "root"]
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_session_missing_error_is_recognizable(monkeypatch):
+    app = web.Application()
+
+    async def missing(_request: web.Request):
+        return web.json_response({"error": "missing"}, status=410)
+
+    app.router.add_get("/session/missing", missing)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
+
+    with pytest.raises(OpenCodeClientError) as caught:
+        await OpenCodeClient(Settings.from_env()).get_session("missing")
+    assert is_session_missing_error(caught.value) is True
     await server.close()
 
 
