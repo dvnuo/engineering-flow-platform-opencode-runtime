@@ -53,9 +53,20 @@ OpenCode is an implementation detail behind adapter APIs.
 - It is bound to `:4096` internal loopback.
 - It must not be exposed as a direct Portal target.
 
+## Internal-only adapter endpoints
+- `POST /api/internal/skills/resync`
+
 ## Skills asset mapping
 - Portal provides skills only (`EFP_SKILLS_DIR`, default `/app/skills`).
 - Adapter syncs source skills into `/workspace/.opencode/skills` and writes `skills-index` state.
+- Directory skill input supports `<name>/SKILL.md` (preferred) and `<name>/skill.md` (legacy-compatible). If both exist, `SKILL.md` is used.
+- Top-level `*.md` files with valid frontmatter are still supported as flat prompt skills.
+- Target output is always `/workspace/.opencode/skills/<normalized-name>/SKILL.md`.
+- Target output never includes lowercase `/workspace/.opencode/skills/<normalized-name>/skill.md`.
+- Directory skill sidecar resources are copied recursively, including `scripts/`, `templates/`, `reference/`, `examples/`, and ordinary files.
+- Entry files `SKILL.md` and `skill.md` are not copied as sidecar resources.
+- Sidecar resources are copied only for directory skills, not for top-level flat markdown skills.
+- Dynamic skill additions or resource changes after runtime startup require `POST /api/internal/skills/resync` or a runtime restart.
 - `tools` / `task_tools` in source skill frontmatter are informational metadata only.
 - Source metadata is not interpreted as runtime executable wrapper mappings.
 

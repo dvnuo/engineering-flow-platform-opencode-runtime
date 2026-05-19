@@ -32,12 +32,12 @@ def init_assets(settings: Settings) -> None:
     )
 
     ensure_default_agents_md(settings)
-    _refresh_managed_opencode_config(settings)
+    refresh_managed_opencode_config(settings, runtime_config=None)
 
 
-def _refresh_managed_opencode_config(settings: Settings) -> None:
+def refresh_managed_opencode_config(settings: Settings, runtime_config: dict | None = None) -> tuple[dict, str, list[str]]:
     config_path = settings.opencode_config_path
-    generated, _, _ = build_opencode_config(settings, runtime_config=None)
+    generated, config_hash, updated_sections = build_opencode_config(settings, runtime_config=runtime_config)
     existing = read_json_file(config_path) if config_path.exists() else None
     if config_path.exists() and existing is None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -50,6 +50,7 @@ def _refresh_managed_opencode_config(settings: Settings) -> None:
     )
     write_opencode_config(settings, merged)
     print(f"Updated managed config in {config_path}")
+    return merged, config_hash, updated_sections
 
 
 def main() -> None:

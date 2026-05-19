@@ -12,6 +12,14 @@ OpenCode runtime adapter for EFP-compatible runtime image.
 - Tool capability comes from OpenCode built-in tools + runtime permission/profile policy.
 - Runtime does not read/sync/generate/index external tools repos or manifests.
 
+## Skills
+- Input supports directory skills as `<name>/SKILL.md` (preferred), `<name>/skill.md` (legacy-compatible), and top-level `*.md` files with valid frontmatter.
+- Output is always the official OpenCode entrypoint: `/workspace/.opencode/skills/<normalized-name>/SKILL.md`.
+- Directory skill sidecar resources are copied recursively, including `scripts/`, `templates/`, `reference/`, `examples/`, and ordinary files.
+- Entry files `SKILL.md` and `skill.md` are not copied as sidecar resources, and generated targets never include lowercase `skill.md`.
+- Sidecar resources are copied only for directory skills, not for top-level flat markdown skills.
+- Dynamic skill additions or resource changes after runtime startup require `POST /api/internal/skills/resync` or a runtime restart.
+
 ## Local development
 ```bash
 python -m pytest -q

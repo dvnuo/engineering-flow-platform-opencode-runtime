@@ -54,8 +54,10 @@ from .path_utils import path_exists
 from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_status_payload, sanitize_profile_config_for_storage, sanitize_public_secrets
 from .runtime_env import build_runtime_env_from_config, read_runtime_env_file, write_runtime_env_file
 from .git_cli_auth import write_git_gh_auth_assets
+from .init_assets import refresh_managed_opencode_config
 from .opencode_process import OpenCodeProcessManager
 from .session_store import SessionStore
+from .skill_sync import sync_skills
 from .task_store import TaskStore
 from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_handler
 from .request_bindings import RequestBindingStore
@@ -269,6 +271,78 @@ async def runtime_profile_status_handler(request: web.Request) -> web.Response:
     return web.json_response(payload)
 
 
+async def skills_resync_handler(request: web.Request) -> web.Response:
+    if request.headers.get("X-Portal-Author-Source") != "portal":
+        return web.json_response({"success": False, "error": "forbidden", "engine": "opencode"}, status=403)
+
+    settings: Settings = request.app[SETTINGS_KEY]
+    overlay = ProfileOverlayStore(settings).load()
+    runtime_config = overlay.config if overlay else None
+
+    try:
+        idx = sync_skills(
+            settings.skills_dir,
+            settings.workspace_dir / ".opencode" / "skills",
+            settings.adapter_state_dir,
+            opencode_commands_dir=settings.workspace_dir / ".opencode" / "commands",
+        )
+        ensure_default_agents_md(settings)
+        merged_config, config_hash, updated_sections = refresh_managed_opencode_config(settings, runtime_config=runtime_config)
+
+        manager = request.app.get(OPENCODE_PROCESS_MANAGER_KEY)
+        restart_performed = False
+        pending_restart = False
+        restart_meta = {}
+        if manager:
+            env_path = settings.adapter_state_dir / "opencode.env"
+            if path_exists(env_path):
+                env = _merge_startup_env_with_process_fallback(settings, read_runtime_env_file(env_path))
+            else:
+                env = build_runtime_env_from_config(settings, runtime_config or {}).env
+            restart_meta = await manager.restart(env, reason="skills_resync")
+            restart_performed = True
+            pending_restart = not bool(restart_meta.get("health_ok"))
+        else:
+            pending_restart = True
+
+        return web.json_response(
+            {
+                "success": True,
+                "engine": "opencode",
+                "status": "applied" if not pending_restart else "pending_restart",
+                "skills_count": len(idx.skills),
+                "skills": [
+                    {
+                        "name": s.opencode_name,
+                        "source_path": s.source_path,
+                        "target_path": s.target_path,
+                        "resource_count": len(getattr(s, "resource_files", []) or []),
+                        "resource_files": getattr(s, "resource_files", []) or [],
+                    }
+                    for s in idx.skills
+                ],
+                "warnings": list(idx.warnings),
+                "config_hash": config_hash,
+                "updated_sections": updated_sections,
+                "restart_performed": restart_performed,
+                "pending_restart": pending_restart,
+                "opencode_pid": restart_meta.get("pid") if restart_meta else None,
+                "health_ok": restart_meta.get("health_ok") if restart_meta else None,
+            },
+            status=200 if not pending_restart else 202,
+        )
+    except Exception as exc:
+        return web.json_response(
+            {
+                "success": False,
+                "engine": "opencode",
+                "status": "failed",
+                "error": sanitize_public_secrets(str(exc)),
+            },
+            status=500,
+        )
+
+
 async def effective_config_handler(request: web.Request) -> web.Response:
     settings: Settings = request.app[SETTINGS_KEY]
     cfg = {}
@@ -361,6 +435,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/actuator/health", health_handler)
     app.router.add_post("/api/internal/runtime-profile/apply", runtime_profile_apply_handler)
     app.router.add_get("/api/internal/runtime-profile/status", runtime_profile_status_handler)
+    app.router.add_post("/api/internal/skills/resync", skills_resync_handler)
     app.router.add_get("/api/internal/opencode-effective-config", effective_config_handler)
     app.router.add_get("/api/capabilities", capabilities_handler)
     app.router.add_get("/api/queue/status", queue_status_handler)
