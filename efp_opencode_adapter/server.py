@@ -471,7 +471,39 @@ async def active_chat_run_for_session_handler(request: web.Request) -> web.Respo
     return web.json_response({"success": True, "engine": "opencode", "run": run})
 
 
-async def _publish_abort_event(request: web.Request, event_type: str, *, record, abort_result: dict[str, Any]) -> None:
+def _abort_result_succeeded(abort_result: dict[str, Any]) -> bool:
+    if not isinstance(abort_result, dict):
+        return False
+    if abort_result.get("success") is True:
+        return True
+    missing = abort_result.get("missing_session_ids")
+    errors = abort_result.get("errors")
+    if missing and not errors:
+        return True
+    return False
+
+
+def _abort_result_failed(abort_result: dict[str, Any]) -> bool:
+    return not _abort_result_succeeded(abort_result)
+
+
+def _abort_result_missing_current_session(abort_result: dict[str, Any], opencode_session_id: str) -> bool:
+    if not isinstance(abort_result, dict):
+        return False
+    errors = abort_result.get("errors")
+    if errors:
+        return False
+    missing = abort_result.get("missing_session_ids")
+    if not isinstance(missing, list) or not missing:
+        return False
+    missing_ids = {str(item) for item in missing if item}
+    if opencode_session_id and opencode_session_id in missing_ids:
+        return True
+    aborted = abort_result.get("aborted_session_ids")
+    return not aborted
+
+
+async def _publish_abort_event(request: web.Request, event_type: str, *, record, abort_result: dict[str, Any], state: str = "aborted", summary: str | None = None) -> None:
     bus = request.app.get(EVENT_BUS_KEY)
     if bus is None or not hasattr(bus, "publish"):
         return
@@ -482,13 +514,55 @@ async def _publish_abort_event(request: web.Request, event_type: str, *, record,
         "session_id": getattr(record, "portal_session_id", ""),
         "request_id": getattr(record, "request_id", ""),
         "opencode_session_id": getattr(record, "opencode_session_id", ""),
-        "state": "aborted",
-        "summary": event_type,
+        "state": state,
+        "summary": summary or event_type,
         "data": safe_preview({"abort_result": abort_result}, 2000),
         "created_at": utc_now_iso(),
         "ts": time.time(),
     }
     await bus.publish(event)
+
+
+async def _handle_abort_failure(request: web.Request, *, store, client, record, abort_result: dict[str, Any]) -> web.Response:
+    current = store.record_abort_failure(record.request_id, abort_result) or record
+    await _publish_abort_event(request, "chat.run.abort_failed", record=current, abort_result=abort_result, state="failed", summary="OpenCode abort failed.")
+    await _publish_abort_event(request, "opencode.session.abort_failed", record=current, abort_result=abort_result, state="failed", summary="OpenCode abort failed.")
+    public = store.to_public_dict(current)
+    try:
+        validated = await validate_chat_run_against_opencode(store=store, client=client, record=current, event_bus=request.app.get(EVENT_BUS_KEY))
+        if validated is not None:
+            public = validated
+        else:
+            refreshed = store.get(record.request_id)
+            public = store.to_public_dict(refreshed) if refreshed is not None else public
+    except Exception:
+        pass
+    return web.json_response(
+        {
+            "success": False,
+            "engine": "opencode",
+            "error": "opencode_abort_failed",
+            "run": public,
+            "abort_result": safe_preview(abort_result, 2000),
+        },
+        status=409,
+    )
+
+
+async def _handle_abort_missing(request: web.Request, *, store, record, abort_result: dict[str, Any]) -> web.Response:
+    stale = store.mark_stale(record.request_id, reason="opencode_session_missing_after_abort", metadata={"abort_result": abort_result}) or record
+    await _publish_abort_event(request, "chat.run.stale", record=stale, abort_result=abort_result, state="stale", summary="OpenCode session missing after abort.")
+    await _publish_abort_event(request, "opencode.session.missing", record=stale, abort_result=abort_result, state="stale", summary="OpenCode session missing after abort.")
+    return web.json_response(
+        {
+            "success": True,
+            "engine": "opencode",
+            "stale": True,
+            "reason": "opencode_session_missing_after_abort",
+            "run": store.to_public_dict(stale),
+            "abort_result": safe_preview(abort_result, 2000),
+        }
+    )
 
 
 async def abort_chat_run_handler(request: web.Request) -> web.Response:
@@ -502,6 +576,10 @@ async def abort_chat_run_handler(request: web.Request) -> web.Response:
         abort_result = await client.abort_session_tree(record.opencode_session_id)
     else:
         abort_result = {"success": True, "supported": True, "skipped": True, "reason": "missing_opencode_session_id"}
+    if _abort_result_missing_current_session(abort_result, record.opencode_session_id):
+        return await _handle_abort_missing(request, store=store, record=record, abort_result=abort_result)
+    if _abort_result_failed(abort_result):
+        return await _handle_abort_failure(request, store=store, client=client, record=record, abort_result=abort_result)
     updated = store.mark_aborted(request_id, reason="user_aborted", metadata={"abort_result": abort_result}) or record
     await _publish_abort_event(request, "chat.run.aborted", record=updated, abort_result=abort_result)
     await _publish_abort_event(request, "opencode.session.aborted", record=updated, abort_result=abort_result)
@@ -523,7 +601,24 @@ async def abort_session_handler(request: web.Request) -> web.Response:
     else:
         abort_result = {"success": True, "supported": True, "skipped": True, "reason": "missing_opencode_session_id"}
     updated = None
+    if record is None and _abort_result_failed(abort_result):
+        return web.json_response(
+            {
+                "success": False,
+                "engine": "opencode",
+                "error": "opencode_abort_failed",
+                "session_id": portal_session_id,
+                "opencode_session_id": opencode_session_id,
+                "run": None,
+                "abort_result": safe_preview(abort_result, 2000),
+            },
+            status=409,
+        )
     if record is not None:
+        if _abort_result_missing_current_session(abort_result, record.opencode_session_id):
+            return await _handle_abort_missing(request, store=store, record=record, abort_result=abort_result)
+        if _abort_result_failed(abort_result):
+            return await _handle_abort_failure(request, store=store, client=client, record=record, abort_result=abort_result)
         updated = store.mark_aborted(record.request_id, reason="user_aborted", metadata={"abort_result": abort_result}) or record
         await _publish_abort_event(request, "chat.run.aborted", record=updated, abort_result=abort_result)
         await _publish_abort_event(request, "opencode.session.aborted", record=updated, abort_result=abort_result)

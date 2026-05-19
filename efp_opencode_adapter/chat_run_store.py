@@ -363,6 +363,21 @@ class ChatRunStore:
         record.metadata = _safe_dict({**record.metadata, **(metadata or {})}, 4000)
         return self._save(record)
 
+    def record_abort_failure(self, request_id: str, abort_result: dict[str, Any], reason: str = "opencode_abort_failed") -> ChatRunRecord | None:
+        record = self._runs.get(request_id)
+        if record is None:
+            return None
+        record.metadata = _safe_dict(
+            {
+                **record.metadata,
+                "abort_failed": True,
+                "abort_failure_reason": reason or "opencode_abort_failed",
+                "abort_result": safe_preview(abort_result if isinstance(abort_result, dict) else {}, 2000),
+            },
+            4000,
+        )
+        return self._save(record)
+
     def keep_running(self, request_id: str, *, reason: str, payload: dict[str, Any] | None = None, stream_detached: bool = False) -> ChatRunRecord | None:
         record = self._runs.get(request_id)
         if record is None:
