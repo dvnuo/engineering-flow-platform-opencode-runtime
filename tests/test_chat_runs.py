@@ -82,3 +82,38 @@ def test_chat_run_store_update_runtime_event_projection_is_sanitized(tmp_path):
     assert public["last_response_text"] == "world"
     assert public["assistant_message_id"] == "a-1"
     assert "secret" not in json.dumps(public)
+
+
+def test_chat_run_store_transport_error_and_recovering_diagnostics_are_sanitized(tmp_path):
+    store = ChatRunStore(tmp_path / "chat_runs.json")
+    store.start_run(request_id="req-transport", portal_session_id="sess-1", opencode_session_id="ses-1", status="running")
+
+    store.record_transport_error(
+        "req-transport",
+        {
+            "exception_type": "ServerDisconnectedError",
+            "method": "POST",
+            "path": "/session/ses-1/message",
+            "exception": "token=ghp_SECRET",
+            "recoverable": True,
+        },
+    )
+    store.mark_recovering(
+        "req-transport",
+        "opencode_transport_disconnected",
+        {
+            "recovery_state": "recovering",
+            "restart_attempted": True,
+            "restart_status": "restarted",
+            "opencode_process_status": {"running": True, "token": "ghp_SECRET"},
+            "opencode_may_still_be_running": True,
+        },
+    )
+
+    public = store.to_public_dict(store.get("req-transport"))
+    assert public["status"] == "recovering"
+    assert public["stream_state"] == "detached"
+    assert public["diagnostics"]["last_transport_error"]["exception_type"] == "ServerDisconnectedError"
+    assert public["diagnostics"]["restart_attempted"] is True
+    assert public["diagnostics"]["recovery_state"] == "recovering"
+    assert "ghp_SECRET" not in json.dumps(public)

@@ -17,6 +17,7 @@ from .app_keys import (
     CHATLOG_STORE_KEY,
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
+    OPENCODE_PROCESS_MANAGER_KEY,
     PORTAL_METADATA_CLIENT_KEY,
     SETTINGS_KEY,
     SESSION_STORE_KEY,
@@ -26,7 +27,7 @@ from .app_keys import (
     USER_DISPLAY_STORE_KEY,
 )
 
-from .opencode_client import OpenCodeClientError, OpenCodeTransportTimeout
+from .opencode_client import OpenCodeClientError, OpenCodeTransportDisconnected, OpenCodeTransportTimeout
 from .attachment_service import build_opencode_attachment_parts
 from .session_store import SessionDeletedError, SessionRecord
 from .thinking_events import (
@@ -452,6 +453,8 @@ CHAT_PROGRESS_EVENT_TYPES = {
     "provider.retry",
     "chat.timeout_recovery.poll",
     "chat.timeout_recovery.recovered",
+    "chat.transport_recovery.poll",
+    "chat.transport_recovery.recovered",
     "continuation.completed",
 }
 
@@ -462,6 +465,9 @@ SESSION_LEVEL_PROGRESS_EVENT_TYPES = {
     "chat.timeout_recovery.poll",
     "chat.timeout_recovery.recovered",
     "chat.timeout_recovery.exhausted",
+    "chat.transport_recovery.poll",
+    "chat.transport_recovery.recovered",
+    "chat.transport_recovery.exhausted",
 }
 
 
@@ -576,9 +582,13 @@ async def _publish_chat_runtime_event(
     state: str = "running",
     summary: str = "",
     data: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
     progress_state: dict[str, Any] | None = None,
     chat_run_store: Any | None = None,
 ) -> dict[str, Any]:
+    safe_metadata = safe_preview(metadata or {}, 1000)
+    if not isinstance(safe_metadata, dict):
+        safe_metadata = {}
     payload = {
         "type": event_type,
         "event_type": event_type,
@@ -589,6 +599,7 @@ async def _publish_chat_runtime_event(
         "state": state,
         "summary": safe_preview(summary or event_type, 500),
         "data": safe_preview(data or {}, 1000),
+        "metadata": safe_metadata,
         "created_at": utc_now_iso(),
         "ts": time.time(),
     }
@@ -856,18 +867,339 @@ async def _recover_after_submit_timeout(
         await asyncio.sleep(min(poll_seconds, max(0.001, recovery_deadline - loop.time())))
 
 
+def _transport_error_payload(transport_exc: OpenCodeTransportDisconnected) -> dict[str, Any]:
+    raw_payload = transport_exc.payload if isinstance(transport_exc.payload, dict) else {}
+    return {
+        "exception_type": str(raw_payload.get("exception_type") or transport_exc.exception_type or type(transport_exc).__name__),
+        "method": str(raw_payload.get("method") or transport_exc.method or ""),
+        "path": str(raw_payload.get("path") or transport_exc.path or ""),
+        "recoverable": True,
+    }
+
+
+async def _recover_after_submit_transport_error(
+    *,
+    client: Any,
+    opencode_session_id: str,
+    portal_session_id: str,
+    request_id: str,
+    transport_exc: OpenCodeTransportDisconnected,
+    settings,
+    runtime_events: list[dict[str, Any]],
+    bus,
+    trace_context: dict[str, str],
+    before_assistant_message_ids: set[str],
+    before_snapshot_unreliable: bool,
+    wall_deadline: float,
+    chat_run_store: Any | None = None,
+    opencode_process_manager: Any | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    error_payload = _transport_error_payload(transport_exc)
+    if chat_run_store is not None and hasattr(chat_run_store, "record_transport_error"):
+        try:
+            chat_run_store.record_transport_error(request_id, error_payload)
+        except Exception:
+            logger.warning("failed to record OpenCode transport error", exc_info=True)
+
+    await _publish_chat_runtime_event(
+        runtime_events=runtime_events,
+        bus=bus,
+        trace_context=trace_context,
+        chat_run_store=chat_run_store,
+        event_type="chat.transport_recovery.started",
+        session_id=portal_session_id,
+        request_id=request_id,
+        opencode_session_id=opencode_session_id,
+        summary="OpenCode message request disconnected; checking process and session recovery state.",
+        data={
+            **error_payload,
+            "session_id": portal_session_id,
+            "request_id": request_id,
+            "opencode_session_id": opencode_session_id,
+        },
+        metadata={
+            **error_payload,
+            "opencode_session_id": opencode_session_id,
+            "request_id": request_id,
+        },
+    )
+
+    process_status: dict[str, Any] = {}
+    restart_attempted = False
+    restart_status = "not_attempted"
+    restart_error = ""
+    health_payload: dict[str, Any] = {}
+    process_running = False
+
+    if opencode_process_manager is not None:
+        if hasattr(opencode_process_manager, "status_snapshot"):
+            try:
+                process_status = opencode_process_manager.status_snapshot()
+                process_running = bool(process_status.get("running"))
+            except Exception as exc:
+                process_status = {"error": safe_preview(str(exc), 300)}
+        if not process_running:
+            await _publish_chat_runtime_event(
+                runtime_events=runtime_events,
+                bus=bus,
+                trace_context=trace_context,
+                chat_run_store=chat_run_store,
+                event_type="opencode.process.exited",
+                session_id=portal_session_id,
+                request_id=request_id,
+                opencode_session_id=opencode_session_id,
+                state="failed",
+                summary="Managed OpenCode process was not running during transport recovery.",
+                data={"status": safe_preview(process_status, 1000), "reason": "transport_disconnected"},
+            )
+            restart_attempted = True
+        else:
+            try:
+                health_payload = await client.health()
+            except Exception as exc:
+                health_payload = {"healthy": False, "error": safe_preview(str(exc), 300)}
+            if not bool(health_payload.get("healthy")):
+                await _publish_chat_runtime_event(
+                    runtime_events=runtime_events,
+                    bus=bus,
+                    trace_context=trace_context,
+                    chat_run_store=chat_run_store,
+                    event_type="opencode.health.failed",
+                    session_id=portal_session_id,
+                    request_id=request_id,
+                    opencode_session_id=opencode_session_id,
+                    state="degraded",
+                    summary="Managed OpenCode health check failed during transport recovery.",
+                    data={"health": safe_preview(health_payload, 1000), "reason": "transport_disconnected"},
+                )
+                restart_attempted = True
+
+        if restart_attempted:
+            try:
+                restart_meta = await opencode_process_manager.restart(reason="transport_disconnected")
+                restart_status = "restarted"
+                process_status = restart_meta if isinstance(restart_meta, dict) else {}
+                process_running = bool(process_status.get("running", process_status.get("pid") is not None))
+                await _publish_chat_runtime_event(
+                    runtime_events=runtime_events,
+                    bus=bus,
+                    trace_context=trace_context,
+                    chat_run_store=chat_run_store,
+                    event_type="opencode.process.restarted",
+                    session_id=portal_session_id,
+                    request_id=request_id,
+                    opencode_session_id=opencode_session_id,
+                    state="running",
+                    summary="Managed OpenCode process restarted after transport disconnect.",
+                    data={"reason": "transport_disconnected", "status": safe_preview(process_status, 1000)},
+                )
+            except Exception as exc:
+                restart_status = "failed"
+                restart_error = safe_preview(str(exc), 500)
+                await _publish_chat_runtime_event(
+                    runtime_events=runtime_events,
+                    bus=bus,
+                    trace_context=trace_context,
+                    chat_run_store=chat_run_store,
+                    event_type="opencode.process.restart_failed",
+                    session_id=portal_session_id,
+                    request_id=request_id,
+                    opencode_session_id=opencode_session_id,
+                    state="failed",
+                    summary="Managed OpenCode process restart failed after transport disconnect.",
+                    data={"reason": "transport_disconnected", "error": restart_error, "status": safe_preview(process_status, 1000)},
+                )
+
+    if chat_run_store is not None and hasattr(chat_run_store, "mark_recovering") and (process_running or restart_attempted):
+        try:
+            chat_run_store.mark_recovering(
+                request_id,
+                "opencode_transport_disconnected",
+                {
+                    "last_transport_error": error_payload,
+                    "opencode_disconnected": True,
+                    "opencode_process_status": safe_preview(process_status, 1000),
+                    "restart_attempted": restart_attempted,
+                    "restart_status": restart_status,
+                    "recovery_state": "recovering",
+                },
+            )
+        except Exception:
+            logger.warning("failed to mark chat run recovering", exc_info=True)
+
+    loop = asyncio.get_running_loop()
+    recovery_deadline = min(loop.time() + float(settings.chat_timeout_recovery_max_seconds), wall_deadline)
+    poll_seconds = max(0.001, float(settings.chat_timeout_recovery_poll_seconds))
+    exclude_ids = set() if before_snapshot_unreliable else set(before_assistant_message_ids)
+    last_probe: dict[str, Any] = {
+        "text": "",
+        "message_id": "",
+        "completion_state": "incomplete",
+        "reason": "opencode_transport_disconnected",
+        "diagnostics": {
+            **error_payload,
+            "opencode_process_status": safe_preview(process_status, 1000),
+            "restart_attempted": restart_attempted,
+            "restart_status": restart_status,
+        },
+    }
+    last_messages: list[dict[str, Any]] = []
+    polls = 0
+    opencode_may_still_be_running = bool(process_running or opencode_process_manager is None)
+
+    while True:
+        polls += 1
+        status_payload: Any = None
+        status_error = ""
+        status_snapshot: dict[str, Any] = {}
+        if hasattr(client, "get_session_status"):
+            try:
+                status_payload = await client.get_session_status(timeout_seconds=30)
+                status_snapshot = _status_snapshot_for_session(status_payload, opencode_session_id)
+            except Exception as exc:
+                status_error = safe_preview(str(exc), 300)
+        messages_error = ""
+        try:
+            last_messages = await _list_session_messages_for_recovery(client, opencode_session_id)
+            last_probe = find_latest_assistant_completion(last_messages, exclude_message_ids=exclude_ids)
+        except Exception as exc:
+            messages_error = safe_preview(str(exc), 300)
+
+        state = str(last_probe.get("completion_state") or "incomplete")
+        if state in {"completed", "error", "blocked", "empty_final"}:
+            await _publish_chat_runtime_event(
+                runtime_events=runtime_events,
+                bus=bus,
+                trace_context=trace_context,
+                chat_run_store=chat_run_store,
+                event_type="chat.transport_recovery.recovered",
+                session_id=portal_session_id,
+                request_id=request_id,
+                opencode_session_id=opencode_session_id,
+                state="success" if state == "completed" else state,
+                summary="OpenCode session produced a result after the transport disconnect.",
+                data={
+                    **error_payload,
+                    "polls": polls,
+                    "completion_state": state,
+                    "reason": last_probe.get("reason"),
+                    "message_count": len(last_messages),
+                    "restart_attempted": restart_attempted,
+                    "restart_status": restart_status,
+                },
+            )
+            return last_probe, last_messages, {
+                "recovered": True,
+                "polls": polls,
+                "status": status_snapshot,
+                "transport_error": error_payload,
+                "restart_attempted": restart_attempted,
+                "restart_status": restart_status,
+                "opencode_process_status": process_status,
+            }
+
+        session_running = _status_indicates_running(status_snapshot)
+        opencode_may_still_be_running = bool(opencode_may_still_be_running or session_running)
+        await _publish_chat_runtime_event(
+            runtime_events=runtime_events,
+            bus=bus,
+            trace_context=trace_context,
+            chat_run_store=chat_run_store,
+            event_type="chat.transport_recovery.poll",
+            session_id=portal_session_id,
+            request_id=request_id,
+            opencode_session_id=opencode_session_id,
+            summary="Polling OpenCode session after transport disconnect.",
+            data={
+                **error_payload,
+                "poll": polls,
+                "running": session_running,
+                "completion_state": state,
+                "reason": last_probe.get("reason"),
+                "message_count": len(last_messages),
+                "status": safe_preview(status_snapshot, 500),
+                "status_error": status_error,
+                "messages_error": messages_error,
+                "restart_attempted": restart_attempted,
+                "restart_status": restart_status,
+            },
+        )
+
+        if loop.time() >= recovery_deadline:
+            diagnostics = {
+                **error_payload,
+                "opencode_process_status": safe_preview(process_status, 1000),
+                "restart_attempted": restart_attempted,
+                "restart_status": restart_status,
+                "restart_error": restart_error,
+                "recovery_polls": polls,
+                "opencode_may_still_be_running": opencode_may_still_be_running,
+                "last_probe": safe_preview(last_probe, 1000),
+                "status": safe_preview(status_snapshot, 500),
+            }
+            exhausted_probe = {
+                "text": str(last_probe.get("text") or ""),
+                "message_id": str(last_probe.get("message_id") or ""),
+                "completion_state": "incomplete",
+                "reason": "opencode_transport_disconnected",
+                "diagnostics": diagnostics,
+            }
+            await _publish_chat_runtime_event(
+                runtime_events=runtime_events,
+                bus=bus,
+                trace_context=trace_context,
+                chat_run_store=chat_run_store,
+                event_type="chat.transport_recovery.exhausted",
+                session_id=portal_session_id,
+                request_id=request_id,
+                opencode_session_id=opencode_session_id,
+                state="recovering" if opencode_may_still_be_running or restart_attempted else "incomplete",
+                summary="OpenCode transport recovery did not find a final result before the recovery deadline.",
+                data=diagnostics,
+            )
+            if chat_run_store is not None and hasattr(chat_run_store, "mark_recovering") and (opencode_may_still_be_running or restart_attempted):
+                try:
+                    chat_run_store.mark_recovering(
+                        request_id,
+                        "opencode_transport_disconnected",
+                        {
+                            **diagnostics,
+                            "recovery_state": "recovering",
+                            "last_transport_error": error_payload,
+                            "opencode_disconnected": True,
+                        },
+                    )
+                except Exception:
+                    logger.warning("failed to mark chat run recovering", exc_info=True)
+            return exhausted_probe, last_messages, {
+                "recovered": False,
+                "polls": polls,
+                "status": status_snapshot,
+                "reason": "opencode_transport_disconnected",
+                "transport_error": error_payload,
+                "restart_attempted": restart_attempted,
+                "restart_status": restart_status,
+                "opencode_process_status": process_status,
+                "opencode_may_still_be_running": opencode_may_still_be_running,
+            }
+
+        await asyncio.sleep(min(poll_seconds, max(0.001, recovery_deadline - loop.time())))
+
+
 def _looks_progress_only_text(text: str) -> bool:
     t = (text or "").strip().lower()
     return t.startswith(("i am ", "i'm ", "working", "reading", "let me"))
 
 
 def _should_auto_continue(state: str, probe: dict[str, Any], assistant_text: str, settings) -> tuple[bool, str]:
+    reason = str(probe.get("reason") or "").lower()
+    diagnostics = probe.get("diagnostics") if isinstance(probe.get("diagnostics"), dict) else {}
+    if reason == "opencode_transport_disconnected" and bool(diagnostics.get("opencode_may_still_be_running")):
+        return False, "opencode_transport_disconnected_still_running"
     if not settings.chat_auto_continue_enabled:
         return False, "auto_continue_disabled"
     if state in {"blocked", "error", "completed", "success", "empty_final"}:
         return False, "terminal_state"
-    reason = str(probe.get("reason") or "").lower()
-    diagnostics = probe.get("diagnostics") if isinstance(probe.get("diagnostics"), dict) else {}
     if reason == "submit_timeout_recovery_exhausted" and bool(diagnostics.get("opencode_may_still_be_running")):
         if not bool(getattr(settings, "chat_auto_continue_after_running_timeout", False)):
             return False, "submit_timeout_recovery_exhausted_still_running"
@@ -954,6 +1286,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
     portal_metadata_client = app[PORTAL_METADATA_CLIENT_KEY]
     settings = app[SETTINGS_KEY]
     binding_store = app.get(REQUEST_BINDING_STORE_KEY)
+    opencode_process_manager = app.get(OPENCODE_PROCESS_MANAGER_KEY)
 
     runtime_events: list[dict[str, Any]] = []
     wall_started_at = asyncio.get_running_loop().time()
@@ -1124,6 +1457,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             except Exception:
                 logger.warning("failed to save user display message", exc_info=True)
         submit_timeout_recovery: dict[str, Any] = {}
+        submit_transport_recovery: dict[str, Any] = {}
         completion_probe: dict[str, Any] | None = None
         waited_messages: list[dict[str, Any]] = []
         if invocation:
@@ -1335,6 +1669,26 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                     wall_deadline=wall_deadline,
                 )
                 response_payload = {"messages": waited_messages, "timeout_recovery": submit_timeout_recovery}
+            except OpenCodeTransportDisconnected as exc:
+                if not settings.chat_timeout_recovery_enabled:
+                    raise
+                completion_probe, waited_messages, submit_transport_recovery = await _recover_after_submit_transport_error(
+                    client=client,
+                    opencode_session_id=record.opencode_session_id,
+                    portal_session_id=portal_session_id,
+                    request_id=request_id,
+                    transport_exc=exc,
+                    settings=settings,
+                    runtime_events=runtime_events,
+                    bus=bus,
+                    trace_context=trace_context,
+                    chat_run_store=chat_run_store,
+                    before_assistant_message_ids=before_assistant_message_ids,
+                    before_snapshot_unreliable=before_snapshot_unreliable,
+                    wall_deadline=wall_deadline,
+                    opencode_process_manager=opencode_process_manager,
+                )
+                response_payload = {"messages": waited_messages, "transport_recovery": submit_transport_recovery}
         if completion_probe is None:
             wait_timeout = min(float(settings.chat_completion_timeout_seconds), _remaining_seconds(wall_deadline))
             completion_probe, waited_messages = await _wait_for_assistant_completion(
@@ -1366,7 +1720,8 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         progress_state: dict[str, Any] = {"last_progress_at": loop.time(), "last_event_type": "initial_probe", "count": 0}
         auto_continue_suppressed_reason = ""
         allow_continue, continue_reason = _should_auto_continue(completion_state, completion_probe, assistant_text, settings)
-        if not allow_continue and continue_reason == "submit_timeout_recovery_exhausted_still_running":
+        recovery_still_running_reasons = {"submit_timeout_recovery_exhausted_still_running", "opencode_transport_disconnected_still_running"}
+        if not allow_continue and continue_reason in recovery_still_running_reasons:
             auto_continue_suppressed_reason = continue_reason
             await _publish_continuation_event(
                 runtime_events=runtime_events,
@@ -1382,10 +1737,11 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                 turn_index=continuation_count + 1,
                 reason=continue_reason,
                 state="incomplete",
-                summary="Auto-continuation suppressed because OpenCode may still be running after submit timeout recovery exhausted.",
+                summary="Auto-continuation suppressed because OpenCode may still be running after submit recovery.",
                 metadata={
                     "opencode_may_still_be_running": True,
-                    "submit_timeout_recovery_exhausted": True,
+                    "submit_timeout_recovery_exhausted": continue_reason == "submit_timeout_recovery_exhausted_still_running",
+                    "opencode_transport_disconnected": continue_reason == "opencode_transport_disconnected_still_running",
                     "auto_continue_after_running_timeout": bool(settings.chat_auto_continue_after_running_timeout),
                 },
             )
@@ -1514,6 +1870,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                     progress_state=progress_state,
                 )
                 timeout_recovery_debug = {"attempted": False, "state": "not_needed", "reason": ""}
+                transport_recovery_debug = {"attempted": False, "state": "not_needed", "reason": ""}
                 try:
                     before_messages = await client.list_messages(record.opencode_session_id)
                     continuation_prompt = settings.chat_auto_continue_checkpoint_prompt if settings.chat_auto_continue_checkpoint_enabled else settings.chat_auto_continue_prompt
@@ -1580,6 +1937,35 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                     continuation_response_payload = {"messages": after_messages, "timeout_recovery": submit_timeout_recovery}
                     latest_response_payload = continuation_response_payload
                     latest_waited_messages = after_messages
+                except OpenCodeTransportDisconnected as exc:
+                    if not settings.chat_timeout_recovery_enabled:
+                        raise
+                    completion_probe, after_messages, submit_transport_recovery = await _recover_after_submit_transport_error(
+                        client=client,
+                        opencode_session_id=record.opencode_session_id,
+                        portal_session_id=portal_session_id,
+                        request_id=request_id,
+                        transport_exc=exc,
+                        settings=settings,
+                        runtime_events=runtime_events,
+                        bus=bus,
+                        trace_context=trace_context,
+                        chat_run_store=chat_run_store,
+                        before_assistant_message_ids=set(extract_assistant_message_ids(before_messages)),
+                        before_snapshot_unreliable=False,
+                        wall_deadline=wall_deadline,
+                        opencode_process_manager=opencode_process_manager,
+                    )
+                    _drain_progress_events(progress_sub, session_id=portal_session_id, request_id=request_id, progress_state=progress_state, binding_store=binding_store, opencode_session_id=record.opencode_session_id)
+                    transport_recovery_debug = {
+                        "attempted": True,
+                        "state": "recovered" if submit_transport_recovery.get("recovered") else "exhausted",
+                        "reason": submit_transport_recovery.get("reason", ""),
+                        "polls": submit_transport_recovery.get("polls", 0),
+                    }
+                    continuation_response_payload = {"messages": after_messages, "transport_recovery": submit_transport_recovery}
+                    latest_response_payload = continuation_response_payload
+                    latest_waited_messages = after_messages
                 except Exception as exc:
                     completed_at = utc_now_iso()
                     failed_debug = {
@@ -1599,6 +1985,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                         "changed_signature": False,
                         "changed_signature_hash": _signature_hash(last_sig),
                         "timeout_recovery": timeout_recovery_debug,
+                        "transport_recovery": transport_recovery_debug,
                         "error_type": type(exc).__name__,
                         "error_summary": safe_preview(str(exc), 300),
                     }
@@ -1652,6 +2039,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                     "changed_signature": changed_signature,
                     "changed_signature_hash": _signature_hash(new_sig),
                     "timeout_recovery": timeout_recovery_debug,
+                    "transport_recovery": transport_recovery_debug,
                     "text_preview": safe_preview(assistant_text, 200),
                 }
                 continuation_debug.append(debug_entry)
@@ -1872,6 +2260,8 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(_redact_attachment_payloads_for_debug(response_payload), 2000), "trace_context": trace_context, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids}, "attachments": attachment_debug, "continuation": continuation_metadata, "continuations": continuation_debug}
         if submit_timeout_recovery:
             llm_debug["timeout_recovery"] = submit_timeout_recovery
+        if submit_transport_recovery:
+            llm_debug["transport_recovery"] = submit_transport_recovery
         if skill_debug:
             llm_debug["skill_invocation"] = skill_debug
         if message_id_detection_error_before:
@@ -1927,6 +2317,8 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
     out = {"ok": ok, "completion_state": completion_state, "incomplete_reason": incomplete_reason, "session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids, "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "continuation_count": continuation_count, "auto_continue_enabled": settings.chat_auto_continue_enabled, "metadata": response_metadata, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context, "attachments": attachment_debug, "completion_probe": completion_probe, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids}, "continuation": continuation_metadata, "continuations": continuation_debug}}
     if submit_timeout_recovery:
         out["_llm_debug"]["timeout_recovery"] = submit_timeout_recovery
+    if submit_transport_recovery:
+        out["_llm_debug"]["transport_recovery"] = submit_transport_recovery
     if message_id_detection_error_before:
         out["_llm_debug"]["message_id_detection_error_before"] = message_id_detection_error_before
     if message_id_detection_error_after:
@@ -1940,14 +2332,28 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         try:
             current_run = chat_run_store.get(request_id)
             stream_detached = bool(current_run is not None and getattr(current_run, "stream_state", "") == "detached")
-            if auto_continue_suppressed_reason == "submit_timeout_recovery_exhausted_still_running":
+            if auto_continue_suppressed_reason in {"submit_timeout_recovery_exhausted_still_running", "opencode_transport_disconnected_still_running"}:
                 response_metadata["opencode_may_still_be_running"] = True
-                chat_run_store.keep_running(
-                    request_id,
-                    reason=auto_continue_suppressed_reason,
-                    payload={**out, "metadata": {**response_metadata, "opencode_may_still_be_running": True}},
-                    stream_detached=stream_detached,
-                )
+                if auto_continue_suppressed_reason == "opencode_transport_disconnected_still_running" and hasattr(chat_run_store, "mark_recovering"):
+                    transport_diagnostics = completion_diagnostics if isinstance(completion_diagnostics, dict) else {}
+                    chat_run_store.mark_recovering(
+                        request_id,
+                        "opencode_transport_disconnected",
+                        {
+                            **transport_diagnostics,
+                            "recovery_state": "recovering",
+                            "opencode_may_still_be_running": True,
+                            "restart_attempted": bool(transport_diagnostics.get("restart_attempted", False)),
+                            "restart_status": transport_diagnostics.get("restart_status"),
+                        },
+                    )
+                else:
+                    chat_run_store.keep_running(
+                        request_id,
+                        reason=auto_continue_suppressed_reason,
+                        payload={**out, "metadata": {**response_metadata, "opencode_may_still_be_running": True}},
+                        stream_detached=stream_detached,
+                    )
                 run_kept_active = True
                 await _publish_run_lifecycle_event(
                     chat_run_store=chat_run_store,
@@ -1959,8 +2365,8 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                     request_id=request_id,
                     opencode_session_id=updated.opencode_session_id,
                     state="running",
-                    data={"status": "stream_detached" if stream_detached else "running", "completion_state": completion_state, "reason": auto_continue_suppressed_reason, "opencode_may_still_be_running": True},
-                    summary="Chat run is still running after submit timeout recovery was exhausted.",
+                    data={"status": "recovering" if auto_continue_suppressed_reason == "opencode_transport_disconnected_still_running" else ("stream_detached" if stream_detached else "running"), "completion_state": completion_state, "reason": auto_continue_suppressed_reason, "opencode_may_still_be_running": True},
+                    summary="Chat run is still running after submit recovery was exhausted.",
                 )
             elif completion_state == "completed":
                 chat_run_store.complete_run(request_id, out)
@@ -2059,6 +2465,10 @@ REQUEST_SCOPED_STREAM_EVENT_TYPES = {
     "chat.timeout_recovery.poll",
     "chat.timeout_recovery.recovered",
     "chat.timeout_recovery.exhausted",
+    "chat.transport_recovery.started",
+    "chat.transport_recovery.poll",
+    "chat.transport_recovery.recovered",
+    "chat.transport_recovery.exhausted",
     "chat.incomplete",
     "chat.blocked",
     "chat.empty_final",
@@ -2629,7 +3039,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     chat_run_store.complete_run(req_id, final_payload)
                 elif completion_state == "error":
                     chat_run_store.mark_failed(req_id, str(final_payload.get("incomplete_reason") or final_payload.get("error") or "chat_failed"), final_payload)
-                elif still_running and run_record is not None and getattr(run_record, "status", "") in {"accepted", "running", "stream_attached", "stream_detached"}:
+                elif still_running and run_record is not None and getattr(run_record, "status", "") in {"accepted", "running", "recovering", "stream_attached", "stream_detached"}:
                     chat_run_store.keep_running(req_id, reason=str(final_payload.get("incomplete_reason") or "opencode_may_still_be_running"), payload=final_payload, stream_detached=getattr(run_record, "stream_state", "") == "detached")
                 else:
                     chat_run_store.mark_incomplete(req_id, str(final_payload.get("incomplete_reason") or completion_state or "incomplete"), final_payload)

@@ -9,7 +9,7 @@ from typing import Any
 from .thinking_events import safe_preview, utc_now_iso
 
 
-ACTIVE_RUN_STATUSES = {"accepted", "running", "stream_attached", "stream_detached"}
+ACTIVE_RUN_STATUSES = {"accepted", "running", "recovering", "stream_attached", "stream_detached"}
 TERMINAL_RUN_STATUSES = {"completed", "incomplete", "failed", "cancelled"}
 ALLOWED_RUN_STATUSES = ACTIVE_RUN_STATUSES | TERMINAL_RUN_STATUSES
 ALLOWED_STREAM_STATES = {"none", "attached", "detached", "closed"}
@@ -330,6 +330,42 @@ class ChatRunStore:
             record.final_payload = _safe_dict(payload, 12000)
         return self._save(record)
 
+    def record_transport_error(self, request_id: str, error_payload: dict[str, Any]) -> ChatRunRecord | None:
+        record = self._runs.get(request_id)
+        if record is None:
+            return None
+        safe_error = _safe_dict(error_payload, 2000)
+        record.metadata = _safe_dict(
+            {
+                **record.metadata,
+                "last_transport_error": safe_error,
+                "opencode_disconnected": True,
+            },
+            4000,
+        )
+        return self._save(record)
+
+    def mark_recovering(self, request_id: str, reason: str, metadata: dict[str, Any] | None = None) -> ChatRunRecord | None:
+        record = self._runs.get(request_id)
+        if record is None:
+            return None
+        safe_metadata = _safe_dict(metadata or {}, 4000)
+        was_stream_detached = record.status == "stream_detached" and record.stream_state == "detached"
+        if record.status not in TERMINAL_RUN_STATUSES:
+            record.status = "stream_detached" if was_stream_detached else "recovering"
+        record.stream_state = "detached"
+        record.completion_state = "incomplete"
+        record.incomplete_reason = _safe_text(reason or "recovering", 500)
+        record.metadata = _safe_dict(
+            {
+                **record.metadata,
+                "recovery_state": safe_metadata.get("recovery_state") or "recovering",
+                **safe_metadata,
+            },
+            4000,
+        )
+        return self._save(record)
+
     def update_from_runtime_event(self, request_id: str, event: dict[str, Any]) -> ChatRunRecord | None:
         record = self._runs.get(request_id)
         if record is None or not isinstance(event, dict):
@@ -408,10 +444,37 @@ class ChatRunStore:
             return None
         return max(runs, key=lambda record: record.updated_at or record.started_at)
 
+    def list_active(self) -> list[ChatRunRecord]:
+        runs = [record for record in self._runs.values() if record.status in ACTIVE_RUN_STATUSES]
+        runs.sort(key=lambda record: record.updated_at or record.started_at, reverse=True)
+        return runs
+
     def list_for_session(self, portal_session_id: str, limit: int = 20) -> list[ChatRunRecord]:
         runs = [record for record in self._runs.values() if record.portal_session_id == portal_session_id]
         runs.sort(key=lambda record: record.updated_at or record.started_at, reverse=True)
         return runs[: max(0, int(limit))]
+
+    def diagnostics_for(self, record: ChatRunRecord | None) -> dict[str, Any]:
+        if record is None:
+            return {}
+        metadata = _safe_dict(record.metadata, 4000)
+        last_transport_error = metadata.get("last_transport_error")
+        if not isinstance(last_transport_error, dict):
+            last_transport_error = {}
+        diagnostics = {
+            "last_transport_error": {
+                key: last_transport_error.get(key)
+                for key in ("exception_type", "method", "path", "recoverable")
+                if last_transport_error.get(key) is not None
+            },
+            "opencode_process_status": metadata.get("opencode_process_status"),
+            "restart_attempted": bool(metadata.get("restart_attempted", False)),
+            "restart_status": metadata.get("restart_status"),
+            "recovery_state": metadata.get("recovery_state"),
+            "opencode_disconnected": bool(metadata.get("opencode_disconnected", False)),
+            "opencode_may_still_be_running": bool(metadata.get("opencode_may_still_be_running", False)),
+        }
+        return _safe_dict({key: value for key, value in diagnostics.items() if value not in ({}, None, "")}, 4000)
 
     def to_public_dict(self, record: ChatRunRecord | None, *, include_final_payload: bool = True) -> dict[str, Any] | None:
         if record is None:
@@ -433,6 +496,7 @@ class ChatRunStore:
             "completed_at": record.completed_at,
             "last_event_at": record.last_event_at,
             "metadata": _safe_dict(record.metadata, 4000),
+            "diagnostics": self.diagnostics_for(record),
         }
         if include_final_payload and record.status in {"completed", "incomplete", "failed"}:
             payload["final_payload"] = _safe_dict(record.final_payload, 12000)

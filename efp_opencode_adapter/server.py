@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from .app_keys import (
     EVENT_BRIDGE_KEY,
     EVENT_BRIDGE_TASK_KEY,
     OPENCODE_PROCESS_MANAGER_KEY,
+    OPENCODE_WATCHDOG_TASK_KEY,
     REQUEST_BINDING_STORE_KEY,
 )
 
@@ -55,6 +57,7 @@ from .opencode_auth import build_opencode_auth_from_runtime_config
 from .path_utils import path_exists
 from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_status_payload, sanitize_profile_config_for_storage, sanitize_public_secrets
 from .runtime_env import build_runtime_env_from_config, read_runtime_env_file, write_runtime_env_file
+from .thinking_events import safe_preview, utc_now_iso
 from .git_cli_auth import write_git_gh_auth_assets
 from .opencode_process import OpenCodeProcessManager
 from .session_store import SessionStore
@@ -103,6 +106,51 @@ def _runtime_env_for_status(settings: Settings, overlay) -> dict[str, str]:
     if path_exists(env_path):
         return _merge_startup_env_with_process_fallback(settings, read_runtime_env_file(env_path))
     return build_runtime_env_from_config(settings, {}).env
+
+
+def _active_chat_runs(app: web.Application) -> list:
+    store = app.get(CHAT_RUN_STORE_KEY)
+    if store is None:
+        return []
+    if hasattr(store, "list_active"):
+        try:
+            return list(store.list_active())
+        except Exception:
+            return []
+    runs = getattr(store, "_runs", {})
+    if isinstance(runs, dict):
+        return [record for record in runs.values() if getattr(record, "status", "") in {"accepted", "running", "recovering", "stream_attached", "stream_detached"}]
+    return []
+
+
+def _is_atlassian_only_profile_change(runtime_config: dict, updated_sections: list[str]) -> bool:
+    if not isinstance(runtime_config, dict) or not runtime_config:
+        return False
+    meaningful_keys = {str(key) for key, value in runtime_config.items() if value not in ({}, [], None, "")}
+    if not meaningful_keys or not meaningful_keys.issubset({"jira", "confluence", "atlassian"}):
+        return False
+    return "atlassian" in set(updated_sections)
+
+
+async def _publish_restart_deferred(app: web.Application, *, active_runs: list, reason: str) -> None:
+    bus = app.get(EVENT_BUS_KEY)
+    if bus is None:
+        return
+    event = {
+        "type": "opencode.restart_deferred",
+        "event_type": "opencode.restart_deferred",
+        "engine": "opencode",
+        "state": "pending_restart",
+        "summary": "Managed OpenCode restart deferred while chat runs are active.",
+        "data": {
+            "reason": reason,
+            "active_run_count": len(active_runs),
+            "active_request_ids": [str(getattr(run, "request_id", "")) for run in active_runs if getattr(run, "request_id", "")],
+        },
+        "created_at": utc_now_iso(),
+        "ts": time.time(),
+    }
+    await bus.publish(event)
 
 
 async def health_handler(request: web.Request) -> web.Response:
@@ -222,21 +270,33 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     warnings.extend([item for item in env_result.warnings if item not in warnings])
     env_path = write_runtime_env_file(settings, env_result.env)
     git_auth_result = write_git_gh_auth_assets(settings, env_result.env)
+    combined_updated_sections = sorted(set(updated_sections + env_result.updated_sections + atlassian_result.updated_sections))
     manager = request.app.get(OPENCODE_PROCESS_MANAGER_KEY)
     restart_performed = False
     health_ok = None
     opencode_pid = None
     restart_meta = {}
+    restart_deferred_reason = None
     if manager:
-        restart_meta = await manager.restart(env_result.env, reason="runtime_profile_apply")
-        restart_performed = True
-        health_ok = bool(restart_meta.get("health_ok"))
-        opencode_pid = restart_meta.get("pid")
-        pending_restart = not health_ok
-        if pending_restart:
-            status, applied, last_error = "failed", False, "opencode_restart_failed"
-        else:
+        active_runs = _active_chat_runs(request.app)
+        if _is_atlassian_only_profile_change(runtime_config, combined_updated_sections):
             status, applied = "applied", True
+            pending_restart = False
+        elif active_runs:
+            restart_deferred_reason = "active_chat_run"
+            pending_restart = True
+            status, applied = "pending_restart", False
+            await _publish_restart_deferred(request.app, active_runs=active_runs, reason=restart_deferred_reason)
+        else:
+            restart_meta = await manager.restart(env_result.env, reason="runtime_profile_apply")
+            restart_performed = True
+            health_ok = bool(restart_meta.get("health_ok"))
+            opencode_pid = restart_meta.get("pid")
+            pending_restart = not health_ok
+            if pending_restart:
+                status, applied, last_error = "failed", False, "opencode_restart_failed"
+            else:
+                status, applied = "applied", True
     else:
         patch_result: dict = {"success": False, "pending_restart": True}
         if hasattr(client, "patch_config"):
@@ -248,13 +308,14 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
         if pending_restart:
             warnings.append("opencode config patch unsupported; restart may be required")
         status, applied = ("pending_restart", False) if pending_restart else ("applied", True)
-    combined_updated_sections = sorted(set(updated_sections + env_result.updated_sections + atlassian_result.updated_sections))
     overlay = ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status=status, pending_restart=pending_restart, warnings=warnings, updated_sections=combined_updated_sections, last_apply_error=last_error, applied=applied, env_hash=env_result.env_hash, env_path=str(env_path), restart_performed=restart_performed, opencode_pid=opencode_pid, last_restart_at=restart_meta.get("last_restart_at") if restart_meta else None, last_restart_reason=restart_meta.get("last_restart_reason") if restart_meta else None, health_ok=health_ok, git_auth_configured=bool(git_auth_result.get("configured")), gh_host=git_auth_result.get("host"), gh_config_dir=git_auth_result.get("gh_config_dir"), git_askpass_path=git_auth_result.get("askpass_path"), gitconfig_path=git_auth_result.get("gitconfig_path"), atlassian_cli_configured=atlassian_result.configured, atlassian_config_path=atlassian_result.path, atlassian_jira_instances=atlassian_result.jira_instances, atlassian_confluence_instances=atlassian_result.confluence_instances)
     ProfileOverlayStore(settings).save(overlay)
     response = {"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "env_written": True, "env_hash": env_result.env_hash, "env_path": str(env_path), "updated_sections": combined_updated_sections, "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "auth_update_status": auth_update_status, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "restart_performed": restart_performed, "opencode_pid": opencode_pid, "health_ok": health_ok, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host"), "gh_config_dir": git_auth_result.get("gh_config_dir"), "git_askpass_path": git_auth_result.get("askpass_path"), "gitconfig_path": git_auth_result.get("gitconfig_path"), "atlassian_cli_configured": atlassian_result.configured, "atlassian_config_path": atlassian_result.path, "atlassian_jira_instances": atlassian_result.jira_instances, "atlassian_confluence_instances": atlassian_result.confluence_instances, "atlassian_status": atlassian_result.redacted_status, "status_endpoint": "/api/internal/runtime-profile/status"}
+    if restart_deferred_reason:
+        response["restart_deferred_reason"] = restart_deferred_reason
     if auth_build.warning:
         response["auth_warning"] = auth_build.warning
-    return web.json_response(response, status=500 if manager and pending_restart else 200)
+    return web.json_response(response, status=500 if manager and pending_restart and last_error == "opencode_restart_failed" else 200)
 
 
 async def runtime_profile_status_handler(request: web.Request) -> web.Response:
@@ -386,6 +447,66 @@ async def active_chat_run_for_session_handler(request: web.Request) -> web.Respo
     return web.json_response({"success": True, "engine": "opencode", "run": store.to_public_dict(store.active_for_session(session_id))})
 
 
+async def internal_opencode_status_handler(request: web.Request) -> web.Response:
+    client = request.app[OPENCODE_CLIENT_KEY]
+    manager = request.app.get(OPENCODE_PROCESS_MANAGER_KEY)
+    try:
+        health = await client.health()
+    except Exception as exc:
+        health = {"healthy": False, "error": safe_preview(str(exc), 500)}
+    process = manager.status_snapshot() if manager is not None and hasattr(manager, "status_snapshot") else {"managed": False}
+    return web.json_response(
+        {
+            "success": True,
+            "engine": "opencode",
+            "process": safe_preview(process, 4000),
+            "health": safe_preview(health, 1000),
+            "last_restart": {
+                "reason": process.get("last_restart_reason") if isinstance(process, dict) else None,
+                "at": process.get("last_restart_at") if isinstance(process, dict) else None,
+            },
+        }
+    )
+
+
+async def internal_opencode_log_tail_handler(request: web.Request) -> web.Response:
+    settings: Settings = request.app[SETTINGS_KEY]
+    manager = request.app.get(OPENCODE_PROCESS_MANAGER_KEY)
+    try:
+        lines = int(request.query.get("lines", "200"))
+    except ValueError:
+        lines = 200
+    lines = max(1, min(lines, 2000))
+    if manager is not None and hasattr(manager, "log_tail"):
+        text = manager.log_tail(lines)
+    else:
+        log_path = settings.adapter_state_dir / "opencode-serve.log"
+        try:
+            text = "\n".join(log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-lines:])
+        except Exception:
+            text = ""
+    return web.json_response({"success": True, "engine": "opencode", "lines": lines, "log_tail": safe_preview(text, 20000)})
+
+
+async def internal_chat_run_diagnostics_handler(request: web.Request) -> web.Response:
+    store = request.app[CHAT_RUN_STORE_KEY]
+    request_id = request.match_info["request_id"]
+    record = store.get(request_id)
+    if record is None:
+        return web.json_response({"success": False, "engine": "opencode", "error": "chat_run_not_found"}, status=404)
+    public = store.to_public_dict(record, include_final_payload=False)
+    diagnostics = public.get("diagnostics") if isinstance(public, dict) else {}
+    return web.json_response(
+        {
+            "success": True,
+            "engine": "opencode",
+            "request_id": request_id,
+            "status": getattr(record, "status", ""),
+            "diagnostics": safe_preview(diagnostics or {}, 4000),
+        }
+    )
+
+
 def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None, *, start_event_bridge: bool | None = None, opencode_process_manager: OpenCodeProcessManager | None = None) -> web.Application:
     app = web.Application()
     app[SETTINGS_KEY] = settings
@@ -404,6 +525,8 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     client = opencode_client or OpenCodeClient(settings)
     app[OPENCODE_CLIENT_KEY] = client
     if opencode_process_manager is not None:
+        if getattr(opencode_process_manager, "event_bus", None) is None:
+            opencode_process_manager.event_bus = app[EVENT_BUS_KEY]
         app[OPENCODE_PROCESS_MANAGER_KEY] = opencode_process_manager
     app.on_cleanup.append(cleanup_task_background_tasks)
     app[PORTAL_METADATA_CLIENT_KEY] = PortalMetadataClient(settings, pending_file=state_paths.portal_metadata_pending_file)
@@ -416,6 +539,9 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/actuator/health", health_handler)
     app.router.add_post("/api/internal/runtime-profile/apply", runtime_profile_apply_handler)
     app.router.add_get("/api/internal/runtime-profile/status", runtime_profile_status_handler)
+    app.router.add_get("/api/internal/opencode/status", internal_opencode_status_handler)
+    app.router.add_get("/api/internal/opencode/log-tail", internal_opencode_log_tail_handler)
+    app.router.add_get("/api/internal/chat/runs/{request_id}/diagnostics", internal_chat_run_diagnostics_handler)
     app.router.add_get("/api/internal/opencode-effective-config", effective_config_handler)
     app.router.add_get("/api/capabilities", capabilities_handler)
     app.router.add_get("/api/queue/status", queue_status_handler)
@@ -465,6 +591,8 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
                 env = build_runtime_env_from_config(settings, {}).env
             write_git_gh_auth_assets(settings, env)
             await manager.start(env, reason="startup")
+            if hasattr(manager, "run_watchdog"):
+                app[OPENCODE_WATCHDOG_TASK_KEY] = asyncio.create_task(manager.run_watchdog(app=app))
 
     async def _start_event_bridge(app):
         bridge = app.get(EVENT_BRIDGE_KEY)
@@ -479,10 +607,16 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     if should_start_event_bridge:
         app.on_startup.append(_start_event_bridge)
         app.on_cleanup.append(_cleanup_event_bridge)
+    async def _cleanup_opencode_watchdog(app):
+        task = app.get(OPENCODE_WATCHDOG_TASK_KEY)
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
     async def _stop_managed_opencode(app):
         manager = app.get(OPENCODE_PROCESS_MANAGER_KEY)
         if manager:
             await manager.stop()
+    app.on_cleanup.append(_cleanup_opencode_watchdog)
     app.on_cleanup.append(_stop_managed_opencode)
     return app
 

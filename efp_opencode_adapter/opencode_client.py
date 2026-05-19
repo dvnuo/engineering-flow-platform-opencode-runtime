@@ -20,6 +20,10 @@ class OpenCodeClientError(Exception):
         self.status = status
         self.payload = payload
         self.is_transport_timeout = False
+        self.is_recoverable_transport_error = False
+        self.method: str | None = None
+        self.path: str | None = None
+        self.exception_type: str | None = None
 
 
 class OpenCodeTransportTimeout(OpenCodeClientError):
@@ -40,10 +44,61 @@ class OpenCodeTransportTimeout(OpenCodeClientError):
             },
         )
         self.is_transport_timeout = True
+        self.method = method
+        self.path = path
+        self.exception_type = type(exc).__name__ if exc is not None else "TimeoutError"
+
+
+class OpenCodeTransportDisconnected(OpenCodeClientError):
+    recoverable = True
+
+    def __init__(self, method: str, path: str, exc: BaseException):
+        self.method = method
+        self.path = path
+        self.exception_type = type(exc).__name__
+        preview = _safe_error_preview(str(exc) or repr(exc))
+        super().__init__(
+            f"{method} {path} transport disconnected ({self.exception_type}): {preview}",
+            status=None,
+            payload={
+                "exception_type": self.exception_type,
+                "exception": preview,
+                "method": method,
+                "path": path,
+                "recoverable": True,
+            },
+        )
+        self.is_recoverable_transport_error = True
+        self.method = method
+        self.path = path
+        self.exception_type = type(exc).__name__
+
+
+_RECOVERABLE_TRANSPORT_ERRORS = (
+    aiohttp.client_exceptions.ServerDisconnectedError,
+    aiohttp.client_exceptions.ClientConnectionError,
+    aiohttp.client_exceptions.ClientOSError,
+    aiohttp.client_exceptions.ClientPayloadError,
+    ConnectionResetError,
+    BrokenPipeError,
+)
 
 
 def _format_transport_error(method: str, path: str, exc: BaseException) -> str:
     return f"{method} {path} transport error ({type(exc).__name__}): {_safe_error_preview(str(exc) or repr(exc))}"
+
+
+def _is_recoverable_transport_error(exc: BaseException) -> bool:
+    return isinstance(exc, _RECOVERABLE_TRANSPORT_ERRORS)
+
+
+def _client_error_payload(method: str, path: str, exc: BaseException) -> dict[str, Any]:
+    return {
+        "exception_type": type(exc).__name__,
+        "exception": _safe_error_preview(str(exc) or repr(exc)),
+        "method": method,
+        "path": path,
+    }
 
 
 
@@ -183,22 +238,26 @@ class OpenCodeClient:
                 return await _run(self._session)
             except asyncio.TimeoutError as exc:
                 raise OpenCodeTransportTimeout(method, path, timeout_seconds, exc) from exc
+            except _RECOVERABLE_TRANSPORT_ERRORS as exc:
+                raise OpenCodeTransportDisconnected(method, path, exc) from exc
             except aiohttp.ClientError as exc:
                 raise OpenCodeClientError(
                     _format_transport_error(method, path, exc),
                     status=None,
-                    payload={"exception_type": type(exc).__name__, "exception": _safe_error_preview(str(exc) or repr(exc))},
+                    payload=_client_error_payload(method, path, exc),
                 ) from exc
         async with aiohttp.ClientSession() as session:
             try:
                 return await _run(session)
             except asyncio.TimeoutError as exc:
                 raise OpenCodeTransportTimeout(method, path, timeout_seconds, exc) from exc
+            except _RECOVERABLE_TRANSPORT_ERRORS as exc:
+                raise OpenCodeTransportDisconnected(method, path, exc) from exc
             except aiohttp.ClientError as exc:
                 raise OpenCodeClientError(
                     _format_transport_error(method, path, exc),
                     status=None,
-                    payload={"exception_type": type(exc).__name__, "exception": _safe_error_preview(str(exc) or repr(exc))},
+                    payload=_client_error_payload(method, path, exc),
                 ) from exc
 
     async def _request_json_with_status(self, method: str, path: str, *, json: dict | None = None, expected_statuses: tuple[int, ...] = (200,), timeout_seconds: int = 30) -> tuple[int, Any]:
@@ -222,22 +281,26 @@ class OpenCodeClient:
                 return await _run(self._session)
             except asyncio.TimeoutError as exc:
                 raise OpenCodeTransportTimeout(method, path, timeout_seconds, exc) from exc
+            except _RECOVERABLE_TRANSPORT_ERRORS as exc:
+                raise OpenCodeTransportDisconnected(method, path, exc) from exc
             except aiohttp.ClientError as exc:
                 raise OpenCodeClientError(
                     _format_transport_error(method, path, exc),
                     status=None,
-                    payload={"exception_type": type(exc).__name__, "exception": _safe_error_preview(str(exc) or repr(exc))},
+                    payload=_client_error_payload(method, path, exc),
                 ) from exc
         async with aiohttp.ClientSession() as session:
             try:
                 return await _run(session)
             except asyncio.TimeoutError as exc:
                 raise OpenCodeTransportTimeout(method, path, timeout_seconds, exc) from exc
+            except _RECOVERABLE_TRANSPORT_ERRORS as exc:
+                raise OpenCodeTransportDisconnected(method, path, exc) from exc
             except aiohttp.ClientError as exc:
                 raise OpenCodeClientError(
                     _format_transport_error(method, path, exc),
                     status=None,
-                    payload={"exception_type": type(exc).__name__, "exception": _safe_error_preview(str(exc) or repr(exc))},
+                    payload=_client_error_payload(method, path, exc),
                 ) from exc
 
     async def _request(self, method: str, url: str, **kwargs):

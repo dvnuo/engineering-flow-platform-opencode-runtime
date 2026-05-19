@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from efp_opencode_adapter.app_keys import CHAT_RUN_STORE_KEY
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 
@@ -353,6 +354,15 @@ class FakeManager:
         return {'pid':123,'health_ok':True,'last_restart_reason':reason}
 
 
+class CountingManager(FakeManager):
+    def __init__(self):
+        self.restart_calls = []
+
+    async def restart(self, env, reason='runtime_profile_apply'):
+        self.restart_calls.append({"env": env, "reason": reason})
+        return {'pid':123,'health_ok':True,'last_restart_reason':reason}
+
+
 @pytest.mark.asyncio
 async def test_apply_with_manager_restarts_and_no_patch(tmp_path, monkeypatch):
     workspace, state = tmp_path / 'workspace', tmp_path / 'state'
@@ -363,6 +373,39 @@ async def test_apply_with_manager_restarts_and_no_patch(tmp_path, monkeypatch):
     body = await (await c.post('/api/internal/runtime-profile/apply', headers={'X-Portal-Author-Source':'portal'}, json={'config': {}})).json()
     assert body['env_written'] is True and body['restart_performed'] is True and body['pending_restart'] is False and body['status']=='applied'
     assert fake.patch_calls == []
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_with_manager_defers_restart_during_active_chat_run(tmp_path, monkeypatch):
+    workspace, state = tmp_path / 'workspace', tmp_path / 'state'
+    monkeypatch.setenv('EFP_WORKSPACE_DIR', str(workspace)); monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('OPENCODE_CONFIG', str(workspace / '.opencode/opencode.json'))
+    manager = CountingManager()
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient(), opencode_process_manager=manager)
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-active", portal_session_id="sess-active", opencode_session_id="ses-active", status="running")
+    c = TestClient(TestServer(app)); await c.start_server()
+    body = await (await c.post('/api/internal/runtime-profile/apply', headers={'X-Portal-Author-Source':'portal'}, json={'config': {'llm': {'provider': 'anthropic', 'model': 'claude'}}})).json()
+    assert body['pending_restart'] is True
+    assert body['restart_performed'] is False
+    assert body['restart_deferred_reason'] == 'active_chat_run'
+    assert manager.restart_calls == []
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_with_manager_atlassian_only_change_does_not_restart_active_run(tmp_path, monkeypatch):
+    workspace, state = tmp_path / 'workspace', tmp_path / 'state'
+    monkeypatch.setenv('EFP_WORKSPACE_DIR', str(workspace)); monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(state)); monkeypatch.setenv('OPENCODE_CONFIG', str(workspace / '.opencode/opencode.json'))
+    manager = CountingManager()
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient(), opencode_process_manager=manager)
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-active", portal_session_id="sess-active", opencode_session_id="ses-active", status="running")
+    c = TestClient(TestServer(app)); await c.start_server()
+    body = await (await c.post('/api/internal/runtime-profile/apply', headers={'X-Portal-Author-Source':'portal'}, json={'config': {'jira': {'instances': [{'name': 'work', 'base_url': 'https://jira.example.com', 'token': 'jira-token'}]}}})).json()
+    assert body['pending_restart'] is False
+    assert body['restart_performed'] is False
+    assert body['status'] == 'applied'
+    assert manager.restart_calls == []
+    assert body['atlassian_cli_configured'] is True
     await c.close()
 
 
