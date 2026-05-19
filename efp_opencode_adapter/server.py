@@ -266,6 +266,7 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     if atlassian_result.configured and "atlassian" not in updated_sections:
         updated_sections.append("atlassian")
     env_result = build_runtime_env_from_config(settings, runtime_config)
+    runtime_env_has_values = bool(env_result.env)
     env_result.env.update(atlassian_result.env)
     warnings.extend([item for item in env_result.warnings if item not in warnings])
     env_path = write_runtime_env_file(settings, env_result.env)
@@ -288,7 +289,11 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
             status, applied = "pending_restart", False
             await _publish_restart_deferred(request.app, active_runs=active_runs, reason=restart_deferred_reason)
         else:
-            restart_meta = await manager.restart(env_result.env, reason="runtime_profile_apply")
+            # Empty env_result.env should not clear the cached managed env. Use None to preserve
+            # the last successful startup/runtime-profile env for OpenCode recovery/watchdog restarts.
+            # Atlassian config always contributes ATLASSIAN_CONFIG, so guard on the pre-merge env.
+            restart_env = env_result.env if runtime_env_has_values else None
+            restart_meta = await manager.restart(restart_env, reason="runtime_profile_apply")
             restart_performed = True
             health_ok = bool(restart_meta.get("health_ok"))
             opencode_pid = restart_meta.get("pid")
