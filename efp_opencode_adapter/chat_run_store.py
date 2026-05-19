@@ -252,7 +252,7 @@ class ChatRunStore:
         record.last_event_at = utc_now_iso()
         return self._save(record)
 
-    def detach_stream(self, request_id: str, reason: str) -> ChatRunRecord | None:
+    def detach_stream(self, request_id: str, reason: str, metadata: dict[str, Any] | None = None) -> ChatRunRecord | None:
         record = self._runs.get(request_id)
         if record is None:
             return None
@@ -260,7 +260,7 @@ class ChatRunStore:
             record.status = "stream_detached"
         record.stream_state = "detached"
         record.incomplete_reason = record.incomplete_reason or _safe_text(reason, 300)
-        record.metadata = _safe_dict({**record.metadata, "stream_detach_reason": reason})
+        record.metadata = _safe_dict({**record.metadata, "stream_detach_reason": reason, **(metadata or {})})
         record.last_event_at = utc_now_iso()
         return self._save(record)
 

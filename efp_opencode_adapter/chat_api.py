@@ -20,6 +20,7 @@ from .app_keys import (
     PORTAL_METADATA_CLIENT_KEY,
     SETTINGS_KEY,
     SESSION_STORE_KEY,
+    TASK_BACKGROUND_TASKS_KEY,
     USAGE_TRACKER_KEY,
     REQUEST_BINDING_STORE_KEY,
     USER_DISPLAY_STORE_KEY,
@@ -2069,6 +2070,23 @@ class SSEClientDisconnected(Exception):
     pass
 
 
+def _track_stream_detach_task(app: web.Application, task: asyncio.Task) -> None:
+    task_set = app.get(TASK_BACKGROUND_TASKS_KEY)
+    if isinstance(task_set, set):
+        task_set.add(task)
+        task.add_done_callback(task_set.discard)
+    task.add_done_callback(_consume_stream_detach_task)
+
+
+def _consume_stream_detach_task(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logger.exception("failed to mark chat stream detached in background")
+
+
 def _consume_background_chat_task(task: asyncio.Task, *, request_id: str, session_id: str) -> None:
     try:
         task.result()
@@ -2117,6 +2135,84 @@ async def _safe_write_eof(resp: web.StreamResponse) -> None:
         if _is_closed_transport_runtime_error(exc):
             return
         raise
+
+
+async def _mark_chat_stream_detached(
+    *,
+    request: web.Request,
+    request_id: str,
+    session_id: str,
+    opencode_session_id: str | None,
+    reason: str,
+    run_task: asyncio.Task | None = None,
+    transport_cancelled: bool = False,
+) -> None:
+    chat_run_store = request.app.get(CHAT_RUN_STORE_KEY)
+    bus = request.app.get(EVENT_BUS_KEY)
+    if bus is None:
+        return
+
+    run_task_done = bool(run_task.done()) if run_task is not None else False
+    metadata = {
+        "transport_cancelled": bool(transport_cancelled),
+        "run_task_done": run_task_done,
+        "background_continues": True,
+    }
+    run_record = chat_run_store.get(request_id) if chat_run_store is not None and hasattr(chat_run_store, "get") else None
+    if run_record is not None and getattr(run_record, "status", "") in {"completed", "incomplete", "failed", "cancelled"}:
+        return
+
+    resolved_opencode_session_id = opencode_session_id or ""
+    if not resolved_opencode_session_id and run_record is not None:
+        resolved_opencode_session_id = str(getattr(run_record, "opencode_session_id", "") or "")
+    if not resolved_opencode_session_id:
+        session_record = request.app[SESSION_STORE_KEY].get(session_id)
+        resolved_opencode_session_id = session_record.opencode_session_id if session_record is not None else ""
+
+    if chat_run_store is not None and hasattr(chat_run_store, "detach_stream"):
+        chat_run_store.detach_stream(request_id, reason=reason, metadata=metadata)
+
+    trace_context = build_trace_context(
+        request.app[SETTINGS_KEY],
+        request_id=request_id,
+        session_id=session_id,
+        opencode_session_id=resolved_opencode_session_id,
+    )
+    event = add_trace_context(
+        {
+            "type": "chat.stream_detached",
+            "event_type": "chat.stream_detached",
+            "engine": "opencode",
+            "session_id": session_id,
+            "request_id": request_id,
+            "opencode_session_id": resolved_opencode_session_id,
+            "state": "running",
+            "reason": reason,
+            "summary": "Chat SSE transport detached while the run remained active.",
+            "metadata": metadata,
+            "data": {
+                "event_type": "chat.stream_detached",
+                "request_id": request_id,
+                "session_id": session_id,
+                "state": "running",
+                "reason": reason,
+                "metadata": metadata,
+            },
+            "created_at": utc_now_iso(),
+            "ts": time.time(),
+        },
+        trace_context,
+    )
+    await bus.publish(event)
+    if chat_run_store is not None and hasattr(chat_run_store, "update_from_runtime_event"):
+        chat_run_store.update_from_runtime_event(request_id, event)
+
+    chatlog_store = request.app.get(CHATLOG_STORE_KEY)
+    if chatlog_store is not None and hasattr(chatlog_store, "append_event"):
+        try:
+            chatlog_store.append_event(session_id, request_id=request_id, event=event, runtime=True)
+        except Exception:
+            logger.warning("failed to append stream detached event to chatlog", exc_info=True)
 
 
 async def _wait_for_event_or_completion(sub_queue: asyncio.Queue, run_task: asyncio.Task, timeout: float) -> tuple[str, dict[str, Any] | None]:
@@ -2373,6 +2469,8 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     seen: set[tuple] = set()
     binding_store = request.app.get(REQUEST_BINDING_STORE_KEY)
     client_disconnected = False
+    stream_cancelled = False
+    stream_detached = False
     sent_real_model_delta = False
     stream_started_at = time.time()
     last_event_at: str | float | None = None
@@ -2539,41 +2637,40 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             await _write_sse(resp, "done", {"ok": True})
     except SSEClientDisconnected:
         client_disconnected = True
+    except asyncio.CancelledError:
+        client_disconnected = True
+        stream_cancelled = True
+        raise
     finally:
         bus.unsubscribe(sub)
-        if client_disconnected and chat_run_store is not None:
+        if (client_disconnected or stream_cancelled) and not stream_detached:
+            detach_reason = "handler_cancelled" if stream_cancelled else "client_disconnected"
+            detach_task = asyncio.create_task(
+                _mark_chat_stream_detached(
+                    request=request,
+                    request_id=req_id,
+                    session_id=session_id,
+                    opencode_session_id=None,
+                    reason=detach_reason,
+                    run_task=run_task,
+                    transport_cancelled=stream_cancelled,
+                )
+            )
             try:
-                run_record = chat_run_store.get(req_id)
-                if run_record is not None and getattr(run_record, "status", "") not in {"completed", "incomplete", "failed", "cancelled"}:
-                    chat_run_store.detach_stream(req_id, reason="client_disconnected")
-                    detach_event = add_trace_context(
-                        {
-                            "type": "chat.stream_detached",
-                            "event_type": "chat.stream_detached",
-                            "engine": "opencode",
-                            "session_id": session_id,
-                            "request_id": req_id,
-                            "opencode_session_id": getattr(run_record, "opencode_session_id", ""),
-                            "state": "stream_detached",
-                            "summary": "Chat SSE client disconnected while the run was still active.",
-                            "data": {"event_type": "chat.stream_detached", "request_id": req_id, "session_id": session_id, "state": "stream_detached", "reason": "client_disconnected"},
-                            "created_at": utc_now_iso(),
-                            "ts": time.time(),
-                        },
-                        stream_trace,
-                    )
-                    await bus.publish(detach_event)
-                    chat_run_store.update_from_runtime_event(req_id, detach_event)
+                await asyncio.shield(detach_task)
+                stream_detached = True
+            except asyncio.CancelledError:
+                _track_stream_detach_task(request.app, detach_task)
             except Exception:
                 logger.warning("failed to detach chat stream", exc_info=True)
         if not run_task.done():
-            if client_disconnected:
+            if client_disconnected or stream_cancelled:
                 run_task.add_done_callback(lambda task: _consume_background_chat_task(task, request_id=req_id, session_id=session_id))
             else:
                 run_task.cancel()
                 await asyncio.gather(run_task, return_exceptions=True)
         else:
             _consume_background_chat_task(run_task, request_id=req_id, session_id=session_id)
-        if not client_disconnected:
+        if not client_disconnected and not stream_cancelled:
             await _safe_write_eof(resp)
     return resp
