@@ -180,6 +180,51 @@ async def test_session_metadata_clears_inactive_local_run_and_keeps_projection(t
 
 
 @pytest.mark.asyncio
+async def test_delete_session_clears_chat_run_store_and_aborts_active_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        created = await (await client.post("/api/chat", json={"message": "hello", "session_id": "s-delete"})).json()
+        record = app[SESSION_STORE_KEY].get("s-delete")
+        app[CHAT_RUN_STORE_KEY].start_run(request_id="req-delete-active", portal_session_id="s-delete", opencode_session_id=record.opencode_session_id, status="running")
+
+        payload = await (await client.delete("/api/sessions/s-delete")).json()
+
+        assert payload["success"] is True
+        assert payload["chat_runs_deleted"] >= 1
+        assert fake.abort_tree_calls == [record.opencode_session_id]
+        assert app[CHAT_RUN_STORE_KEY].active_for_session("s-delete") is None
+        assert app[CHAT_RUN_STORE_KEY].list_for_session("s-delete") == []
+        assert created["session_id"] == "s-delete"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_clear_sessions_clears_chat_run_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        await client.post("/api/chat", json={"message": "a", "session_id": "s-clear"})
+        record = app[SESSION_STORE_KEY].get("s-clear")
+        app[CHAT_RUN_STORE_KEY].start_run(request_id="req-clear-active", portal_session_id="s-clear", opencode_session_id=record.opencode_session_id, status="running")
+
+        payload = await (await client.post("/api/clear")).json()
+
+        assert payload["success"] is True
+        assert fake.abort_tree_calls == [record.opencode_session_id]
+        assert app[CHAT_RUN_STORE_KEY].list_for_session("s-clear") == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_rename_invalid_json_returns_400_json(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())

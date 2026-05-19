@@ -541,6 +541,42 @@ async def abort_session_handler(request: web.Request) -> web.Response:
     )
 
 
+async def reconcile_chat_runs_on_startup(app: web.Application) -> dict[str, int]:
+    store = app.get(CHAT_RUN_STORE_KEY)
+    client = app.get(OPENCODE_CLIENT_KEY)
+    if store is None or client is None or not hasattr(store, "list_active"):
+        return {"chat_runs_validated": 0, "chat_runs_stale_marked": 0, "chat_runs_still_active": 0}
+    records = list(store.list_active(include_detached_candidates=True))
+    summary = {"chat_runs_validated": 0, "chat_runs_stale_marked": 0, "chat_runs_still_active": 0}
+    for record in records:
+        before_status = getattr(record, "status", "")
+        try:
+            public = await validate_chat_run_against_opencode(store=store, client=client, record=record, event_bus=app.get(EVENT_BUS_KEY))
+        except Exception:
+            continue
+        summary["chat_runs_validated"] += 1
+        refreshed = store.get(getattr(record, "request_id", "")) if hasattr(store, "get") else None
+        if public is not None and public.get("opencode_active") is True:
+            summary["chat_runs_still_active"] += 1
+        if before_status != "stale" and getattr(refreshed, "status", "") == "stale":
+            summary["chat_runs_stale_marked"] += 1
+    bus = app.get(EVENT_BUS_KEY)
+    if bus is not None and hasattr(bus, "publish"):
+        await bus.publish(
+            {
+                "type": "chat.runs.reconciled",
+                "event_type": "chat.runs.reconciled",
+                "engine": "opencode",
+                "state": "completed",
+                "summary": "Chat run startup reconciliation completed.",
+                "data": dict(summary),
+                "created_at": utc_now_iso(),
+                "ts": time.time(),
+            }
+        )
+    return summary
+
+
 async def internal_opencode_status_handler(request: web.Request) -> web.Response:
     client = request.app[OPENCODE_CLIENT_KEY]
     manager = request.app.get(OPENCODE_PROCESS_MANAGER_KEY)
@@ -690,6 +726,13 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             if hasattr(manager, "run_watchdog"):
                 app[OPENCODE_WATCHDOG_TASK_KEY] = asyncio.create_task(manager.run_watchdog(app=app))
 
+    async def _reconcile_chat_runs(app):
+        try:
+            summary = await reconcile_chat_runs_on_startup(app)
+            print(f"chat run reconciliation summary: {summary}")
+        except Exception as exc:
+            print(f"chat run reconciliation failed: {exc}")
+
     async def _start_event_bridge(app):
         bridge = app.get(EVENT_BRIDGE_KEY)
         if bridge:
@@ -700,6 +743,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
     app.on_startup.append(_managed_opencode_startup)
+    app.on_startup.append(_reconcile_chat_runs)
     if should_start_event_bridge:
         app.on_startup.append(_start_event_bridge)
         app.on_cleanup.append(_cleanup_event_bridge)

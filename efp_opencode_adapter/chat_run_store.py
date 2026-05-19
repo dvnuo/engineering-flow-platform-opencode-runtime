@@ -491,7 +491,7 @@ class ChatRunStore:
 
         Call validate_chat_run_against_opencode before exposing this to Portal.
         """
-        runs = [record for record in self._runs.values() if record.portal_session_id == portal_session_id and record.status in ACTIVE_RUN_STATUSES]
+        runs = [record for record in self._runs.values() if record.portal_session_id == portal_session_id and record.status in LOCAL_RECONNECT_CANDIDATE_STATUSES]
         if not runs:
             return None
         return max(runs, key=lambda record: record.updated_at or record.started_at)

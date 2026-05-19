@@ -27,7 +27,7 @@ def test_chat_run_store_start_get_active_attach_detach_and_persistence(tmp_path)
     store.detach_stream("req-1", reason="client_disconnected")
     assert store.get("req-1").stream_state == "detached"
     assert store.get("req-1").status == "stream_detached"
-    assert store.active_for_session("sess-1") is None
+    assert store.active_for_session("sess-1").request_id == "req-1"
     assert [run.request_id for run in store.list_active(include_detached_candidates=True)] == ["req-1"]
 
     store.complete_run("req-1", {"completion_state": "completed", "response": "done", "assistant_message_id": "a-1", "assistant_message_ids": ["a-1"]})
@@ -124,7 +124,7 @@ def test_chat_run_store_transport_error_and_recovering_diagnostics_are_sanitized
 def test_chat_run_store_stale_aborted_delete_and_source_fields(tmp_path):
     store = ChatRunStore(tmp_path / "chat_runs.json")
     store.start_run(request_id="req-stale", portal_session_id="sess-1", opencode_session_id="ses-1", status="stream_detached", stream_state="detached")
-    assert store.active_for_session("sess-1") is None
+    assert store.active_for_session("sess-1").request_id == "req-stale"
 
     stale = store.mark_stale(
         "req-stale",

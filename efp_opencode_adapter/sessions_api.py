@@ -622,16 +622,26 @@ async def delete_session_handler(request: web.Request) -> web.Response:
     client = request.app[OPENCODE_CLIENT_KEY]
     portal_metadata = request.app.get(PORTAL_METADATA_CLIENT_KEY)
     chatlog_store = request.app.get(CHATLOG_STORE_KEY)
+    chat_run_store = request.app.get(CHAT_RUN_STORE_KEY)
     display_store = request.app.get(USER_DISPLAY_STORE_KEY)
     record = store.get(sid)
     if record is None or record.deleted:
         metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
+        chat_runs_deleted = chat_run_store.delete_for_session(sid) if chat_run_store is not None and hasattr(chat_run_store, "delete_for_session") else 0
         display_delete = _delete_user_display_best_effort(
             display_store,
             portal_session_id=sid,
             opencode_session_id=record.opencode_session_id if record else None,
         )
-        return web.json_response({"success": True, "session_id": sid, "already_deleted": True, "runtime_deleted": False, "opencode_deleted": False, "opencode_missing": record is None, "metadata_delete": metadata_delete, "display_delete": display_delete})
+        return web.json_response({"success": True, "session_id": sid, "already_deleted": True, "runtime_deleted": False, "opencode_deleted": False, "opencode_missing": record is None, "metadata_delete": metadata_delete, "display_delete": display_delete, "chat_runs_deleted": chat_runs_deleted})
+    abort_result = None
+    if chat_run_store is not None and hasattr(chat_run_store, "active_for_session"):
+        active_run = chat_run_store.active_for_session(sid)
+        if active_run is not None and getattr(active_run, "opencode_session_id", "") and hasattr(client, "abort_session_tree"):
+            try:
+                abort_result = await client.abort_session_tree(active_run.opencode_session_id)
+            except Exception as exc:
+                abort_result = {"success": False, "error": safe_preview(str(exc), 1000)}
     opencode_deleted = False
     opencode_missing = False
     try:
@@ -643,10 +653,11 @@ async def delete_session_handler(request: web.Request) -> web.Response:
         else:
             return web.json_response({"success": False, "error": "opencode_delete_failed", "session_id": sid, "opencode_session_id": record.opencode_session_id, "opencode_status": exc.status, "detail": str(exc)}, status=502)
     store.mark_deleted(sid)
+    chat_runs_deleted = chat_run_store.delete_for_session(sid) if chat_run_store is not None and hasattr(chat_run_store, "delete_for_session") else 0
     chatlog_delete = _delete_chatlog_best_effort(chatlog_store, sid)
     display_delete = _delete_user_display_best_effort(display_store, portal_session_id=sid, opencode_session_id=record.opencode_session_id)
     metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
-    return web.json_response({"success": True, "session_id": sid, "opencode_session_id": record.opencode_session_id, "already_deleted": False, "runtime_deleted": True, "opencode_deleted": opencode_deleted, "opencode_missing": opencode_missing, "metadata_delete": metadata_delete, "chatlog_delete": chatlog_delete, "display_delete": display_delete})
+    return web.json_response({"success": True, "session_id": sid, "opencode_session_id": record.opencode_session_id, "already_deleted": False, "runtime_deleted": True, "opencode_deleted": opencode_deleted, "opencode_missing": opencode_missing, "metadata_delete": metadata_delete, "chatlog_delete": chatlog_delete, "display_delete": display_delete, "chat_runs_deleted": chat_runs_deleted, "abort_result": abort_result})
 
 
 async def clear_sessions_handler(request: web.Request) -> web.Response:
@@ -654,11 +665,20 @@ async def clear_sessions_handler(request: web.Request) -> web.Response:
     client = request.app[OPENCODE_CLIENT_KEY]
     portal_metadata = request.app.get(PORTAL_METADATA_CLIENT_KEY)
     chatlog_store = request.app.get(CHATLOG_STORE_KEY)
+    chat_run_store = request.app.get(CHAT_RUN_STORE_KEY)
     display_store = request.app.get(USER_DISPLAY_STORE_KEY)
     failures = []
     deleted_count = 0
     metadata_results = []
     for rec in store.list_active():
+        abort_result = None
+        if chat_run_store is not None and hasattr(chat_run_store, "active_for_session"):
+            active_run = chat_run_store.active_for_session(rec.portal_session_id)
+            if active_run is not None and getattr(active_run, "opencode_session_id", "") and hasattr(client, "abort_session_tree"):
+                try:
+                    abort_result = await client.abort_session_tree(active_run.opencode_session_id)
+                except Exception as exc:
+                    abort_result = {"success": False, "error": safe_preview(str(exc), 1000)}
         try:
             await client.delete_session(rec.opencode_session_id)
             op_missing = False
@@ -670,10 +690,11 @@ async def clear_sessions_handler(request: web.Request) -> web.Response:
                 continue
         store.mark_deleted(rec.portal_session_id)
         deleted_count += 1
+        chat_runs_deleted = chat_run_store.delete_for_session(rec.portal_session_id) if chat_run_store is not None and hasattr(chat_run_store, "delete_for_session") else 0
         chatlog_delete = _delete_chatlog_best_effort(chatlog_store, rec.portal_session_id)
         display_delete = _delete_user_display_best_effort(display_store, portal_session_id=rec.portal_session_id, opencode_session_id=rec.opencode_session_id)
         metadata = await _delete_portal_metadata_best_effort(portal_metadata, rec.portal_session_id)
-        metadata_results.append({"session_id": rec.portal_session_id, "opencode_missing": op_missing, "metadata_delete": metadata, "chatlog_delete": chatlog_delete, "display_delete": display_delete})
+        metadata_results.append({"session_id": rec.portal_session_id, "opencode_missing": op_missing, "metadata_delete": metadata, "chatlog_delete": chatlog_delete, "display_delete": display_delete, "chat_runs_deleted": chat_runs_deleted, "abort_result": abort_result})
     if failures:
         return web.json_response({"success": False, "deleted_count": deleted_count, "failed_count": len(failures), "failures": failures, "metadata_delete": metadata_results}, status=502)
     return web.json_response({"success": True, "deleted_count": deleted_count, "failed_count": 0, "metadata_delete": metadata_results})
