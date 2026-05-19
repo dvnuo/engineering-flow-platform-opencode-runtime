@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from aiohttp import web
 from .app_keys import (
+    CHAT_RUN_STORE_KEY,
     CHATLOG_STORE_KEY,
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
@@ -503,6 +504,31 @@ def _latest_session_runtime_status_metadata(chatlog_store, sid: str) -> dict[str
     }
 
 
+def _chat_run_session_metadata(chat_run_store: Any, sid: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    if chat_run_store is None:
+        return {"active_run": None, "latest_run": None}
+    try:
+        active_record = chat_run_store.active_for_session(sid)
+        latest_record = chat_run_store.latest_for_session(sid)
+    except Exception:
+        return {"active_run": None, "latest_run": None}
+    active_run = chat_run_store.to_session_summary(active_record) if active_record is not None else None
+    latest_run = chat_run_store.to_session_summary(latest_record) if latest_record is not None else None
+    metadata: dict[str, Any] = {"active_run": active_run, "latest_run": latest_run}
+    if latest_record is not None and latest_record.last_response_text:
+        message_ids = {str(message.get("id") or (message.get("metadata") or {}).get("opencode_message_id") or "") for message in messages if isinstance(message, dict)}
+        assistant_ids = [latest_record.assistant_message_id, *latest_record.assistant_message_ids]
+        has_matching_message = any(message_id and message_id in message_ids for message_id in assistant_ids)
+        if not has_matching_message:
+            metadata["assistant_projection"] = {
+                "request_id": latest_record.request_id,
+                "assistant_message_id": latest_record.assistant_message_id,
+                "text": latest_record.last_response_text,
+                "display_blocks": list(latest_record.last_display_blocks),
+            }
+    return metadata
+
+
 async def get_session_handler(request: web.Request) -> web.Response:
     sid = request.match_info["session_id"]
     store = request.app[SESSION_STORE_KEY]
@@ -530,6 +556,7 @@ async def get_session_handler(request: web.Request) -> web.Response:
                 "opencode_session_id": record.opencode_session_id,
                 "partial_recovery": record.partial_recovery,
                 **_latest_session_runtime_status_metadata(request.app.get(CHATLOG_STORE_KEY), sid),
+                **_chat_run_session_metadata(request.app.get(CHAT_RUN_STORE_KEY), sid, efp_messages),
             },
         }
     )

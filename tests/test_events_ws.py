@@ -21,7 +21,7 @@ async def test_events_ws(tmp_path, monkeypatch):
 
     await client.post("/api/chat", json={"message": "hello", "session_id": "portal-1"})
     events = []
-    for _ in range(6):
+    for _ in range(12):
         events.append(await ws.receive_json(timeout=2))
         if events[-1].get("type") == "execution.completed":
             break
@@ -109,6 +109,47 @@ async def test_events_ws_replay_after_last_event_at(tmp_path, monkeypatch):
     event = await ws.receive_json(timeout=2)
 
     assert event["type"] == "three"
+
+    await ws.close()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_events_ws_replay_stream_detached_and_assistant_completed(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await app[EVENT_BUS_KEY].publish(
+        {
+            "type": "chat.stream_detached",
+            "event_type": "chat.stream_detached",
+            "session_id": "portal-detached",
+            "request_id": "req-detached",
+            "data": {"reason": "client_disconnected"},
+            "created_at": "2026-05-19T00:00:00+00:00",
+        }
+    )
+    await app[EVENT_BUS_KEY].publish(
+        {
+            "type": "assistant.message.completed",
+            "event_type": "assistant.message.completed",
+            "session_id": "portal-detached",
+            "request_id": "req-detached",
+            "data": {"assistant_message_id": "a-1", "text": "final"},
+            "created_at": "2026-05-19T00:00:01+00:00",
+        }
+    )
+
+    ws = await client.ws_connect("/api/events?session_id=portal-detached&replay=1")
+    assert (await ws.receive_json())["type"] == "connected"
+    first = await ws.receive_json(timeout=2)
+    second = await ws.receive_json(timeout=2)
+
+    assert [first["type"], second["type"]] == ["chat.stream_detached", "assistant.message.completed"]
+    assert first["metadata"]["replayed"] is True
+    assert second["data"]["replayed"] is True
 
     await ws.close()
     await client.close()

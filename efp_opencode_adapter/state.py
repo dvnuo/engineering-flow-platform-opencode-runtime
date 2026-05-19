@@ -16,6 +16,7 @@ class CompatStatePaths:
     attachments_dir: Path
     usage_dir: Path
     chatlogs_dir: Path
+    chat_runs_file: Path
     usage_file: Path
     portal_metadata_pending_file: Path
 
@@ -29,6 +30,7 @@ def ensure_state_dirs(settings: Settings) -> CompatStatePaths:
         attachments_dir=root / "attachments",
         usage_dir=root / "usage",
         chatlogs_dir=root / "chatlogs",
+        chat_runs_file=root / "chat_runs.json",
         usage_file=root / "usage.jsonl",
         portal_metadata_pending_file=root / "portal_metadata_pending.jsonl",
     )

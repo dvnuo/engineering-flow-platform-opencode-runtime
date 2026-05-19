@@ -1,5 +1,5 @@
 import json
-from efp_opencode_adapter.app_keys import EVENT_BUS_KEY, OPENCODE_CLIENT_KEY, REQUEST_BINDING_STORE_KEY
+from efp_opencode_adapter.app_keys import CHAT_RUN_STORE_KEY, EVENT_BUS_KEY, OPENCODE_CLIENT_KEY, REQUEST_BINDING_STORE_KEY
 import asyncio
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -96,12 +96,14 @@ async def test_chat_stream_emits_started_heartbeat_runtime_event_and_final(tmp_p
         body = await resp.text()
         events = _sse_events(body)
         names = [name for name, _payload in events]
-        assert names[:3] == ["chat.started", "heartbeat", "runtime_event"]
+        assert names[:4] == ["chat.started", "chat.stream_attached", "heartbeat", "runtime_event"]
         started_payload = events[0][1]
         assert started_payload["session_id"] == "portal-stream-start"
         assert started_payload["request_id"] == "req-stream-start"
         assert started_payload["chatlog_id"] == "req-stream-start"
-        heartbeat_payload = events[1][1]
+        attached_payload = events[1][1]
+        assert attached_payload["event_type"] == "chat.stream_attached"
+        heartbeat_payload = events[2][1]
         assert heartbeat_payload["completion_state"] == "running"
         assert "elapsed_seconds" in heartbeat_payload
         assert "last_event_at" in heartbeat_payload
@@ -412,8 +414,105 @@ async def test_chat_stream_client_disconnect_does_not_cancel_run_task_or_leak_su
         await asyncio.wait_for(fake.finished.wait(), timeout=1.0)
         assert fake.was_cancelled is False
         assert len(app[EVENT_BUS_KEY]._subs) == 0
+        for _ in range(20):
+            run = app[CHAT_RUN_STORE_KEY].get("req-disconnect-1")
+            if run.status == "completed":
+                break
+            await asyncio.sleep(0.05)
+        assert run.stream_state == "closed"
+        assert run.status == "completed"
     finally:
         monkeypatch.setattr(chat_api, "_write_sse", original_write_sse)
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_detaches_run_on_client_disconnect_before_completion(tmp_path, monkeypatch):
+    import efp_opencode_adapter.chat_api as chat_api
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = DisconnectingFake()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    original_write_sse = chat_api._write_sse
+
+    async def flaky_write(resp, event_name, payload):
+        if event_name == "heartbeat":
+            raise chat_api.SSEClientDisconnected()
+        return await original_write_sse(resp, event_name, payload)
+
+    monkeypatch.setattr(chat_api, "_write_sse", flaky_write)
+    try:
+        task = asyncio.create_task(c.post("/api/chat/stream", json={"message": "m", "session_id": "portal-detach", "request_id": "req-detach"}))
+        await fake.entered.wait()
+        resp = await task
+        assert resp.status == 200
+        run = app[CHAT_RUN_STORE_KEY].get("req-detach")
+        assert run.status == "stream_detached"
+        assert run.stream_state == "detached"
+        assert run.status != "failed"
+
+        fake.release.set()
+        await asyncio.wait_for(fake.finished.wait(), timeout=1.0)
+        for _ in range(20):
+            run = app[CHAT_RUN_STORE_KEY].get("req-detach")
+            if run.status == "completed":
+                break
+            await asyncio.sleep(0.05)
+        assert run.status == "completed"
+        assert run.final_payload["response"] == "ok"
+    finally:
+        monkeypatch.setattr(chat_api, "_write_sse", original_write_sse)
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_attached_and_final_close_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    try:
+        resp = await c.post("/api/chat/stream", json={"message": "hello", "session_id": "portal-close", "request_id": "req-close"})
+        body = await resp.text()
+        assert "event: chat.stream_attached" in body
+        run = app[CHAT_RUN_STORE_KEY].get("req-close")
+        assert run.status == "completed"
+        assert run.stream_state == "closed"
+        assert run.final_payload["response"] == "echo: hello"
+    finally:
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_assistant_message_updated_before_final(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = SlowFake()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    try:
+        task = asyncio.create_task(c.post("/api/chat/stream", json={"message": "m", "session_id": "portal-projection", "request_id": "req-projection"}))
+        await fake.entered.wait()
+        await app[EVENT_BUS_KEY].publish(
+            {
+                "type": "message.delta",
+                "session_id": "portal-projection",
+                "request_id": "req-projection",
+                "opencode_session_id": "ses-1",
+                "raw_type": "message.part.delta",
+                "data": {"delta": "visible", "message_role": "assistant", "part_type": "text", "message_id": "a-live"},
+            }
+        )
+        fake.release.set()
+        resp = await task
+        body = await resp.text()
+        assert "assistant.message.updated" in body
+        assert body.index("assistant.message.updated") < body.index("event: final")
+        run = app[CHAT_RUN_STORE_KEY].get("req-projection")
+        assert "visible" in run.last_response_text or run.status == "completed"
+    finally:
         await c.close()
 
 

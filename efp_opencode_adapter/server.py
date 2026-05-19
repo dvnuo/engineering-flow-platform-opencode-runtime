@@ -11,6 +11,7 @@ from .app_keys import (
     SESSION_STORE_KEY,
     TASK_STORE_KEY,
     CHATLOG_STORE_KEY,
+    CHAT_RUN_STORE_KEY,
     USER_DISPLAY_STORE_KEY,
     USAGE_TRACKER_KEY,
     EVENT_BUS_KEY,
@@ -27,6 +28,7 @@ from .app_keys import (
 from .capabilities import build_capability_catalog
 from .chat_api import chat_handler, chat_stream_handler
 from .chatlog_store import ChatLogStore
+from .chat_run_store import ChatRunStore
 from .compat_api import (
     git_info_handler,
     queue_status_handler,
@@ -351,6 +353,39 @@ async def capabilities_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "capabilities unavailable", "engine": "opencode"}, status=500)
 
 
+async def get_chat_run_handler(request: web.Request) -> web.Response:
+    store = request.app[CHAT_RUN_STORE_KEY]
+    request_id = request.match_info["request_id"]
+    record = store.get(request_id)
+    if record is None:
+        return web.json_response({"success": False, "engine": "opencode", "error": "chat_run_not_found"}, status=404)
+    return web.json_response({"success": True, "engine": "opencode", "run": store.to_public_dict(record)})
+
+
+async def list_chat_runs_handler(request: web.Request) -> web.Response:
+    store = request.app[CHAT_RUN_STORE_KEY]
+    session_id = request.query.get("session_id", "")
+    if not session_id:
+        return web.json_response({"success": False, "engine": "opencode", "error": "session_id_required"}, status=400)
+    active = str(request.query.get("active", "")).lower() in {"1", "true", "yes", "on"}
+    if active:
+        run = store.active_for_session(session_id)
+        runs = [store.to_public_dict(run)] if run is not None else []
+    else:
+        try:
+            limit = int(request.query.get("limit", "20"))
+        except ValueError:
+            limit = 20
+        runs = [store.to_public_dict(record) for record in store.list_for_session(session_id, limit=limit)]
+    return web.json_response({"success": True, "engine": "opencode", "runs": [run for run in runs if run is not None]})
+
+
+async def active_chat_run_for_session_handler(request: web.Request) -> web.Response:
+    store = request.app[CHAT_RUN_STORE_KEY]
+    session_id = request.match_info["session_id"]
+    return web.json_response({"success": True, "engine": "opencode", "run": store.to_public_dict(store.active_for_session(session_id))})
+
+
 def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None, *, start_event_bridge: bool | None = None, opencode_process_manager: OpenCodeProcessManager | None = None) -> web.Application:
     app = web.Application()
     app[SETTINGS_KEY] = settings
@@ -359,6 +394,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app[SESSION_STORE_KEY] = SessionStore(state_paths.sessions_dir)
     app[TASK_STORE_KEY] = TaskStore(state_paths.tasks_dir)
     app[CHATLOG_STORE_KEY] = ChatLogStore(state_paths.chatlogs_dir)
+    app[CHAT_RUN_STORE_KEY] = ChatRunStore(state_paths.chat_runs_file)
     app[USER_DISPLAY_STORE_KEY] = UserDisplayStore(state_paths.sessions_dir / "user_display_messages.json")
     app[USAGE_TRACKER_KEY] = UsageTracker(state_paths.usage_file)
     app[EVENT_BUS_KEY] = EventBus(settings.event_replay_limit, settings.event_replay_ttl_seconds)
@@ -392,6 +428,8 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_put("/api/agent/system-prompt/{name}", system_prompt_put_handler)
     app.router.add_post("/api/chat", chat_handler)
     app.router.add_post("/api/chat/stream", chat_stream_handler)
+    app.router.add_get("/api/chat/runs", list_chat_runs_handler)
+    app.router.add_get("/api/chat/runs/{request_id}", get_chat_run_handler)
     app.router.add_post("/api/tasks/execute", execute_task_handler)
     app.router.add_get("/api/tasks/{task_id}", get_task_handler)
     app.router.add_post("/api/tasks/{task_id}/cancel", cancel_task_handler)
@@ -400,6 +438,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_post("/api/permissions/{permission_id}/respond", permission_respond_handler)
     app.router.add_get("/api/sessions", list_sessions_handler)
     app.router.add_post("/api/clear", clear_sessions_handler)
+    app.router.add_get("/api/sessions/{session_id}/active-run", active_chat_run_for_session_handler)
     app.router.add_get("/api/sessions/{session_id}/chatlog", session_chatlog_handler)
     app.router.add_post("/api/sessions/{session_id}/rename", rename_session_handler)
     app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/edit/async", edit_message_async_handler)

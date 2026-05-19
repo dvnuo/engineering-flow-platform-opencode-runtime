@@ -8,7 +8,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.sessions_api import _extract_opencode_session_id, _to_efp_messages
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
-from efp_opencode_adapter.app_keys import SESSION_STORE_KEY, PORTAL_METADATA_CLIENT_KEY, CHATLOG_STORE_KEY, TASK_BACKGROUND_TASKS_KEY
+from efp_opencode_adapter.app_keys import CHAT_RUN_STORE_KEY, SESSION_STORE_KEY, PORTAL_METADATA_CLIENT_KEY, CHATLOG_STORE_KEY, TASK_BACKGROUND_TASKS_KEY
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
 
@@ -66,6 +66,43 @@ async def test_sessions_endpoints(tmp_path, monkeypatch):
     assert (await cl.json())["success"] is True
     assert (await (await client.get("/api/sessions")).json())["sessions"] == []
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_metadata_includes_active_latest_run_and_projection(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        await client.post("/api/chat", json={"message": "hello", "session_id": "s-runs", "request_id": "r-done"})
+        record = app[SESSION_STORE_KEY].get("s-runs")
+        app[CHAT_RUN_STORE_KEY].start_run(
+            request_id="r-active",
+            portal_session_id="s-runs",
+            opencode_session_id=record.opencode_session_id,
+            assistant_message_id="a-pending",
+            status="running",
+            stream_state="detached",
+        )
+        app[CHAT_RUN_STORE_KEY].update_assistant_projection("r-active", text="partial live answer", assistant_message_id="a-pending", display_blocks=[{"type": "text", "text": "partial live answer"}])
+
+        response = await client.get("/api/sessions/s-runs")
+        payload = await response.json()
+        metadata = payload["metadata"]
+
+        assert metadata["active_run"]["request_id"] == "r-active"
+        assert metadata["active_run"]["status"] == "running"
+        assert metadata["latest_run"]["request_id"] == "r-active"
+        assert metadata["assistant_projection"]["request_id"] == "r-active"
+        assert metadata["assistant_projection"]["assistant_message_id"] == "a-pending"
+        assert metadata["assistant_projection"]["text"] == "partial live answer"
+
+        active_response = await client.get("/api/sessions/s-runs/active-run")
+        active_payload = await active_response.json()
+        assert active_payload["run"]["request_id"] == "r-active"
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,10 @@ def test_chat_stream_and_events_routes_still_exist(tmp_path, monkeypatch):
 
     assert ("POST", "/api/chat") in routes
     assert ("POST", "/api/chat/stream") in routes
+    assert ("GET", "/api/chat/runs") in routes
+    assert ("GET", "/api/chat/runs/{request_id}") in routes
     assert ("GET", "/api/events") in routes
+    assert ("GET", "/api/sessions/{session_id}/active-run") in routes
 
 
 def test_event_bus_uses_replay_settings(tmp_path, monkeypatch):

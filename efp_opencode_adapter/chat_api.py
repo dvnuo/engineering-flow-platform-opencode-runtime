@@ -13,6 +13,7 @@ from uuid import uuid4
 from aiohttp import web
 from .app_keys import (
     ATTACHMENT_SERVICE_KEY,
+    CHAT_RUN_STORE_KEY,
     CHATLOG_STORE_KEY,
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
@@ -174,6 +175,105 @@ def _append_unique_message_ids(target: list[str], candidates: Iterable[str]) -> 
         if candidate and candidate not in seen:
             target.append(candidate)
             seen.add(candidate)
+
+
+def _is_chat_mutation_path(metadata: dict[str, Any]) -> bool:
+    return bool(metadata.get("edit") or metadata.get("retry") or metadata.get("source") == "message_edit_async")
+
+
+def _chat_run_public(chat_run_store: Any | None, record: Any | None) -> dict[str, Any] | None:
+    if chat_run_store is None or record is None or not hasattr(chat_run_store, "to_public_dict"):
+        return None
+    return chat_run_store.to_public_dict(record)
+
+
+async def _publish_run_lifecycle_event(
+    *,
+    chat_run_store: Any | None,
+    runtime_events: list[dict[str, Any]],
+    bus,
+    trace_context: dict[str, str],
+    event_type: str,
+    session_id: str,
+    request_id: str,
+    opencode_session_id: str,
+    state: str,
+    data: dict[str, Any] | None = None,
+    summary: str = "",
+) -> dict[str, Any]:
+    payload = {
+        "type": event_type,
+        "event_type": event_type,
+        "engine": "opencode",
+        "session_id": session_id,
+        "request_id": request_id,
+        "opencode_session_id": opencode_session_id,
+        "state": state,
+        "summary": safe_preview(summary or event_type, 500),
+        "data": safe_preview(data or {}, 1000),
+        "created_at": utc_now_iso(),
+        "ts": time.time(),
+    }
+    event = add_trace_context(payload, trace_context)
+    runtime_events.append(event)
+    await bus.publish(event)
+    if chat_run_store is not None and hasattr(chat_run_store, "update_from_runtime_event"):
+        try:
+            chat_run_store.update_from_runtime_event(request_id, event)
+        except Exception:
+            logger.warning("failed to update chat run from lifecycle event", exc_info=True)
+    return event
+
+
+async def _publish_assistant_message_event(
+    *,
+    chat_run_store: Any | None,
+    runtime_events: list[dict[str, Any]],
+    bus,
+    trace_context: dict[str, str],
+    event_type: str,
+    session_id: str,
+    request_id: str,
+    opencode_session_id: str,
+    assistant_message_id: str = "",
+    assistant_message_ids: list[str] | None = None,
+    text: str = "",
+    delta: str = "",
+    display_blocks: list[Any] | None = None,
+    state: str = "running",
+) -> dict[str, Any]:
+    data = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "assistant_message_id": assistant_message_id,
+        "assistant_message_ids": assistant_message_ids or ([] if not assistant_message_id else [assistant_message_id]),
+        "delta": safe_preview(delta, 1000) if delta else "",
+        "text": safe_preview(text, 12000) if text else "",
+        "display_blocks": safe_preview(display_blocks or [], 4000),
+    }
+    payload = {
+        "type": event_type,
+        "event_type": event_type,
+        "engine": "opencode",
+        "session_id": session_id,
+        "request_id": request_id,
+        "opencode_session_id": opencode_session_id,
+        "assistant_message_id": assistant_message_id,
+        "state": state,
+        "summary": safe_preview(text or delta or event_type, 500),
+        "data": data,
+        "created_at": utc_now_iso(),
+        "ts": time.time(),
+    }
+    event = add_trace_context(payload, trace_context)
+    runtime_events.append(event)
+    await bus.publish(event)
+    if chat_run_store is not None and hasattr(chat_run_store, "update_from_runtime_event"):
+        try:
+            chat_run_store.update_from_runtime_event(request_id, event)
+        except Exception:
+            logger.warning("failed to update chat run from assistant message event", exc_info=True)
+    return event
 
 
 
@@ -476,6 +576,7 @@ async def _publish_chat_runtime_event(
     summary: str = "",
     data: dict[str, Any] | None = None,
     progress_state: dict[str, Any] | None = None,
+    chat_run_store: Any | None = None,
 ) -> dict[str, Any]:
     payload = {
         "type": event_type,
@@ -493,6 +594,11 @@ async def _publish_chat_runtime_event(
     event = add_trace_context(payload, trace_context)
     runtime_events.append(event)
     await bus.publish(event)
+    if chat_run_store is not None and hasattr(chat_run_store, "update_from_runtime_event"):
+        try:
+            chat_run_store.update_from_runtime_event(request_id, event)
+        except Exception:
+            logger.warning("failed to update chat run from runtime event", exc_info=True)
     _touch_progress(progress_state, event_type=event_type, data=payload["data"] if isinstance(payload["data"], dict) else {})
     return event
 
@@ -509,6 +615,7 @@ async def _publish_continuation_event(
     session_id: str,
     chatlog_id: str | None,
     turn_index: int,
+    chat_run_store: Any | None = None,
     message_id: str | None = None,
     reason: str | None = None,
     state: str | None = None,
@@ -551,6 +658,11 @@ async def _publish_continuation_event(
     event = add_trace_context(payload, trace_context)
     runtime_events.append(event)
     await bus.publish(event)
+    if chat_run_store is not None and hasattr(chat_run_store, "update_from_runtime_event"):
+        try:
+            chat_run_store.update_from_runtime_event(request_id, event)
+        except Exception:
+            logger.warning("failed to update chat run from continuation event", exc_info=True)
     if chatlog_store is not None:
         try:
             chatlog_store.append_event(session_id, request_id=chatlog_id or request_id, event=event, runtime=True)
@@ -611,11 +723,13 @@ async def _recover_after_submit_timeout(
     before_assistant_message_ids: set[str],
     before_snapshot_unreliable: bool,
     wall_deadline: float,
+    chat_run_store: Any | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     await _publish_chat_runtime_event(
         runtime_events=runtime_events,
         bus=bus,
         trace_context=trace_context,
+        chat_run_store=chat_run_store,
         event_type="chat.timeout_recovery.started",
         session_id=portal_session_id,
         request_id=request_id,
@@ -668,6 +782,7 @@ async def _recover_after_submit_timeout(
                 runtime_events=runtime_events,
                 bus=bus,
                 trace_context=trace_context,
+                chat_run_store=chat_run_store,
                 event_type="chat.timeout_recovery.recovered",
                 session_id=portal_session_id,
                 request_id=request_id,
@@ -688,6 +803,7 @@ async def _recover_after_submit_timeout(
             runtime_events=runtime_events,
             bus=bus,
             trace_context=trace_context,
+            chat_run_store=chat_run_store,
             event_type="chat.timeout_recovery.poll",
             session_id=portal_session_id,
             request_id=request_id,
@@ -725,6 +841,7 @@ async def _recover_after_submit_timeout(
                 runtime_events=runtime_events,
                 bus=bus,
                 trace_context=trace_context,
+                chat_run_store=chat_run_store,
                 event_type="chat.timeout_recovery.exhausted",
                 session_id=portal_session_id,
                 request_id=request_id,
@@ -831,6 +948,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
     bus = app[EVENT_BUS_KEY]
     client = app[OPENCODE_CLIENT_KEY]
     chatlog_store = app[CHATLOG_STORE_KEY]
+    chat_run_store = app.get(CHAT_RUN_STORE_KEY)
     usage_tracker = app[USAGE_TRACKER_KEY]
     portal_metadata_client = app[PORTAL_METADATA_CLIENT_KEY]
     settings = app[SETTINGS_KEY]
@@ -840,6 +958,21 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
     wall_started_at = asyncio.get_running_loop().time()
     wall_deadline = wall_started_at + max(0.001, float(settings.chat_total_wall_timeout_seconds))
     context_state = {"objective": message[:300], "summary": "OpenCode request accepted", "current_state": "running", "next_step": "Waiting for OpenCode assistant response", "constraints": [], "decisions": [], "open_loops": [], "budget": {"usage_percent": 0}}
+
+    if chat_run_store is not None and not _is_chat_mutation_path(metadata):
+        active_run = chat_run_store.active_for_session(portal_session_id)
+        if active_run is not None and active_run.request_id != request_id:
+            raise web.HTTPConflict(
+                text=json.dumps(
+                    {
+                        "success": False,
+                        "engine": "opencode",
+                        "error": "chat_run_already_active",
+                        "active_run": _chat_run_public(chat_run_store, active_run),
+                    }
+                ),
+                content_type="application/json",
+            )
 
     existing_record = store.get(portal_session_id)
     opencode_session_id = existing_record.opencode_session_id if existing_record else ""
@@ -851,6 +984,39 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         record, partial_recovery = await _ensure_record_for_chat(client=client, store=store, portal_session_id=portal_session_id, title=title, agent=agent, model=model)
         opencode_session_id = record.opencode_session_id
         trace_context = build_trace_context(settings, request_id=request_id, session_id=portal_session_id, opencode_session_id=record.opencode_session_id, profile_version=profile_version, runtime_profile_id=runtime_profile_id, model=model or "", provider=provider_for_trace or "")
+
+        if chat_run_store is not None:
+            existing_run = chat_run_store.get(request_id)
+            stream_attached = bool(existing_run is not None and getattr(existing_run, "stream_state", "") == "attached")
+            stream_detached = bool(existing_run is not None and getattr(existing_run, "stream_state", "") == "detached")
+            chat_run_store.start_run(
+                request_id=request_id,
+                portal_session_id=portal_session_id,
+                opencode_session_id=record.opencode_session_id,
+                status="stream_attached" if stream_attached else ("stream_detached" if stream_detached else "running"),
+                stream_state="attached" if stream_attached else ("detached" if stream_detached else "none"),
+                completion_state="running",
+                metadata={
+                    "model": model or "",
+                    "provider": provider_for_trace or "",
+                    "agent": agent or "",
+                    "runtime_profile_id": runtime_profile_id or "",
+                    "profile_version": profile_version or "",
+                },
+            )
+            await _publish_run_lifecycle_event(
+                chat_run_store=chat_run_store,
+                runtime_events=runtime_events,
+                bus=bus,
+                trace_context=trace_context,
+                event_type="chat.run.started",
+                session_id=portal_session_id,
+                request_id=request_id,
+                opencode_session_id=record.opencode_session_id,
+                state="running",
+                data={"status": "running", "stream_state": "attached" if stream_attached else "none"},
+                summary="Chat run started.",
+            )
 
         if binding_store is not None:
             binding_store.bind_active(record.opencode_session_id, portal_session_id, request_id, kind="chat")
@@ -865,6 +1031,18 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         think = add_trace_context(llm_thinking_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id), trace_context)
         runtime_events.append(think)
         await bus.publish(think)
+        if chat_run_store is not None:
+            await _publish_assistant_message_event(
+                chat_run_store=chat_run_store,
+                runtime_events=runtime_events,
+                bus=bus,
+                trace_context=trace_context,
+                event_type="assistant.message.started",
+                session_id=portal_session_id,
+                request_id=request_id,
+                opencode_session_id=record.opencode_session_id,
+                state="running",
+            )
 
         before_messages: list[dict[str, Any]] = []
         after_messages: list[dict[str, Any]] = []
@@ -903,6 +1081,18 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             initial_user_message_id = str(requested_message_id)
         else:
             initial_user_message_id = new_opencode_message_id()
+        if chat_run_store is not None:
+            current_run = chat_run_store.get(request_id)
+            current_stream_state = getattr(current_run, "stream_state", "none") if current_run is not None else "none"
+            chat_run_store.start_run(
+                request_id=request_id,
+                portal_session_id=portal_session_id,
+                opencode_session_id=record.opencode_session_id,
+                user_message_id=initial_user_message_id,
+                status="stream_attached" if current_stream_state == "attached" else ("stream_detached" if current_stream_state == "detached" else "running"),
+                stream_state=current_stream_state,
+                completion_state="running",
+            )
         if binding_store is not None:
             binding_store.bind_message(record.opencode_session_id, initial_user_message_id, portal_session_id, request_id, kind="chat")
         display_store = app.get(USER_DISPLAY_STORE_KEY)
@@ -1040,7 +1230,25 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                 chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="blocked", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
                 if not updated.deleted:
                     await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state="blocked", request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "context_state": final_context, "usage": usage_record, "trace_context": trace_context, "skill_invocation": skill_debug})
-                return {"ok": False, "completion_state": "blocked", "incomplete_reason": skill_decision.reason or "skill_blocked", "session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": "", "assistant_message_id": "", "assistant_message_ids": [], "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": llm_debug}
+                blocked_payload = {"ok": False, "completion_state": "blocked", "incomplete_reason": skill_decision.reason or "skill_blocked", "session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": "", "assistant_message_id": "", "assistant_message_ids": [], "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": llm_debug}
+                if chat_run_store is not None:
+                    chat_run_store.mark_incomplete(request_id, skill_decision.reason or "skill_blocked", blocked_payload)
+                    await _publish_run_lifecycle_event(
+                        chat_run_store=chat_run_store,
+                        runtime_events=runtime_events,
+                        bus=bus,
+                        trace_context=trace_context,
+                        event_type="chat.run.incomplete",
+                        session_id=portal_session_id,
+                        request_id=request_id,
+                        opencode_session_id=updated.opencode_session_id,
+                        state="incomplete",
+                        data={"status": "incomplete", "completion_state": "blocked", "reason": skill_decision.reason or "skill_blocked"},
+                        summary="Chat run blocked before a final assistant response.",
+                    )
+                if binding_store is not None:
+                    binding_store.complete(request_id)
+                return blocked_payload
 
             if not executed_native_command:
                 command_names: set[str] = set()
@@ -1120,6 +1328,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                     runtime_events=runtime_events,
                     bus=bus,
                     trace_context=trace_context,
+                    chat_run_store=chat_run_store,
                     before_assistant_message_ids=before_assistant_message_ids,
                     before_snapshot_unreliable=before_snapshot_unreliable,
                     wall_deadline=wall_deadline,
@@ -1163,6 +1372,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                 bus=bus,
                 trace_context=trace_context,
                 chatlog_store=chatlog_store,
+                chat_run_store=chat_run_store,
                 event_type="continuation.suppressed",
                 session_id=portal_session_id,
                 request_id=request_id,
@@ -1192,6 +1402,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                         bus=bus,
                         trace_context=trace_context,
                         chatlog_store=chatlog_store,
+                chat_run_store=chat_run_store,
                         event_type="continuation.wall_timeout",
                         session_id=portal_session_id,
                         request_id=request_id,
@@ -1218,6 +1429,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                         bus=bus,
                         trace_context=trace_context,
                         chatlog_store=chatlog_store,
+                chat_run_store=chat_run_store,
                         event_type="continuation.max_turns_reached",
                         session_id=portal_session_id,
                         request_id=request_id,
@@ -1246,6 +1458,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                         bus=bus,
                         trace_context=trace_context,
                         chatlog_store=chatlog_store,
+                chat_run_store=chat_run_store,
                         event_type="continuation.no_progress",
                         session_id=portal_session_id,
                         request_id=request_id,
@@ -1278,6 +1491,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                     bus=bus,
                     trace_context=trace_context,
                     chatlog_store=chatlog_store,
+                chat_run_store=chat_run_store,
                     event_type="continuation.started",
                     session_id=portal_session_id,
                     request_id=request_id,
@@ -1308,6 +1522,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                         bus=bus,
                         trace_context=trace_context,
                         chatlog_store=chatlog_store,
+                chat_run_store=chat_run_store,
                         event_type="continuation.prompt_sent",
                         session_id=portal_session_id,
                         request_id=request_id,
@@ -1349,6 +1564,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                         runtime_events=runtime_events,
                         bus=bus,
                         trace_context=trace_context,
+                        chat_run_store=chat_run_store,
                         before_assistant_message_ids=set(extract_assistant_message_ids(before_messages)),
                         before_snapshot_unreliable=False,
                         wall_deadline=wall_deadline,
@@ -1391,6 +1607,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                         bus=bus,
                         trace_context=trace_context,
                         chatlog_store=chatlog_store,
+                chat_run_store=chat_run_store,
                         event_type="continuation.failed",
                         session_id=portal_session_id,
                         request_id=request_id,
@@ -1442,6 +1659,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                     bus=bus,
                     trace_context=trace_context,
                     chatlog_store=chatlog_store,
+                chat_run_store=chat_run_store,
                     event_type="continuation.completed",
                     session_id=portal_session_id,
                     request_id=request_id,
@@ -1466,6 +1684,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                         bus=bus,
                         trace_context=trace_context,
                         chatlog_store=chatlog_store,
+                chat_run_store=chat_run_store,
                         event_type="continuation.wall_timeout",
                         session_id=portal_session_id,
                         request_id=request_id,
@@ -1541,12 +1760,43 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             for _aid in [assistant_message_id, *assistant_message_ids]:
                 if _aid:
                     binding_store.bind_message(record.opencode_session_id, _aid, portal_session_id, request_id, kind="assistant")
+        if chat_run_store is not None:
+            current_run = chat_run_store.get(request_id)
+            current_stream_state = getattr(current_run, "stream_state", "none") if current_run is not None else "none"
+            current_status = getattr(current_run, "status", "running") if current_run is not None else "running"
+            chat_run_store.start_run(
+                request_id=request_id,
+                portal_session_id=portal_session_id,
+                opencode_session_id=record.opencode_session_id,
+                user_message_id=user_message_id or initial_user_message_id,
+                assistant_message_id=assistant_message_id,
+                assistant_message_ids=assistant_message_ids,
+                status=current_status if current_status in {"accepted", "running", "stream_attached", "stream_detached"} else "running",
+                stream_state=current_stream_state,
+                completion_state=completion_state,
+            )
         if skill_debug and not skill_debug.get("blocked"):
             completed_evt = add_trace_context({"type": "skill.completed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"skill": skill_debug.get("skill_name"), "kind": skill_debug.get("kind", "skill"), "used_command_api": bool(skill_debug.get("used_command_api")), "used_skill_prompt": bool(skill_debug.get("used_skill_prompt"))}}, trace_context)
             runtime_events.append(completed_evt)
             await bus.publish(completed_evt)
 
+        assistant_projection_text = assistant_text
         if completion_state == "completed":
+            await _publish_assistant_message_event(
+                chat_run_store=chat_run_store,
+                runtime_events=runtime_events,
+                bus=bus,
+                trace_context=trace_context,
+                event_type="assistant.message.completed",
+                session_id=portal_session_id,
+                request_id=request_id,
+                opencode_session_id=record.opencode_session_id,
+                assistant_message_id=assistant_message_id,
+                assistant_message_ids=assistant_message_ids,
+                text=assistant_text,
+                display_blocks=[],
+                state="completed",
+            )
             out_events = [
                 assistant_delta_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
                 chat_complete_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
@@ -1576,6 +1826,22 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             final_context = {**context_state, "summary": assistant_text[:500], "current_state": "error", "next_step": ""}
         else:
             completion_state = "incomplete"
+            if assistant_projection_text.strip():
+                await _publish_assistant_message_event(
+                    chat_run_store=chat_run_store,
+                    runtime_events=runtime_events,
+                    bus=bus,
+                    trace_context=trace_context,
+                    event_type="assistant.message.updated",
+                    session_id=portal_session_id,
+                    request_id=request_id,
+                    opencode_session_id=record.opencode_session_id,
+                    assistant_message_id=assistant_message_id,
+                    assistant_message_ids=assistant_message_ids,
+                    text=assistant_projection_text,
+                    display_blocks=[],
+                    state="incomplete",
+                )
             assistant_text = "OpenCode stream ended before a final assistant response was available. The last visible text was only an intermediate progress update."
             out_events = [{"type": "chat.incomplete", "event_type": "chat.incomplete", "state": "incomplete", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": completion_probe.get("diagnostics", {})}]
             status = "incomplete"; latest_state = "incomplete"; ok = False
@@ -1583,6 +1849,11 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         for event in [add_trace_context(x, trace_context) for x in out_events]:
             runtime_events.append(event)
             await bus.publish(event)
+            if chat_run_store is not None and hasattr(chat_run_store, "update_from_runtime_event"):
+                try:
+                    chat_run_store.update_from_runtime_event(request_id, event)
+                except Exception:
+                    logger.warning("failed to update chat run from final event", exc_info=True)
 
         updated = store.update_after_chat(portal_session_id, message, assistant_text, model, agent)
         provider = provider_for_trace
@@ -1621,6 +1892,27 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         failed = add_trace_context(chat_failed_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=opencode_session_id, error=str(exc)), trace_context)
         runtime_events.append(failed)
         await bus.publish(failed)
+        if chat_run_store is not None:
+            try:
+                failure_payload = {"ok": False, "completion_state": "error", "incomplete_reason": str(exc), "session_id": portal_session_id, "request_id": request_id, "response": str(exc), "runtime_events": runtime_events, "events": runtime_events}
+                if chat_run_store.get(request_id) is None:
+                    chat_run_store.start_run(request_id=request_id, portal_session_id=portal_session_id, opencode_session_id=opencode_session_id, status="running", completion_state="running")
+                chat_run_store.mark_failed(request_id, str(exc), failure_payload)
+                await _publish_run_lifecycle_event(
+                    chat_run_store=chat_run_store,
+                    runtime_events=runtime_events,
+                    bus=bus,
+                    trace_context=trace_context,
+                    event_type="chat.run.failed",
+                    session_id=portal_session_id,
+                    request_id=request_id,
+                    opencode_session_id=opencode_session_id,
+                    state="failed",
+                    data={"status": "failed", "completion_state": "error", "reason": str(exc)},
+                    summary="Chat run failed.",
+                )
+            except Exception:
+                logger.warning("failed to mark chat run failed", exc_info=True)
         chatlog_store.fail_entry(portal_session_id, request_id=request_id, error=str(exc), runtime_events=runtime_events, context_state=context_state, llm_debug={"engine": "opencode", "opencode_session_id": opencode_session_id, "trace_context": trace_context})
         await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.failed", latest_event_state="error", request_id=request_id, summary=str(exc), runtime_events=runtime_events, metadata={"engine": "opencode", "trace_context": trace_context})
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
@@ -1642,8 +1934,83 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         out["_llm_debug"]["skill_invocation"] = skill_debug
     if partial_recovery or getattr(updated, "partial_recovery", False):
         out["_llm_debug"]["partial_recovery"] = True
+    run_kept_active = False
+    if chat_run_store is not None:
+        try:
+            current_run = chat_run_store.get(request_id)
+            stream_detached = bool(current_run is not None and getattr(current_run, "stream_state", "") == "detached")
+            if auto_continue_suppressed_reason == "submit_timeout_recovery_exhausted_still_running":
+                response_metadata["opencode_may_still_be_running"] = True
+                chat_run_store.keep_running(
+                    request_id,
+                    reason=auto_continue_suppressed_reason,
+                    payload={**out, "metadata": {**response_metadata, "opencode_may_still_be_running": True}},
+                    stream_detached=stream_detached,
+                )
+                run_kept_active = True
+                await _publish_run_lifecycle_event(
+                    chat_run_store=chat_run_store,
+                    runtime_events=runtime_events,
+                    bus=bus,
+                    trace_context=trace_context,
+                    event_type="chat.run.incomplete",
+                    session_id=portal_session_id,
+                    request_id=request_id,
+                    opencode_session_id=updated.opencode_session_id,
+                    state="running",
+                    data={"status": "stream_detached" if stream_detached else "running", "completion_state": completion_state, "reason": auto_continue_suppressed_reason, "opencode_may_still_be_running": True},
+                    summary="Chat run is still running after submit timeout recovery was exhausted.",
+                )
+            elif completion_state == "completed":
+                chat_run_store.complete_run(request_id, out)
+                await _publish_run_lifecycle_event(
+                    chat_run_store=chat_run_store,
+                    runtime_events=runtime_events,
+                    bus=bus,
+                    trace_context=trace_context,
+                    event_type="chat.run.completed",
+                    session_id=portal_session_id,
+                    request_id=request_id,
+                    opencode_session_id=updated.opencode_session_id,
+                    state="completed",
+                    data={"status": "completed", "completion_state": completion_state},
+                    summary="Chat run completed.",
+                )
+            elif completion_state == "error":
+                chat_run_store.mark_failed(request_id, incomplete_reason or "chat_failed", out)
+                await _publish_run_lifecycle_event(
+                    chat_run_store=chat_run_store,
+                    runtime_events=runtime_events,
+                    bus=bus,
+                    trace_context=trace_context,
+                    event_type="chat.run.failed",
+                    session_id=portal_session_id,
+                    request_id=request_id,
+                    opencode_session_id=updated.opencode_session_id,
+                    state="failed",
+                    data={"status": "failed", "completion_state": completion_state, "reason": incomplete_reason},
+                    summary="Chat run failed.",
+                )
+            else:
+                chat_run_store.mark_incomplete(request_id, incomplete_reason or completion_state, out)
+                await _publish_run_lifecycle_event(
+                    chat_run_store=chat_run_store,
+                    runtime_events=runtime_events,
+                    bus=bus,
+                    trace_context=trace_context,
+                    event_type="chat.run.incomplete",
+                    session_id=portal_session_id,
+                    request_id=request_id,
+                    opencode_session_id=updated.opencode_session_id,
+                    state="incomplete",
+                    data={"status": "incomplete", "completion_state": completion_state, "reason": incomplete_reason},
+                    summary="Chat run ended before a completed assistant response.",
+                )
+        except Exception:
+            logger.warning("failed to finalize chat run", exc_info=True)
     if binding_store is not None:
-        binding_store.complete(request_id)
+        if not run_kept_active:
+            binding_store.complete(request_id)
     return out
 
 
@@ -1664,6 +2031,15 @@ async def chat_handler(request: web.Request) -> web.Response:
 STREAM_HEARTBEAT_SECONDS = 15.0
 BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.delta", "llm_thinking", "opencode.reasoning", "provider.retry", "provider.status", "execution.started", "execution.completed", "execution.failed", "complete", "final", "error", "event_bridge.connected", "event_bridge.disconnected", "event_bridge.reconnected", "skill.detected", "skill.blocked", "skill.command.executed", "skill.command.failed", "skill.prompt_applied", "skill.completed", "skill.repository_checkout.completed", "skill.repository_checkout.failed"}
 REQUEST_SCOPED_STREAM_EVENT_TYPES = {
+    "assistant.message.started",
+    "assistant.message.updated",
+    "assistant.message.completed",
+    "chat.stream_attached",
+    "chat.stream_detached",
+    "chat.run.started",
+    "chat.run.completed",
+    "chat.run.incomplete",
+    "chat.run.failed",
     "message.delta",
     "llm_thinking",
     "permission_request",
@@ -1794,6 +2170,7 @@ def _is_stream_relevant_event(
         or event_type.startswith("provider.")
         or event_type.startswith("continuation.")
         or event_type.startswith("chat.")
+        or event_type.startswith("assistant.message.")
     )
     event_session_id = event.get("session_id") or event.get("portal_session_id") or data.get("session_id")
     event_portal_request_id = event.get("portal_request_id") or data.get("portal_request_id")
@@ -1955,16 +2332,51 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     await resp.prepare(request)
 
     bus = request.app[EVENT_BUS_KEY]
+    settings = request.app[SETTINGS_KEY]
+    chat_run_store = request.app.get(CHAT_RUN_STORE_KEY)
+    stream_trace = build_trace_context(settings, request_id=req_id, session_id=session_id)
+    if chat_run_store is not None:
+        active_run = chat_run_store.active_for_session(session_id)
+        if active_run is not None and active_run.request_id != req_id:
+            error_payload = {
+                "error": "chat_run_already_active",
+                "session_id": session_id,
+                "request_id": req_id,
+                "active_run": _chat_run_public(chat_run_store, active_run),
+            }
+            final_payload = _stream_error_final_payload(
+                error_payload={**error_payload, "detail": "chat_run_already_active"},
+                session_id=session_id,
+                request_id=req_id,
+                runtime_events=[],
+                settings=settings,
+            )
+            try:
+                await _write_sse(resp, "error", error_payload)
+                await _write_sse(resp, "final", final_payload)
+                await _write_sse(resp, "done", {"ok": True})
+            except SSEClientDisconnected:
+                pass
+            await _safe_write_eof(resp)
+            return resp
+        chat_run_store.start_run(
+            request_id=req_id,
+            portal_session_id=session_id,
+            status="stream_attached",
+            stream_state="attached",
+            completion_state="running",
+            metadata={"source": "chat_stream"},
+        )
+        chat_run_store.attach_stream(req_id)
     sub = bus.subscribe({"session_id": session_id})
     run_task = asyncio.create_task(handle_chat_payload(request, payload))
     seen: set[tuple] = set()
-    settings = request.app[SETTINGS_KEY]
     binding_store = request.app.get(REQUEST_BINDING_STORE_KEY)
-    stream_trace = build_trace_context(settings, request_id=req_id, session_id=session_id)
     client_disconnected = False
     sent_real_model_delta = False
     stream_started_at = time.time()
     last_event_at: str | float | None = None
+    stream_runtime_events: list[dict[str, Any]] = []
 
     def _heartbeat_payload() -> dict[str, Any]:
         return {
@@ -2010,6 +2422,23 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             is_synth = event.get("type") == "assistant_delta" and bool(event.get("synthetic_final_delta") or (event.get("data") or {}).get("synthetic_final_delta"))
             if is_real:
                 sent_real_model_delta = True
+                if chat_run_store is not None:
+                    run_record = chat_run_store.update_assistant_projection(req_id, text=delta, append_text=True, assistant_message_id=str(data.get("message_id") or ""))
+                    await _publish_assistant_message_event(
+                        chat_run_store=chat_run_store,
+                        runtime_events=stream_runtime_events,
+                        bus=bus,
+                        trace_context=stream_trace,
+                        event_type="assistant.message.updated",
+                        session_id=session_id,
+                        request_id=req_id,
+                        opencode_session_id=current_opencode_session_id,
+                        assistant_message_id=str(data.get("message_id") or ""),
+                        text=getattr(run_record, "last_response_text", delta) if run_record is not None else delta,
+                        delta=delta,
+                        display_blocks=[],
+                        state="running",
+                    )
                 await _write_sse(resp, "delta", _stream_delta_payload(event, delta, session_id, req_id))
             elif is_synth:
                 if not sent_real_model_delta:
@@ -2020,8 +2449,27 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
 
     try:
         stream_started_event = add_trace_context({"type": "stream.started", "engine": "opencode", "session_id": session_id, "request_id": req_id, "chatlog_id": req_id, "created_at": utc_now_iso()}, stream_trace)
+        stream_attached_event = add_trace_context(
+            {
+                "type": "chat.stream_attached",
+                "event_type": "chat.stream_attached",
+                "engine": "opencode",
+                "session_id": session_id,
+                "request_id": req_id,
+                "state": "running",
+                "data": {"event_type": "chat.stream_attached", "request_id": req_id, "session_id": session_id, "state": "running"},
+                "created_at": utc_now_iso(),
+                "ts": time.time(),
+            },
+            stream_trace,
+        )
+        seen.add(_event_dedupe_key(stream_attached_event))
+        await bus.publish(stream_attached_event)
+        if chat_run_store is not None:
+            chat_run_store.update_from_runtime_event(req_id, stream_attached_event)
         last_event_at = stream_started_event.get("created_at")
         await _write_sse(resp, "chat.started", {"session_id": session_id, "request_id": req_id, "chatlog_id": req_id, "completion_state": "running"})
+        await _write_sse(resp, "chat.stream_attached", stream_attached_event["data"])
         await _write_sse(resp, "heartbeat", _heartbeat_payload())
         await _write_sse(resp, "runtime_event", stream_started_event)
         while not run_task.done():
@@ -2059,6 +2507,8 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                 runtime_events=[],
                 settings=settings,
             )
+            if chat_run_store is not None:
+                chat_run_store.mark_failed(req_id, str(error_payload.get("detail") or error_payload.get("error") or "chat_failed"), final_error_payload)
             await _write_sse(resp, "error", error_payload)
             await _write_sse(resp, "final", final_error_payload)
             await _write_sse(resp, "done", {"ok": True})
@@ -2072,12 +2522,50 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
                     runtime_events=[],
                     settings=settings,
                 )
+            if chat_run_store is not None and isinstance(final_payload, dict):
+                run_record = chat_run_store.get(req_id)
+                completion_state = str(final_payload.get("completion_state") or "")
+                metadata_payload = final_payload.get("metadata") if isinstance(final_payload.get("metadata"), dict) else {}
+                still_running = bool(metadata_payload.get("opencode_may_still_be_running") or final_payload.get("opencode_may_still_be_running"))
+                if completion_state == "completed":
+                    chat_run_store.complete_run(req_id, final_payload)
+                elif completion_state == "error":
+                    chat_run_store.mark_failed(req_id, str(final_payload.get("incomplete_reason") or final_payload.get("error") or "chat_failed"), final_payload)
+                elif still_running and run_record is not None and getattr(run_record, "status", "") in {"accepted", "running", "stream_attached", "stream_detached"}:
+                    chat_run_store.keep_running(req_id, reason=str(final_payload.get("incomplete_reason") or "opencode_may_still_be_running"), payload=final_payload, stream_detached=getattr(run_record, "stream_state", "") == "detached")
+                else:
+                    chat_run_store.mark_incomplete(req_id, str(final_payload.get("incomplete_reason") or completion_state or "incomplete"), final_payload)
             await _write_sse(resp, "final", final_payload)
             await _write_sse(resp, "done", {"ok": True})
     except SSEClientDisconnected:
         client_disconnected = True
     finally:
         bus.unsubscribe(sub)
+        if client_disconnected and chat_run_store is not None:
+            try:
+                run_record = chat_run_store.get(req_id)
+                if run_record is not None and getattr(run_record, "status", "") not in {"completed", "incomplete", "failed", "cancelled"}:
+                    chat_run_store.detach_stream(req_id, reason="client_disconnected")
+                    detach_event = add_trace_context(
+                        {
+                            "type": "chat.stream_detached",
+                            "event_type": "chat.stream_detached",
+                            "engine": "opencode",
+                            "session_id": session_id,
+                            "request_id": req_id,
+                            "opencode_session_id": getattr(run_record, "opencode_session_id", ""),
+                            "state": "stream_detached",
+                            "summary": "Chat SSE client disconnected while the run was still active.",
+                            "data": {"event_type": "chat.stream_detached", "request_id": req_id, "session_id": session_id, "state": "stream_detached", "reason": "client_disconnected"},
+                            "created_at": utc_now_iso(),
+                            "ts": time.time(),
+                        },
+                        stream_trace,
+                    )
+                    await bus.publish(detach_event)
+                    chat_run_store.update_from_runtime_event(req_id, detach_event)
+            except Exception:
+                logger.warning("failed to detach chat stream", exc_info=True)
         if not run_task.done():
             if client_disconnected:
                 run_task.add_done_callback(lambda task: _consume_background_chat_task(task, request_id=req_id, session_id=session_id))
