@@ -9,6 +9,7 @@ from typing import Awaitable, Callable
 from .opencode_client import OpenCodeClient
 from .runtime_env import strip_managed_external_env
 from .settings import Settings
+from .skill_sync import sync_runtime_skills
 
 
 class OpenCodeProcessManager:
@@ -32,6 +33,13 @@ class OpenCodeProcessManager:
     async def start(self, env: dict[str, str] | None = None, *, reason: str = "startup") -> dict:
         if self.process and self.process.returncode is None:
             return self.status_snapshot()
+        try:
+            sync_runtime_skills(self.settings)
+        except Exception as exc:
+            self.health_ok = False
+            self.registry_ok = False
+            self.last_startup_error = self._sanitize(str(exc))
+            raise
         log_path = Path(os.getenv("OPENCODE_LOG_FILE") or (self.settings.adapter_state_dir / "opencode-serve.log"))
         log_path.parent.mkdir(parents=True, exist_ok=True)
         handle = log_path.open("ab")
