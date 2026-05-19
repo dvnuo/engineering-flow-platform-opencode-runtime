@@ -27,6 +27,8 @@ def test_chat_run_store_start_get_active_attach_detach_and_persistence(tmp_path)
     store.detach_stream("req-1", reason="client_disconnected")
     assert store.get("req-1").stream_state == "detached"
     assert store.get("req-1").status == "stream_detached"
+    assert store.active_for_session("sess-1").request_id == "req-1"
+    assert [run.request_id for run in store.list_active(include_detached_candidates=True)] == ["req-1"]
 
     store.complete_run("req-1", {"completion_state": "completed", "response": "done", "assistant_message_id": "a-1", "assistant_message_ids": ["a-1"]})
     assert store.get("req-1").status == "completed"
@@ -117,3 +119,47 @@ def test_chat_run_store_transport_error_and_recovering_diagnostics_are_sanitized
     assert public["diagnostics"]["restart_attempted"] is True
     assert public["diagnostics"]["recovery_state"] == "recovering"
     assert "ghp_SECRET" not in json.dumps(public)
+
+
+def test_chat_run_store_stale_aborted_delete_and_source_fields(tmp_path):
+    store = ChatRunStore(tmp_path / "chat_runs.json")
+    store.start_run(request_id="req-stale", portal_session_id="sess-1", opencode_session_id="ses-1", status="stream_detached", stream_state="detached")
+    assert store.active_for_session("sess-1").request_id == "req-stale"
+
+    stale = store.mark_stale(
+        "req-stale",
+        "opencode_not_active",
+        metadata={"validated_at": "2026-05-19T00:00:00Z", "validation_reason": "opencode_not_active", "opencode_active": False},
+    )
+    assert stale.status == "stale"
+    assert store.active_for_session("sess-1") is None
+    public = store.to_public_dict(stale)
+    assert public["source_of_truth"] == "opencode"
+    assert public["validated_at"] == "2026-05-19T00:00:00Z"
+    assert public["validation_reason"] == "opencode_not_active"
+    assert public["opencode_active"] is False
+
+    store.start_run(request_id="req-abort", portal_session_id="sess-1", opencode_session_id="ses-1", status="running")
+    aborted = store.mark_aborted("req-abort", metadata={"abort_result": {"success": True}})
+    assert aborted.status == "aborted"
+    assert aborted.completion_state == "aborted"
+    assert store.active_for_session("sess-1") is None
+
+    store.start_run(request_id="req-delete-1", portal_session_id="sess-delete", opencode_session_id="ses-delete", status="running")
+    store.start_run(request_id="req-delete-2", portal_session_id="sess-delete", opencode_session_id="ses-delete", status="running")
+    assert store.delete_for_session("sess-delete") == 2
+    assert store.list_for_session("sess-delete") == []
+
+
+def test_chat_run_store_mark_stale_for_session_marks_non_terminal_runs(tmp_path):
+    store = ChatRunStore(tmp_path / "chat_runs.json")
+    store.start_run(request_id="req-running", portal_session_id="sess-1", opencode_session_id="ses-1", status="running")
+    store.start_run(request_id="req-detached", portal_session_id="sess-1", opencode_session_id="ses-1", status="stream_detached")
+    store.start_run(request_id="req-complete", portal_session_id="sess-1", opencode_session_id="ses-1", status="running")
+    store.complete_run("req-complete", {"completion_state": "completed", "response": "done"})
+
+    updated = store.mark_stale_for_session("sess-1", "session_deleted")
+    assert {record.request_id for record in updated} == {"req-running", "req-detached"}
+    assert store.get("req-running").status == "stale"
+    assert store.get("req-detached").status == "stale"
+    assert store.get("req-complete").status == "completed"

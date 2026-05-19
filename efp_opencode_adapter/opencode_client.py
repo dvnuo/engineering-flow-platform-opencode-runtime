@@ -6,6 +6,7 @@ import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any, Mapping
+from urllib.parse import urlencode
 
 import aiohttp
 
@@ -24,6 +25,10 @@ class OpenCodeClientError(Exception):
         self.method: str | None = None
         self.path: str | None = None
         self.exception_type: str | None = None
+
+
+def is_session_missing_error(exc: BaseException) -> bool:
+    return isinstance(exc, OpenCodeClientError) and exc.status in {404, 410}
 
 
 class OpenCodeTransportTimeout(OpenCodeClientError):
@@ -464,7 +469,21 @@ class OpenCodeClient:
     async def get_session(self, session_id: str) -> dict:
         return await self._request_json("GET", f"/session/{session_id}")
 
-    async def get_session_status(self, timeout_seconds: int = 30) -> Any:
+    async def get_session_status(self, timeout_seconds: int = 30) -> dict[str, Any]:
+        data = await self._request_json("GET", "/session/status", timeout_seconds=timeout_seconds)
+        return data if isinstance(data, dict) else {"data": data}
+
+    async def list_session_children(self, session_id: str) -> list[dict[str, Any]]:
+        data = await self._request_json("GET", f"/session/{session_id}/children")
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if isinstance(data, dict):
+            children = data.get("children") or data.get("sessions") or data.get("data") or []
+            if isinstance(children, list):
+                return [item for item in children if isinstance(item, dict)]
+        return []
+
+    async def get_session_status_raw(self, timeout_seconds: int = 30) -> Any:
         return await self._request_json("GET", "/session/status", timeout_seconds=timeout_seconds)
 
     async def patch_session(self, session_id: str, title: str) -> dict:
@@ -474,8 +493,11 @@ class OpenCodeClient:
     async def delete_session(self, session_id: str) -> None:
         await self._request_json("DELETE", f"/session/{session_id}", expected_statuses=(200, 202, 204))
 
-    async def list_messages(self, session_id: str) -> list[dict]:
-        data = await self._request_json("GET", f"/session/{session_id}/message")
+    async def list_messages(self, session_id: str, limit: int | None = None) -> list[dict]:
+        path = f"/session/{session_id}/message"
+        if limit is not None:
+            path = f"{path}?{urlencode({'limit': max(0, int(limit))})}"
+        data = await self._request_json("GET", path)
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
@@ -526,6 +548,58 @@ class OpenCodeClient:
     async def abort_session(self, session_id: str) -> dict[str, Any]:
         status, _ = await self._request_json_with_status("POST", f"/session/{session_id}/abort", expected_statuses=(200, 202, 204))
         return {"success": True, "supported": True, "status": status}
+
+    async def abort_session_tree(self, session_id: str) -> dict[str, Any]:
+        aborted: list[str] = []
+        missing: list[str] = []
+        errors: list[dict[str, Any]] = []
+        visiting: set[str] = set()
+
+        def _child_id(child: dict[str, Any]) -> str:
+            for key in ("id", "session_id", "sessionID", "uuid"):
+                value = child.get(key)
+                if value:
+                    return str(value)
+            nested = child.get("session")
+            if isinstance(nested, dict):
+                return _child_id(nested)
+            return ""
+
+        async def _abort_one(current_id: str) -> None:
+            if not current_id or current_id in visiting:
+                return
+            visiting.add(current_id)
+            try:
+                try:
+                    children = await self.list_session_children(current_id)
+                except Exception as exc:
+                    if is_session_missing_error(exc):
+                        missing.append(current_id)
+                        return
+                    raise
+                for child in children:
+                    child_id = _child_id(child)
+                    if child_id:
+                        await _abort_one(child_id)
+                try:
+                    await self.abort_session(current_id)
+                    aborted.append(current_id)
+                except Exception as exc:
+                    if is_session_missing_error(exc):
+                        missing.append(current_id)
+                        return
+                    errors.append({"session_id": current_id, "error": _safe_error_preview(str(exc)), "status": getattr(exc, "status", None)})
+            finally:
+                visiting.discard(current_id)
+
+        await _abort_one(session_id)
+        return {
+            "success": not errors,
+            "supported": True,
+            "aborted_session_ids": aborted,
+            "missing_session_ids": missing,
+            "errors": errors,
+        }
 
     async def revert_message(self, session_id: str, message_id: str, part_id: str | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {"messageID": require_opencode_message_id(message_id)}

@@ -4,6 +4,7 @@ import argparse
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from aiohttp import web
 from .app_keys import (
@@ -29,6 +30,7 @@ from .app_keys import (
 
 from .capabilities import build_capability_catalog
 from .chat_api import chat_handler, chat_stream_handler
+from .chat_run_validation import validate_chat_run_against_opencode
 from .chatlog_store import ChatLogStore
 from .chat_run_store import ChatRunStore
 from .compat_api import (
@@ -421,22 +423,31 @@ async def capabilities_handler(request: web.Request) -> web.Response:
 
 async def get_chat_run_handler(request: web.Request) -> web.Response:
     store = request.app[CHAT_RUN_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
     request_id = request.match_info["request_id"]
     record = store.get(request_id)
     if record is None:
         return web.json_response({"success": False, "engine": "opencode", "error": "chat_run_not_found"}, status=404)
-    return web.json_response({"success": True, "engine": "opencode", "run": store.to_public_dict(record)})
+    validate = str(request.query.get("validate", "")).lower()
+    active = str(request.query.get("active", "")).lower() in {"1", "true", "yes", "on"}
+    if validate == "opencode" or active:
+        public = await validate_chat_run_against_opencode(store=store, client=client, record=record, event_bus=request.app.get(EVENT_BUS_KEY))
+    else:
+        public = store.to_public_dict(record)
+    return web.json_response({"success": True, "engine": "opencode", "run": public})
 
 
 async def list_chat_runs_handler(request: web.Request) -> web.Response:
     store = request.app[CHAT_RUN_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
     session_id = request.query.get("session_id", "")
     if not session_id:
         return web.json_response({"success": False, "engine": "opencode", "error": "session_id_required"}, status=400)
     active = str(request.query.get("active", "")).lower() in {"1", "true", "yes", "on"}
     if active:
         run = store.active_for_session(session_id)
-        runs = [store.to_public_dict(run)] if run is not None else []
+        public = await validate_chat_run_against_opencode(store=store, client=client, record=run, event_bus=request.app.get(EVENT_BUS_KEY))
+        runs = [public] if public is not None and public.get("opencode_active") is True else []
     else:
         try:
             limit = int(request.query.get("limit", "20"))
@@ -448,8 +459,217 @@ async def list_chat_runs_handler(request: web.Request) -> web.Response:
 
 async def active_chat_run_for_session_handler(request: web.Request) -> web.Response:
     store = request.app[CHAT_RUN_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
     session_id = request.match_info["session_id"]
-    return web.json_response({"success": True, "engine": "opencode", "run": store.to_public_dict(store.active_for_session(session_id))})
+    public = await validate_chat_run_against_opencode(
+        store=store,
+        client=client,
+        record=store.active_for_session(session_id),
+        event_bus=request.app.get(EVENT_BUS_KEY),
+    )
+    run = public if public is not None and public.get("opencode_active") is True else None
+    return web.json_response({"success": True, "engine": "opencode", "run": run})
+
+
+def _abort_result_succeeded(abort_result: dict[str, Any]) -> bool:
+    if not isinstance(abort_result, dict):
+        return False
+    if abort_result.get("success") is True:
+        return True
+    missing = abort_result.get("missing_session_ids")
+    errors = abort_result.get("errors")
+    if missing and not errors:
+        return True
+    return False
+
+
+def _abort_result_failed(abort_result: dict[str, Any]) -> bool:
+    return not _abort_result_succeeded(abort_result)
+
+
+def _abort_result_missing_current_session(abort_result: dict[str, Any], opencode_session_id: str) -> bool:
+    if not isinstance(abort_result, dict):
+        return False
+    errors = abort_result.get("errors")
+    if errors:
+        return False
+    missing = abort_result.get("missing_session_ids")
+    if not isinstance(missing, list) or not missing:
+        return False
+    missing_ids = {str(item) for item in missing if item}
+    if opencode_session_id and opencode_session_id in missing_ids:
+        return True
+    aborted = abort_result.get("aborted_session_ids")
+    return not aborted
+
+
+async def _publish_abort_event(request: web.Request, event_type: str, *, record, abort_result: dict[str, Any], state: str = "aborted", summary: str | None = None) -> None:
+    bus = request.app.get(EVENT_BUS_KEY)
+    if bus is None or not hasattr(bus, "publish"):
+        return
+    event = {
+        "type": event_type,
+        "event_type": event_type,
+        "engine": "opencode",
+        "session_id": getattr(record, "portal_session_id", ""),
+        "request_id": getattr(record, "request_id", ""),
+        "opencode_session_id": getattr(record, "opencode_session_id", ""),
+        "state": state,
+        "summary": summary or event_type,
+        "data": safe_preview({"abort_result": abort_result}, 2000),
+        "created_at": utc_now_iso(),
+        "ts": time.time(),
+    }
+    await bus.publish(event)
+
+
+async def _handle_abort_failure(request: web.Request, *, store, client, record, abort_result: dict[str, Any]) -> web.Response:
+    current = store.record_abort_failure(record.request_id, abort_result) or record
+    await _publish_abort_event(request, "chat.run.abort_failed", record=current, abort_result=abort_result, state="failed", summary="OpenCode abort failed.")
+    await _publish_abort_event(request, "opencode.session.abort_failed", record=current, abort_result=abort_result, state="failed", summary="OpenCode abort failed.")
+    public = store.to_public_dict(current)
+    try:
+        validated = await validate_chat_run_against_opencode(store=store, client=client, record=current, event_bus=request.app.get(EVENT_BUS_KEY))
+        if validated is not None:
+            public = validated
+        else:
+            refreshed = store.get(record.request_id)
+            public = store.to_public_dict(refreshed) if refreshed is not None else public
+    except Exception:
+        pass
+    return web.json_response(
+        {
+            "success": False,
+            "engine": "opencode",
+            "error": "opencode_abort_failed",
+            "run": public,
+            "abort_result": safe_preview(abort_result, 2000),
+        },
+        status=409,
+    )
+
+
+async def _handle_abort_missing(request: web.Request, *, store, record, abort_result: dict[str, Any]) -> web.Response:
+    stale = store.mark_stale(record.request_id, reason="opencode_session_missing_after_abort", metadata={"abort_result": abort_result}) or record
+    await _publish_abort_event(request, "chat.run.stale", record=stale, abort_result=abort_result, state="stale", summary="OpenCode session missing after abort.")
+    await _publish_abort_event(request, "opencode.session.missing", record=stale, abort_result=abort_result, state="stale", summary="OpenCode session missing after abort.")
+    return web.json_response(
+        {
+            "success": True,
+            "engine": "opencode",
+            "stale": True,
+            "reason": "opencode_session_missing_after_abort",
+            "run": store.to_public_dict(stale),
+            "abort_result": safe_preview(abort_result, 2000),
+        }
+    )
+
+
+async def abort_chat_run_handler(request: web.Request) -> web.Response:
+    store = request.app[CHAT_RUN_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
+    request_id = request.match_info["request_id"]
+    record = store.get(request_id)
+    if record is None:
+        return web.json_response({"success": False, "engine": "opencode", "error": "chat_run_not_found"}, status=404)
+    if record.opencode_session_id:
+        abort_result = await client.abort_session_tree(record.opencode_session_id)
+    else:
+        abort_result = {"success": True, "supported": True, "skipped": True, "reason": "missing_opencode_session_id"}
+    if _abort_result_missing_current_session(abort_result, record.opencode_session_id):
+        return await _handle_abort_missing(request, store=store, record=record, abort_result=abort_result)
+    if _abort_result_failed(abort_result):
+        return await _handle_abort_failure(request, store=store, client=client, record=record, abort_result=abort_result)
+    updated = store.mark_aborted(request_id, reason="user_aborted", metadata={"abort_result": abort_result}) or record
+    await _publish_abort_event(request, "chat.run.aborted", record=updated, abort_result=abort_result)
+    await _publish_abort_event(request, "opencode.session.aborted", record=updated, abort_result=abort_result)
+    return web.json_response({"success": True, "engine": "opencode", "run": store.to_public_dict(updated), "abort_result": safe_preview(abort_result, 2000)})
+
+
+async def abort_session_handler(request: web.Request) -> web.Response:
+    store = request.app[CHAT_RUN_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
+    session_store = request.app.get(SESSION_STORE_KEY)
+    portal_session_id = request.match_info["session_id"]
+    record = store.active_for_session(portal_session_id) or store.latest_for_session(portal_session_id)
+    opencode_session_id = getattr(record, "opencode_session_id", "") if record is not None else ""
+    if not opencode_session_id and session_store is not None:
+        session_record = session_store.get(portal_session_id)
+        opencode_session_id = getattr(session_record, "opencode_session_id", "") if session_record is not None else ""
+    if opencode_session_id:
+        abort_result = await client.abort_session_tree(opencode_session_id)
+    else:
+        abort_result = {"success": True, "supported": True, "skipped": True, "reason": "missing_opencode_session_id"}
+    updated = None
+    if record is None and _abort_result_failed(abort_result):
+        return web.json_response(
+            {
+                "success": False,
+                "engine": "opencode",
+                "error": "opencode_abort_failed",
+                "session_id": portal_session_id,
+                "opencode_session_id": opencode_session_id,
+                "run": None,
+                "abort_result": safe_preview(abort_result, 2000),
+            },
+            status=409,
+        )
+    if record is not None:
+        if _abort_result_missing_current_session(abort_result, record.opencode_session_id):
+            return await _handle_abort_missing(request, store=store, record=record, abort_result=abort_result)
+        if _abort_result_failed(abort_result):
+            return await _handle_abort_failure(request, store=store, client=client, record=record, abort_result=abort_result)
+        updated = store.mark_aborted(record.request_id, reason="user_aborted", metadata={"abort_result": abort_result}) or record
+        await _publish_abort_event(request, "chat.run.aborted", record=updated, abort_result=abort_result)
+        await _publish_abort_event(request, "opencode.session.aborted", record=updated, abort_result=abort_result)
+    else:
+        store.mark_stale_for_session(portal_session_id, "user_aborted", metadata={"abort_result": abort_result})
+    return web.json_response(
+        {
+            "success": True,
+            "engine": "opencode",
+            "session_id": portal_session_id,
+            "opencode_session_id": opencode_session_id,
+            "run": store.to_public_dict(updated) if updated is not None else None,
+            "abort_result": safe_preview(abort_result, 2000),
+        }
+    )
+
+
+async def reconcile_chat_runs_on_startup(app: web.Application) -> dict[str, int]:
+    store = app.get(CHAT_RUN_STORE_KEY)
+    client = app.get(OPENCODE_CLIENT_KEY)
+    if store is None or client is None or not hasattr(store, "list_active"):
+        return {"chat_runs_validated": 0, "chat_runs_stale_marked": 0, "chat_runs_still_active": 0}
+    records = list(store.list_active(include_detached_candidates=True))
+    summary = {"chat_runs_validated": 0, "chat_runs_stale_marked": 0, "chat_runs_still_active": 0}
+    for record in records:
+        before_status = getattr(record, "status", "")
+        try:
+            public = await validate_chat_run_against_opencode(store=store, client=client, record=record, event_bus=app.get(EVENT_BUS_KEY))
+        except Exception:
+            continue
+        summary["chat_runs_validated"] += 1
+        refreshed = store.get(getattr(record, "request_id", "")) if hasattr(store, "get") else None
+        if public is not None and public.get("opencode_active") is True:
+            summary["chat_runs_still_active"] += 1
+        if before_status != "stale" and getattr(refreshed, "status", "") == "stale":
+            summary["chat_runs_stale_marked"] += 1
+    bus = app.get(EVENT_BUS_KEY)
+    if bus is not None and hasattr(bus, "publish"):
+        await bus.publish(
+            {
+                "type": "chat.runs.reconciled",
+                "event_type": "chat.runs.reconciled",
+                "engine": "opencode",
+                "state": "completed",
+                "summary": "Chat run startup reconciliation completed.",
+                "data": dict(summary),
+                "created_at": utc_now_iso(),
+                "ts": time.time(),
+            }
+        )
+    return summary
 
 
 async def internal_opencode_status_handler(request: web.Request) -> web.Response:
@@ -561,6 +781,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_post("/api/chat/stream", chat_stream_handler)
     app.router.add_get("/api/chat/runs", list_chat_runs_handler)
     app.router.add_get("/api/chat/runs/{request_id}", get_chat_run_handler)
+    app.router.add_post("/api/chat/runs/{request_id}/abort", abort_chat_run_handler)
     app.router.add_post("/api/tasks/execute", execute_task_handler)
     app.router.add_get("/api/tasks/{task_id}", get_task_handler)
     app.router.add_post("/api/tasks/{task_id}/cancel", cancel_task_handler)
@@ -570,6 +791,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/api/sessions", list_sessions_handler)
     app.router.add_post("/api/clear", clear_sessions_handler)
     app.router.add_get("/api/sessions/{session_id}/active-run", active_chat_run_for_session_handler)
+    app.router.add_post("/api/sessions/{session_id}/abort", abort_session_handler)
     app.router.add_get("/api/sessions/{session_id}/chatlog", session_chatlog_handler)
     app.router.add_post("/api/sessions/{session_id}/rename", rename_session_handler)
     app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/edit/async", edit_message_async_handler)
@@ -599,6 +821,13 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             if hasattr(manager, "run_watchdog"):
                 app[OPENCODE_WATCHDOG_TASK_KEY] = asyncio.create_task(manager.run_watchdog(app=app))
 
+    async def _reconcile_chat_runs(app):
+        try:
+            summary = await reconcile_chat_runs_on_startup(app)
+            print(f"chat run reconciliation summary: {summary}")
+        except Exception as exc:
+            print(f"chat run reconciliation failed: {exc}")
+
     async def _start_event_bridge(app):
         bridge = app.get(EVENT_BRIDGE_KEY)
         if bridge:
@@ -609,6 +838,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
     app.on_startup.append(_managed_opencode_startup)
+    app.on_startup.append(_reconcile_chat_runs)
     if should_start_event_bridge:
         app.on_startup.append(_start_event_bridge)
         app.on_cleanup.append(_cleanup_event_bridge)
