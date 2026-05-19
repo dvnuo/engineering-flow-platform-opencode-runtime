@@ -9,9 +9,12 @@ from typing import Any
 from .thinking_events import safe_preview, utc_now_iso
 
 
-ACTIVE_RUN_STATUSES = {"accepted", "running", "recovering", "stream_attached", "stream_detached"}
-TERMINAL_RUN_STATUSES = {"completed", "incomplete", "failed", "cancelled"}
+ACTIVE_RUN_STATUSES = {"accepted", "running", "recovering", "stream_attached"}
+LOCAL_RECONNECT_CANDIDATE_STATUSES = ACTIVE_RUN_STATUSES | {"stream_detached"}
+TERMINAL_RUN_STATUSES = {"completed", "incomplete", "failed", "cancelled", "aborted", "stale"}
+DIAGNOSTIC_RUN_STATUSES = {"unknown"}
 ALLOWED_RUN_STATUSES = ACTIVE_RUN_STATUSES | TERMINAL_RUN_STATUSES
+ALLOWED_RUN_STATUSES = ALLOWED_RUN_STATUSES | {"stream_detached"} | DIAGNOSTIC_RUN_STATUSES
 ALLOWED_STREAM_STATES = {"none", "attached", "detached", "closed"}
 
 
@@ -315,6 +318,44 @@ class ChatRunStore:
         record.completed_at = utc_now_iso()
         return self._save(record)
 
+    def mark_stale(self, request_id: str, reason: str, metadata: dict[str, Any] | None = None) -> ChatRunRecord | None:
+        record = self._runs.get(request_id)
+        if record is None:
+            return None
+        record.status = "stale"
+        record.stream_state = "closed" if record.stream_state == "attached" else record.stream_state
+        record.completion_state = "stale"
+        record.incomplete_reason = _safe_text(reason or "stale", 500)
+        record.completed_at = record.completed_at or utc_now_iso()
+        record.metadata = _safe_dict(
+            {
+                **record.metadata,
+                "stale_reason": reason or "stale",
+                **(metadata or {}),
+            },
+            4000,
+        )
+        return self._save(record)
+
+    def mark_aborted(self, request_id: str, reason: str = "user_aborted", metadata: dict[str, Any] | None = None) -> ChatRunRecord | None:
+        record = self._runs.get(request_id)
+        if record is None:
+            return None
+        record.status = "aborted"
+        record.stream_state = "closed" if record.stream_state == "attached" else record.stream_state
+        record.completion_state = "aborted"
+        record.incomplete_reason = _safe_text(reason or "user_aborted", 500)
+        record.completed_at = record.completed_at or utc_now_iso()
+        record.metadata = _safe_dict(
+            {
+                **record.metadata,
+                "abort_reason": reason or "user_aborted",
+                **(metadata or {}),
+            },
+            4000,
+        )
+        return self._save(record)
+
     def keep_running(self, request_id: str, *, reason: str, payload: dict[str, Any] | None = None, stream_detached: bool = False) -> ChatRunRecord | None:
         record = self._runs.get(request_id)
         if record is None:
@@ -439,13 +480,18 @@ class ChatRunStore:
         return max(runs, key=lambda record: record.updated_at or record.started_at)
 
     def active_for_session(self, portal_session_id: str) -> ChatRunRecord | None:
+        """Return a local candidate only.
+
+        Call validate_chat_run_against_opencode before exposing this to Portal.
+        """
         runs = [record for record in self._runs.values() if record.portal_session_id == portal_session_id and record.status in ACTIVE_RUN_STATUSES]
         if not runs:
             return None
         return max(runs, key=lambda record: record.updated_at or record.started_at)
 
-    def list_active(self) -> list[ChatRunRecord]:
-        runs = [record for record in self._runs.values() if record.status in ACTIVE_RUN_STATUSES]
+    def list_active(self, *, include_detached_candidates: bool = False) -> list[ChatRunRecord]:
+        statuses = LOCAL_RECONNECT_CANDIDATE_STATUSES if include_detached_candidates else ACTIVE_RUN_STATUSES
+        runs = [record for record in self._runs.values() if record.status in statuses]
         runs.sort(key=lambda record: record.updated_at or record.started_at, reverse=True)
         return runs
 
@@ -453,6 +499,27 @@ class ChatRunStore:
         runs = [record for record in self._runs.values() if record.portal_session_id == portal_session_id]
         runs.sort(key=lambda record: record.updated_at or record.started_at, reverse=True)
         return runs[: max(0, int(limit))]
+
+    def delete_for_session(self, portal_session_id: str) -> int:
+        request_ids = [request_id for request_id, record in self._runs.items() if record.portal_session_id == portal_session_id]
+        for request_id in request_ids:
+            self._runs.pop(request_id, None)
+        if request_ids:
+            self._write()
+        return len(request_ids)
+
+    def mark_stale_for_session(self, portal_session_id: str, reason: str, metadata: dict[str, Any] | None = None) -> list[ChatRunRecord]:
+        records = [
+            record
+            for record in self._runs.values()
+            if record.portal_session_id == portal_session_id and record.status not in TERMINAL_RUN_STATUSES
+        ]
+        updated: list[ChatRunRecord] = []
+        for record in records:
+            stale = self.mark_stale(record.request_id, reason, metadata=metadata)
+            if stale is not None:
+                updated.append(stale)
+        return updated
 
     def diagnostics_for(self, record: ChatRunRecord | None) -> dict[str, Any]:
         if record is None:
@@ -497,6 +564,10 @@ class ChatRunStore:
             "last_event_at": record.last_event_at,
             "metadata": _safe_dict(record.metadata, 4000),
             "diagnostics": self.diagnostics_for(record),
+            "source_of_truth": "opencode",
+            "validated_at": record.metadata.get("validated_at") if isinstance(record.metadata, dict) else None,
+            "validation_reason": record.metadata.get("validation_reason") if isinstance(record.metadata, dict) else None,
+            "opencode_active": record.metadata.get("opencode_active") if isinstance(record.metadata, dict) and "opencode_active" in record.metadata else None,
         }
         if include_final_payload and record.status in {"completed", "incomplete", "failed"}:
             payload["final_payload"] = _safe_dict(record.final_payload, 12000)
@@ -515,4 +586,8 @@ class ChatRunStore:
             "last_response_text": record.last_response_text,
             "updated_at": record.updated_at,
             "completed_at": record.completed_at,
+            "source_of_truth": "opencode",
+            "validated_at": record.metadata.get("validated_at") if isinstance(record.metadata, dict) else None,
+            "validation_reason": record.metadata.get("validation_reason") if isinstance(record.metadata, dict) else None,
+            "opencode_active": record.metadata.get("opencode_active") if isinstance(record.metadata, dict) and "opencode_active" in record.metadata else None,
         }
