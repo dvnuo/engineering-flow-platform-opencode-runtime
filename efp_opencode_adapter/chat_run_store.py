@@ -356,6 +356,13 @@ class ChatRunStore:
         )
         return self._save(record)
 
+    def record_validation(self, request_id: str, metadata: dict[str, Any]) -> ChatRunRecord | None:
+        record = self._runs.get(request_id)
+        if record is None:
+            return None
+        record.metadata = _safe_dict({**record.metadata, **(metadata or {})}, 4000)
+        return self._save(record)
+
     def keep_running(self, request_id: str, *, reason: str, payload: dict[str, Any] | None = None, stream_detached: bool = False) -> ChatRunRecord | None:
         record = self._runs.get(request_id)
         if record is None:
