@@ -5,13 +5,48 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from efp_opencode_adapter.server import create_app
-from efp_opencode_adapter.opencode_client import OpenCodeClientError, OpenCodeTransportTimeout
+from efp_opencode_adapter.opencode_client import OpenCodeClientError, OpenCodeTransportDisconnected, OpenCodeTransportTimeout
+from efp_opencode_adapter.opencode_process import OpenCodeProcessManager
 from efp_opencode_adapter.settings import Settings
 from efp_opencode_adapter.app_keys import ATTACHMENT_SERVICE_KEY, CHAT_RUN_STORE_KEY, EVENT_BUS_KEY, SESSION_STORE_KEY, REQUEST_BINDING_STORE_KEY, USER_DISPLAY_STORE_KEY
 from efp_opencode_adapter import chat_api
 from efp_opencode_adapter.chat_api import _consume_background_chat_task, _is_stream_relevant_event
 from efp_opencode_adapter.skill_invocation import SkillDecision
 from test_t06_helpers import FakeOpenCodeClient
+
+
+class _FakeManagedProcess:
+    def __init__(self) -> None:
+        self.pid = 456
+        self.returncode = None
+
+    def terminate(self) -> None:
+        self.returncode = 0
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+    async def wait(self) -> int:
+        self.returncode = 0
+        return 0
+
+
+class _ReadyProcessClient:
+    async def wait_until_ready(self, _timeout_seconds: int) -> None:
+        return None
+
+    async def health(self):
+        return {"healthy": True, "version": "1.14.39"}
+
+
+class _RecordingProcessManager(OpenCodeProcessManager):
+    def __init__(self, settings, client):
+        super().__init__(settings, client)
+        self.restart_calls: list[str] = []
+
+    async def restart(self, env=None, reason="runtime_profile_apply"):
+        self.restart_calls.append(reason)
+        return await super().restart(env, reason=reason)
 
 
 class _UserOnlyIncompleteClient(FakeOpenCodeClient):
@@ -1996,6 +2031,74 @@ class SubmitTimeoutRecoveredClient(FakeOpenCodeClient):
         return []
 
 
+class SubmitTransportDisconnectedRecoveredClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+        self.pending_user_id = ""
+        self.sent_texts: list[str] = []
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.calls += 1
+        self.sent_texts.append(parts[0].get("text", ""))
+        self.pending_user_id = message_id or "u-disconnected"
+        raise OpenCodeTransportDisconnected("POST", f"/session/{session_id}/message", ConnectionResetError("server disconnected"))
+
+    async def get_session_status(self, timeout_seconds=30):
+        return {"sessions": {"ses-1": {"state": "idle"}}}
+
+    async def list_messages(self, session_id):
+        if self.calls:
+            return [
+                {"id": self.pending_user_id, "role": "user", "parts": [{"type": "text", "text": "q"}]},
+                {"id": "a-recovered-disconnect", "role": "assistant", "parts": [{"type": "text", "text": "Recovered after disconnect"}]},
+            ]
+        return []
+
+
+class SubmitTransportDisconnectedJsonChatClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+        self.pending_user_id = ""
+        self.sent_texts: list[str] = []
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.calls += 1
+        self.sent_texts.append(parts[0].get("text", ""))
+        self.pending_user_id = message_id or "u-disconnected"
+        raise OpenCodeTransportDisconnected("POST", f"/session/{session_id}/message", ConnectionResetError("server disconnected"))
+
+    async def get_session_status(self, timeout_seconds=30):
+        return {"sessions": {"ses-1": {"state": "idle"}}}
+
+    async def list_messages(self, session_id):
+        if self.calls:
+            return [
+                {"id": self.pending_user_id, "role": "user", "parts": [{"type": "text", "text": "m"}]},
+                {"id": "a-json-recovered", "role": "assistant", "parts": [{"type": "text", "text": "transport recovered over json chat"}]},
+            ]
+        return []
+
+
+class SubmitTransportDisconnectedStillRunningClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+        self.sent_texts: list[str] = []
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.calls += 1
+        self.sent_texts.append(parts[0].get("text", ""))
+        raise OpenCodeTransportDisconnected("POST", f"/session/{session_id}/message", ConnectionResetError("server disconnected"))
+
+    async def get_session_status(self, timeout_seconds=30):
+        return {"sessions": {"ses-1": {"state": "running"}}}
+
+    async def list_messages(self, session_id):
+        return []
+
+
 @pytest.mark.asyncio
 async def test_chat_submit_timeout_recovers_from_messages_without_502(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
@@ -2014,6 +2117,98 @@ async def test_chat_submit_timeout_recovers_from_messages_without_502(tmp_path, 
     assert "chat.timeout_recovery.recovered" in types
     assert "execution.failed" not in types
     assert payload["_llm_debug"]["timeout_recovery"]["recovered"] is True
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_submit_transport_disconnect_recovers_from_messages_without_502(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "0.05")
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.001")
+    fake = SubmitTransportDisconnectedRecoveredClient()
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=fake)))
+    await client.start_server()
+    response = await client.post("/api/chat", json={"message": "ORIGINAL USER PROMPT", "session_id": "s-disconnect-recovered", "request_id": "r-disconnect-recovered"})
+    payload = await response.json()
+    assert response.status == 200
+    assert payload["ok"] is True
+    assert payload["completion_state"] == "completed"
+    assert payload["response"] == "Recovered after disconnect"
+    assert fake.calls == 1
+    types = [e.get("type") for e in payload["runtime_events"]]
+    assert "chat.transport_recovery.started" in types
+    assert "chat.transport_recovery.recovered" in types
+    assert payload["_llm_debug"]["transport_recovery"]["recovered"] is True
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_transport_disconnected_recovery_completes_without_502(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "0.05")
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.001")
+    captured_envs: list[dict[str, str]] = []
+
+    async def fake_spawn(*_args, **kwargs):
+        captured_envs.append(dict(kwargs.get("env") or {}))
+        return _FakeManagedProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr("efp_opencode_adapter.opencode_process.sync_runtime_skills", lambda _settings: None)
+    settings = Settings.from_env()
+    manager = _RecordingProcessManager(settings, _ReadyProcessClient())
+    await manager.start({"OPENCODE_PROVIDER": "anthropic", "ATLASSIAN_CONFIG": "/cached/atlassian.json", "GIT_ASKPASS": "/cached/askpass"}, reason="startup")
+    fake = SubmitTransportDisconnectedJsonChatClient()
+    app = create_app(settings, opencode_client=fake, opencode_process_manager=manager)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    manager.process.returncode = 1
+
+    response = await client.post("/api/chat", json={"message": "m", "session_id": "portal-chat-disconnect", "request_id": "req-chat-disconnect"})
+    payload = await response.json()
+
+    assert response.status == 200
+    assert payload["completion_state"] == "completed"
+    assert payload["response"] == "transport recovered over json chat"
+    types = [e.get("type") for e in payload["runtime_events"]]
+    assert "chat.transport_recovery.started" in types
+    assert "opencode.process.restarted" in types
+    assert manager.restart_calls == ["transport_disconnected"]
+    assert fake.sent_texts == ["m"]
+    assert captured_envs[-1]["OPENCODE_PROVIDER"] == "anthropic"
+    assert captured_envs[-1]["ATLASSIAN_CONFIG"] == "/cached/atlassian.json"
+    assert captured_envs[-1]["GIT_ASKPASS"] == "/cached/askpass"
+    public = app[CHAT_RUN_STORE_KEY].to_public_dict(app[CHAT_RUN_STORE_KEY].get("req-chat-disconnect"))
+    assert public["diagnostics"]["last_transport_error"]["exception_type"] == "ConnectionResetError"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_transport_disconnected_recovery_exhausted_marks_recovering_not_badgateway(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.001")
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_ENABLED", "false")
+    fake = SubmitTransportDisconnectedStillRunningClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    response = await client.post("/api/chat", json={"message": "ORIGINAL USER PROMPT", "session_id": "s-disconnect-running", "request_id": "r-disconnect-running"})
+    payload = await response.json()
+    assert response.status == 200
+    assert payload["completion_state"] == "incomplete"
+    assert payload["incomplete_reason"] == "opencode_transport_disconnected"
+    assert fake.calls == 1
+    assert fake.sent_texts == ["ORIGINAL USER PROMPT"]
+    run = app[CHAT_RUN_STORE_KEY].get("r-disconnect-running")
+    assert run.status in {"recovering", "stream_detached"}
+    public = app[CHAT_RUN_STORE_KEY].to_public_dict(run)
+    assert public["diagnostics"]["last_transport_error"]["exception_type"] == "ConnectionResetError"
+    assert public["diagnostics"]["opencode_may_still_be_running"] is True
+    assert public["diagnostics"]["opencode_disconnected"] is True
+    types = [e.get("type") for e in payload["runtime_events"]]
+    assert "chat.transport_recovery.started" in types
+    assert "chat.transport_recovery.exhausted" in types
     await client.close()
 
 

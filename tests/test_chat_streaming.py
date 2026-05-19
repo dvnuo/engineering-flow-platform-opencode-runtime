@@ -6,7 +6,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from aiohttp import web
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
-from efp_opencode_adapter.opencode_client import OpenCodeClientError, OpenCodeTransportTimeout
+from efp_opencode_adapter.opencode_client import OpenCodeClientError, OpenCodeTransportDisconnected, OpenCodeTransportTimeout
 from efp_opencode_adapter.chat_api import SSEClientDisconnected, _safe_write_eof, _write_sse
 from test_t06_helpers import FakeOpenCodeClient
 
@@ -40,6 +40,47 @@ class StreamSubmitTimeoutRecoveredFake(FakeOpenCodeClient):
                 {"id": "a-recovered", "role": "assistant", "parts": [{"type": "text", "text": "stream recovered"}]},
             ]
         return []
+
+
+class StreamSubmitTransportDisconnectedRestartFake(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.disconnected = False
+        self.user_message_id = ""
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.disconnected = True
+        self.user_message_id = message_id or "u-disconnected"
+        raise OpenCodeTransportDisconnected("POST", f"/session/{session_id}/message", ConnectionResetError("server disconnected"))
+
+    async def get_session_status(self, timeout_seconds=30):
+        return {"sessions": {"ses-1": {"state": "idle"}}}
+
+    async def list_messages(self, session_id):
+        if self.disconnected:
+            return [
+                {"id": self.user_message_id, "role": "user", "parts": [{"type": "text", "text": "m"}]},
+                {"id": "a-recovered", "role": "assistant", "parts": [{"type": "text", "text": "stream transport recovered"}]},
+            ]
+        return []
+
+
+class StreamRestartManager:
+    def __init__(self):
+        self.restart_calls = []
+
+    def status_snapshot(self):
+        return {"running": False, "returncode": 1}
+
+    async def start(self, env=None, reason="startup"):
+        return {"running": False, "returncode": 1, "last_restart_reason": reason}
+
+    async def stop(self):
+        return {"running": False}
+
+    async def restart(self, env=None, reason="runtime_profile_apply"):
+        self.restart_calls.append(reason)
+        return {"running": True, "pid": 456, "health_ok": True, "last_restart_reason": reason}
 
 
 class StreamAutoContinueFake(FakeOpenCodeClient):
@@ -150,6 +191,29 @@ async def test_chat_stream_emits_timeout_recovery_before_final(tmp_path, monkeyp
         final_payload = next(payload for name, payload in events if name == "final")
         assert final_payload["completion_state"] == "completed"
         assert final_payload["response"] == "stream recovered"
+    finally:
+        await c.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_transport_recovery_and_restart_before_final(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "0.05")
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.001")
+    manager = StreamRestartManager()
+    c = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=StreamSubmitTransportDisconnectedRestartFake(), opencode_process_manager=manager)))
+    await c.start_server()
+    try:
+        resp = await c.post("/api/chat/stream", json={"message": "m", "session_id": "portal-stream-disconnect", "request_id": "req-stream-disconnect"})
+        body = await resp.text()
+        assert "chat.transport_recovery.started" in body
+        assert "opencode.process.restarted" in body
+        assert body.index("chat.transport_recovery.started") < body.index("event: final")
+        assert manager.restart_calls == ["transport_disconnected"]
+        events = _sse_events(body)
+        final_payload = next(payload for name, payload in events if name == "final")
+        assert final_payload["completion_state"] == "completed"
+        assert final_payload["response"] == "stream transport recovered"
     finally:
         await c.close()
 

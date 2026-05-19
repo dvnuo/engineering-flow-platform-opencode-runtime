@@ -8,6 +8,7 @@ from aiohttp.test_utils import TestServer
 
 from efp_opencode_adapter.opencode_client import OpenCodeClient
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
+from efp_opencode_adapter.opencode_client import OpenCodeTransportDisconnected
 from efp_opencode_adapter.opencode_client import OpenCodeTransportTimeout
 from efp_opencode_adapter.opencode_client import _safe_error_preview
 from efp_opencode_adapter.settings import Settings
@@ -15,6 +16,14 @@ from efp_opencode_adapter.settings import Settings
 
 def server_base_url(server: TestServer) -> str:
     return str(server.make_url("")).rstrip("/")
+
+
+class _RaisingRequestSession:
+    def __init__(self, exc: BaseException):
+        self.exc = exc
+
+    def request(self, *_args, **_kwargs):
+        raise self.exc
 
 
 @pytest.mark.asyncio
@@ -36,6 +45,43 @@ async def test_health_and_wait_ready(monkeypatch):
     assert health["version"] == "1.14.39"
     await client.wait_until_ready(timeout_seconds=1)
     await server.close()
+
+
+@pytest.mark.asyncio
+async def test_send_message_server_disconnected_is_recoverable_transport_error(monkeypatch):
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://opencode.local")
+    client = OpenCodeClient(
+        Settings.from_env(),
+        session=_RaisingRequestSession(aiohttp.client_exceptions.ServerDisconnectedError("token=ghp_SECRET")),
+    )
+    with pytest.raises(OpenCodeTransportDisconnected) as caught:
+        await client.send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model=None, agent=None)
+    exc = caught.value
+    assert exc.is_recoverable_transport_error is True
+    assert exc.payload["exception_type"] == "ServerDisconnectedError"
+    assert exc.payload["method"] == "POST"
+    assert exc.payload["path"] == "/session/ses-1/message"
+    assert "ghp_SECRET" not in str(exc)
+
+
+@pytest.mark.asyncio
+async def test_send_message_client_connection_error_is_recoverable_transport_error(monkeypatch):
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://opencode.local")
+    client = OpenCodeClient(
+        Settings.from_env(),
+        session=_RaisingRequestSession(aiohttp.client_exceptions.ClientConnectionError("connection dropped")),
+    )
+    with pytest.raises(OpenCodeTransportDisconnected) as caught:
+        await client.send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model=None, agent=None)
+    assert caught.value.payload["exception_type"] == "ClientConnectionError"
+
+
+@pytest.mark.asyncio
+async def test_send_message_timeout_still_raises_transport_timeout(monkeypatch):
+    monkeypatch.setenv("EFP_OPENCODE_URL", "http://opencode.local")
+    client = OpenCodeClient(Settings.from_env(), session=_RaisingRequestSession(asyncio.TimeoutError("slow")))
+    with pytest.raises(OpenCodeTransportTimeout):
+        await client.send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model=None, agent=None)
 
 
 @pytest.mark.asyncio
