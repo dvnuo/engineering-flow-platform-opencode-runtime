@@ -12,6 +12,7 @@ class FakeOpenCodeClient:
         self.next_id = 1
         self.create_calls = 0
         self.abort_session_called = 0
+        self.abort_tree_calls: list[str] = []
         self.fork_mode = fork_mode
         self.fork_calls: list[dict[str, Any]] = []
         self.revert_calls: list[dict[str, Any]] = []
@@ -34,6 +35,14 @@ class FakeOpenCodeClient:
         if session_id not in self.sessions:
             raise OpenCodeClientError("not found", status=404)
         return self.sessions[session_id]
+
+    async def get_session_status(self):
+        return {"sessions": {sid: {"state": "running"} for sid in self.sessions}}
+
+    async def list_session_children(self, session_id):
+        if session_id not in self.sessions:
+            raise OpenCodeClientError("not found", status=404)
+        return []
 
     async def patch_session(self, session_id, title):
         if session_id not in self.sessions:
@@ -92,6 +101,11 @@ class FakeOpenCodeClient:
     async def abort_session(self, session_id):
         self.abort_session_called += 1
         return {"success": True, "supported": True, "status": 200}
+
+    async def abort_session_tree(self, session_id):
+        self.abort_tree_calls.append(session_id)
+        await self.abort_session(session_id)
+        return {"success": True, "supported": True, "aborted_session_ids": [session_id], "missing_session_ids": [], "errors": []}
 
     async def revert_message(self, session_id, message_id, part_id=None):
         self.revert_calls.append({"session_id": session_id, "message_id": message_id, "part_id": part_id})

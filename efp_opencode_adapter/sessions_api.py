@@ -19,6 +19,7 @@ from .app_keys import (
 )
 
 from .chat_api import handle_chat_payload_for_app
+from .chat_run_validation import validate_chat_run_against_opencode
 from .opencode_client import OpenCodeClientError
 from .opencode_ids import new_opencode_message_id
 from .opencode_message_adapter import message_to_visible_text, to_efp_message
@@ -504,7 +505,7 @@ def _latest_session_runtime_status_metadata(chatlog_store, sid: str) -> dict[str
     }
 
 
-def _chat_run_session_metadata(chat_run_store: Any, sid: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
+async def _chat_run_session_metadata(chat_run_store: Any, client: Any, sid: str, messages: list[dict[str, Any]], event_bus: Any = None) -> dict[str, Any]:
     if chat_run_store is None:
         return {"active_run": None, "latest_run": None}
     try:
@@ -512,9 +513,26 @@ def _chat_run_session_metadata(chat_run_store: Any, sid: str, messages: list[dic
         latest_record = chat_run_store.latest_for_session(sid)
     except Exception:
         return {"active_run": None, "latest_run": None}
+    active_public = None
+    active_run_stale_reason = ""
+    if active_record is not None:
+        active_public = await validate_chat_run_against_opencode(store=chat_run_store, client=client, record=active_record, event_bus=event_bus)
+        if active_public is None or active_public.get("opencode_active") is not True:
+            refreshed = chat_run_store.get(active_record.request_id) if hasattr(chat_run_store, "get") else active_record
+            active_run_stale_reason = str(
+                (active_public or {}).get("validation_reason")
+                or getattr(refreshed, "incomplete_reason", "")
+                or "opencode_not_active"
+            )
+            active_record = None
+        else:
+            active_record = chat_run_store.get(active_record.request_id) if hasattr(chat_run_store, "get") else active_record
+    latest_record = chat_run_store.latest_for_session(sid)
     active_run = chat_run_store.to_session_summary(active_record) if active_record is not None else None
     latest_run = chat_run_store.to_session_summary(latest_record) if latest_record is not None else None
     metadata: dict[str, Any] = {"active_run": active_run, "latest_run": latest_run}
+    if active_run_stale_reason:
+        metadata["active_run_stale_reason"] = active_run_stale_reason
     if latest_record is not None and latest_record.last_response_text:
         message_ids = {str(message.get("id") or (message.get("metadata") or {}).get("opencode_message_id") or "") for message in messages if isinstance(message, dict)}
         assistant_ids = [latest_record.assistant_message_id, *latest_record.assistant_message_ids]
@@ -556,7 +574,7 @@ async def get_session_handler(request: web.Request) -> web.Response:
                 "opencode_session_id": record.opencode_session_id,
                 "partial_recovery": record.partial_recovery,
                 **_latest_session_runtime_status_metadata(request.app.get(CHATLOG_STORE_KEY), sid),
-                **_chat_run_session_metadata(request.app.get(CHAT_RUN_STORE_KEY), sid, efp_messages),
+                **await _chat_run_session_metadata(request.app.get(CHAT_RUN_STORE_KEY), client, sid, efp_messages, request.app.get(EVENT_BUS_KEY)),
             },
         }
     )

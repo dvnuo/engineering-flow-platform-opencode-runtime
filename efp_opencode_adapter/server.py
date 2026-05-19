@@ -29,6 +29,7 @@ from .app_keys import (
 
 from .capabilities import build_capability_catalog
 from .chat_api import chat_handler, chat_stream_handler
+from .chat_run_validation import validate_chat_run_against_opencode
 from .chatlog_store import ChatLogStore
 from .chat_run_store import ChatRunStore
 from .compat_api import (
@@ -421,22 +422,31 @@ async def capabilities_handler(request: web.Request) -> web.Response:
 
 async def get_chat_run_handler(request: web.Request) -> web.Response:
     store = request.app[CHAT_RUN_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
     request_id = request.match_info["request_id"]
     record = store.get(request_id)
     if record is None:
         return web.json_response({"success": False, "engine": "opencode", "error": "chat_run_not_found"}, status=404)
-    return web.json_response({"success": True, "engine": "opencode", "run": store.to_public_dict(record)})
+    validate = str(request.query.get("validate", "")).lower()
+    active = str(request.query.get("active", "")).lower() in {"1", "true", "yes", "on"}
+    if validate == "opencode" or active:
+        public = await validate_chat_run_against_opencode(store=store, client=client, record=record, event_bus=request.app.get(EVENT_BUS_KEY))
+    else:
+        public = store.to_public_dict(record)
+    return web.json_response({"success": True, "engine": "opencode", "run": public})
 
 
 async def list_chat_runs_handler(request: web.Request) -> web.Response:
     store = request.app[CHAT_RUN_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
     session_id = request.query.get("session_id", "")
     if not session_id:
         return web.json_response({"success": False, "engine": "opencode", "error": "session_id_required"}, status=400)
     active = str(request.query.get("active", "")).lower() in {"1", "true", "yes", "on"}
     if active:
         run = store.active_for_session(session_id)
-        runs = [store.to_public_dict(run)] if run is not None else []
+        public = await validate_chat_run_against_opencode(store=store, client=client, record=run, event_bus=request.app.get(EVENT_BUS_KEY))
+        runs = [public] if public is not None and public.get("opencode_active") is True else []
     else:
         try:
             limit = int(request.query.get("limit", "20"))
@@ -448,8 +458,16 @@ async def list_chat_runs_handler(request: web.Request) -> web.Response:
 
 async def active_chat_run_for_session_handler(request: web.Request) -> web.Response:
     store = request.app[CHAT_RUN_STORE_KEY]
+    client = request.app[OPENCODE_CLIENT_KEY]
     session_id = request.match_info["session_id"]
-    return web.json_response({"success": True, "engine": "opencode", "run": store.to_public_dict(store.active_for_session(session_id))})
+    public = await validate_chat_run_against_opencode(
+        store=store,
+        client=client,
+        record=store.active_for_session(session_id),
+        event_bus=request.app.get(EVENT_BUS_KEY),
+    )
+    run = public if public is not None and public.get("opencode_active") is True else None
+    return web.json_response({"success": True, "engine": "opencode", "run": run})
 
 
 async def internal_opencode_status_handler(request: web.Request) -> web.Response:

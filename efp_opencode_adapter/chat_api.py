@@ -28,6 +28,7 @@ from .app_keys import (
 )
 
 from .opencode_client import OpenCodeClientError, OpenCodeTransportDisconnected, OpenCodeTransportTimeout
+from .chat_run_validation import validate_chat_run_against_opencode
 from .attachment_service import build_opencode_attachment_parts
 from .session_store import SessionDeletedError, SessionRecord
 from .thinking_events import (
@@ -1296,13 +1297,22 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
     if chat_run_store is not None and not _is_chat_mutation_path(metadata):
         active_run = chat_run_store.active_for_session(portal_session_id)
         if active_run is not None and active_run.request_id != request_id:
+            active_public = await validate_chat_run_against_opencode(
+                store=chat_run_store,
+                client=client,
+                record=active_run,
+                event_bus=bus,
+            )
+        else:
+            active_public = None
+        if active_public is not None and active_public.get("opencode_active") is True and active_run is not None and active_run.request_id != request_id:
             raise web.HTTPConflict(
                 text=json.dumps(
                     {
                         "success": False,
                         "engine": "opencode",
                         "error": "chat_run_already_active",
-                        "active_run": _chat_run_public(chat_run_store, active_run),
+                        "active_run": active_public,
                     }
                 ),
                 content_type="application/json",
@@ -2844,11 +2854,20 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     if chat_run_store is not None:
         active_run = chat_run_store.active_for_session(session_id)
         if active_run is not None and active_run.request_id != req_id:
+            active_public = await validate_chat_run_against_opencode(
+                store=chat_run_store,
+                client=request.app[OPENCODE_CLIENT_KEY],
+                record=active_run,
+                event_bus=bus,
+            )
+        else:
+            active_public = None
+        if active_public is not None and active_public.get("opencode_active") is True and active_run is not None and active_run.request_id != req_id:
             error_payload = {
                 "error": "chat_run_already_active",
                 "session_id": session_id,
                 "request_id": req_id,
-                "active_run": _chat_run_public(chat_run_store, active_run),
+                "active_run": active_public,
             }
             final_payload = _stream_error_final_payload(
                 error_payload={**error_payload, "detail": "chat_run_already_active"},

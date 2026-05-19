@@ -7,6 +7,23 @@ from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
 
 
+class _RunStateFakeOpenCodeClient(FakeOpenCodeClient):
+    def __init__(self, *, state: str = "running", missing_messages: bool = False):
+        super().__init__()
+        self.state = state
+        self.missing_messages = missing_messages
+
+    async def get_session_status(self):
+        return {"sessions": {sid: {"state": self.state} for sid in self.sessions}}
+
+    async def list_messages(self, session_id):
+        if self.missing_messages:
+            from efp_opencode_adapter.opencode_client import OpenCodeClientError
+
+            raise OpenCodeClientError("not found", status=404)
+        return await super().list_messages(session_id)
+
+
 def test_chat_stream_and_events_routes_still_exist(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
@@ -76,4 +93,45 @@ async def test_internal_opencode_status_log_tail_and_chat_diagnostics(tmp_path, 
     diagnostics = await (await client.get("/api/internal/chat/runs/req-diag/diagnostics")).json()
     assert diagnostics["diagnostics"]["last_transport_error"]["exception_type"] == "ServerDisconnectedError"
     assert "ghp_SECRET" not in str(diagnostics)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_active_run_route_validates_against_opencode_active(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(state="running")
+    fake.sessions["ses-active"] = {"id": "ses-active", "title": "Chat"}
+    fake.messages["ses-active"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-active", portal_session_id="portal-1", opencode_session_id="ses-active", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/portal-1/active-run")).json()
+    assert payload["run"]["request_id"] == "req-active"
+    assert payload["run"]["opencode_active"] is True
+    assert payload["run"]["source_of_truth"] == "opencode"
+
+    active_runs = await (await client.get("/api/chat/runs?session_id=portal-1&active=1")).json()
+    assert [run["request_id"] for run in active_runs["runs"]] == ["req-active"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_active_run_route_returns_null_when_opencode_inactive_or_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(state="idle")
+    fake.sessions["ses-idle"] = {"id": "ses-idle", "title": "Chat"}
+    fake.messages["ses-idle"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-idle", portal_session_id="portal-1", opencode_session_id="ses-idle", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/portal-1/active-run")).json()
+    assert payload["run"] is None
+    assert app[CHAT_RUN_STORE_KEY].get("req-idle").status == "stale"
+
+    active_runs = await (await client.get("/api/chat/runs?session_id=portal-1&active=1")).json()
+    assert active_runs["runs"] == []
     await client.close()

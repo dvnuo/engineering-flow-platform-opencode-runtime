@@ -9,8 +9,18 @@ from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.sessions_api import _extract_opencode_session_id, _to_efp_messages
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
 from efp_opencode_adapter.app_keys import CHAT_RUN_STORE_KEY, SESSION_STORE_KEY, PORTAL_METADATA_CLIENT_KEY, CHATLOG_STORE_KEY, TASK_BACKGROUND_TASKS_KEY
+from efp_opencode_adapter.session_store import SessionRecord
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
+
+
+class _RunStateFakeOpenCodeClient(FakeOpenCodeClient):
+    def __init__(self, *, state: str = "running"):
+        super().__init__()
+        self.state = state
+
+    async def get_session_status(self):
+        return {"sessions": {sid: {"state": self.state} for sid in self.sessions}}
 
 
 def _role_content_pairs(messages):
@@ -103,6 +113,70 @@ async def test_session_metadata_includes_active_latest_run_and_projection(tmp_pa
         assert active_payload["run"]["request_id"] == "r-active"
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_metadata_validates_active_run_against_opencode(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(state="running")
+    fake.sessions["ses-active"] = {"id": "ses-active", "title": "Chat"}
+    fake.messages["ses-active"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-active",
+            opencode_session_id="ses-active",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-19T00:00:00Z",
+            updated_at="2026-05-19T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-active", portal_session_id="portal-active", opencode_session_id="ses-active", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    metadata = (await (await client.get("/api/sessions/portal-active")).json())["metadata"]
+    assert metadata["active_run"]["request_id"] == "req-active"
+    assert metadata["active_run"]["opencode_active"] is True
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_metadata_clears_inactive_local_run_and_keeps_projection(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(state="idle")
+    fake.sessions["ses-idle"] = {"id": "ses-idle", "title": "Chat"}
+    fake.messages["ses-idle"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-idle",
+            opencode_session_id="ses-idle",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-19T00:00:00Z",
+            updated_at="2026-05-19T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-idle", portal_session_id="portal-idle", opencode_session_id="ses-idle", status="running")
+    app[CHAT_RUN_STORE_KEY].update_assistant_projection("req-idle", text="partial answer", assistant_message_id="a-local")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    metadata = (await (await client.get("/api/sessions/portal-idle")).json())["metadata"]
+    assert metadata["active_run"] is None
+    assert metadata["active_run_stale_reason"] == "opencode_not_active"
+    assert metadata["latest_run"]["status"] == "stale"
+    assert metadata["assistant_projection"]["text"] == "partial answer"
+    assert app[CHAT_RUN_STORE_KEY].get("req-idle").status == "stale"
+    await client.close()
 
 
 @pytest.mark.asyncio
