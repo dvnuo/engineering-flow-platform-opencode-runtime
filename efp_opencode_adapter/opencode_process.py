@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import time
 from datetime import datetime, timezone
@@ -35,6 +37,22 @@ class OpenCodeProcessManager:
         self.last_startup_error: str | None = None
         self.log_path: Path = Path(os.getenv("OPENCODE_LOG_FILE") or (self.settings.adapter_state_dir / "opencode-serve.log"))
         self._stopping = False
+        self._last_start_env: dict[str, str] = {}
+        self._last_start_env_hash: str | None = None
+
+    def _effective_start_env(self, env: dict[str, str] | None) -> dict[str, str]:
+        if env is not None:
+            clean_env = {str(k): str(v) for k, v in env.items() if v is not None}
+            self._last_start_env = dict(clean_env)
+            self._last_start_env_hash = self._managed_env_hash(clean_env)
+            return clean_env
+        if self._last_start_env:
+            return dict(self._last_start_env)
+        return {}
+
+    def _managed_env_hash(self, env: dict[str, str]) -> str:
+        fingerprint = [(str(key), len(str(value))) for key, value in sorted(env.items())]
+        return hashlib.sha256(json.dumps(fingerprint, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
 
     async def start(self, env: dict[str, str] | None = None, *, reason: str = "startup") -> dict:
         self._stopping = False
@@ -51,7 +69,8 @@ class OpenCodeProcessManager:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.log_path.open("ab")
         base_env = strip_managed_external_env(os.environ)
-        child_env = {**base_env, **(env or {})}
+        managed_env = self._effective_start_env(env)
+        child_env = {**base_env, **managed_env}
         try:
             self.process = await asyncio.create_subprocess_exec(
                 "opencode", "serve", "--hostname", "127.0.0.1", "--port", "4096",
@@ -101,6 +120,8 @@ class OpenCodeProcessManager:
         return self.status_snapshot()
 
     async def restart(self, env: dict[str, str] | None = None, *, reason: str = "runtime_profile_apply") -> dict:
+        # env=None reuses the most recent managed runtime env. Passing an
+        # explicit dict, including {}, replaces the cached managed env.
         await self.stop()
         return await self.start(env, reason=reason)
 
@@ -214,6 +235,9 @@ class OpenCodeProcessManager:
             "last_restart_reason": self.last_restart_reason,
             "last_restart_at": self.last_restart_at,
             "stopping": self._stopping,
+            "managed_env_cached": bool(self._last_start_env),
+            "managed_env_keys": sorted(self._last_start_env),
+            "managed_env_hash": self._last_start_env_hash,
         }
 
     def _startup_error_with_log_tail(self, message: str, log_path: Path) -> str:

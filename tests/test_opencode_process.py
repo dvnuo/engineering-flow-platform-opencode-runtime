@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -68,6 +69,18 @@ async def _wait_until(predicate, timeout=0.2):
             return
         await asyncio.sleep(0.005)
     assert predicate()
+
+
+def _capture_managed_spawns(monkeypatch):
+    captured_envs: list[dict[str, str]] = []
+
+    async def fake_spawn(*_args, **kwargs):
+        captured_envs.append(dict(kwargs.get("env") or {}))
+        return _FakeProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr("efp_opencode_adapter.opencode_process.sync_runtime_skills", lambda _settings: None)
+    return captured_envs
 
 
 @pytest.mark.asyncio
@@ -190,6 +203,65 @@ async def test_managed_startup_skill_sync_failure_is_recorded(monkeypatch):
         await manager.start({}, reason="startup")
     assert calls == []
     assert "target skill directory" in (manager.last_startup_error or "")
+
+
+@pytest.mark.asyncio
+async def test_restart_without_env_reuses_last_start_env(monkeypatch):
+    captured_envs = _capture_managed_spawns(monkeypatch)
+    manager = OpenCodeProcessManager(Settings.from_env(), _FakeClient([]))
+    startup_env = {
+        "OPENCODE_PROVIDER": "anthropic",
+        "ATLASSIAN_CONFIG": "/root/.config/atlassian/config.json",
+        "GIT_ASKPASS": "/tmp/askpass",
+        "GH_TOKEN": "ghp_SECRET_VALUE",
+    }
+
+    await manager.start(startup_env, reason="startup")
+    status = await manager.restart(reason="watchdog_process_exited")
+
+    assert captured_envs[1]["OPENCODE_PROVIDER"] == "anthropic"
+    assert captured_envs[1]["ATLASSIAN_CONFIG"] == "/root/.config/atlassian/config.json"
+    assert captured_envs[1]["GIT_ASKPASS"] == "/tmp/askpass"
+    assert status["managed_env_cached"] is True
+    assert {"OPENCODE_PROVIDER", "ATLASSIAN_CONFIG", "GIT_ASKPASS", "GH_TOKEN"}.issubset(set(status["managed_env_keys"]))
+    encoded = json.dumps(status)
+    assert "anthropic" not in encoded
+    assert "/tmp/askpass" not in encoded
+    assert "ghp_SECRET_VALUE" not in encoded
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_apply_restart_updates_cached_env(monkeypatch):
+    captured_envs = _capture_managed_spawns(monkeypatch)
+    manager = OpenCodeProcessManager(Settings.from_env(), _FakeClient([]))
+
+    await manager.start({"OPENCODE_PROVIDER": "old", "ATLASSIAN_CONFIG": "/old/config"}, reason="startup")
+    await manager.restart({"OPENCODE_PROVIDER": "new", "ATLASSIAN_CONFIG": "/new/config"}, reason="runtime_profile_apply")
+    await manager.restart(reason="watchdog_health_failed")
+
+    assert captured_envs[0]["OPENCODE_PROVIDER"] == "old"
+    assert captured_envs[1]["OPENCODE_PROVIDER"] == "new"
+    assert captured_envs[1]["ATLASSIAN_CONFIG"] == "/new/config"
+    assert captured_envs[2]["OPENCODE_PROVIDER"] == "new"
+    assert captured_envs[2]["ATLASSIAN_CONFIG"] == "/new/config"
+
+
+@pytest.mark.asyncio
+async def test_watchdog_restart_uses_cached_env(monkeypatch):
+    captured_envs = _capture_managed_spawns(monkeypatch)
+    manager = OpenCodeProcessManager(Settings.from_env(), _FakeClient([]), event_bus=EventBus())
+
+    await manager.start({"OPENCODE_PROVIDER": "anthropic", "GIT_ASKPASS": "/tmp/askpass"}, reason="startup")
+    manager.process.returncode = 1
+    task = asyncio.create_task(manager.run_watchdog(interval_seconds=0.001, health_failures_before_restart=2))
+    try:
+        await _wait_until(lambda: len(captured_envs) >= 2)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert captured_envs[-1]["OPENCODE_PROVIDER"] == "anthropic"
+    assert captured_envs[-1]["GIT_ASKPASS"] == "/tmp/askpass"
 
 
 @pytest.mark.asyncio
