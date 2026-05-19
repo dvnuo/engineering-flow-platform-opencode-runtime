@@ -7,11 +7,49 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.opencode_client import OpenCodeClientError, OpenCodeTransportTimeout
 from efp_opencode_adapter.settings import Settings
-from efp_opencode_adapter.app_keys import ATTACHMENT_SERVICE_KEY, EVENT_BUS_KEY, SESSION_STORE_KEY, REQUEST_BINDING_STORE_KEY, USER_DISPLAY_STORE_KEY
+from efp_opencode_adapter.app_keys import ATTACHMENT_SERVICE_KEY, CHAT_RUN_STORE_KEY, EVENT_BUS_KEY, SESSION_STORE_KEY, REQUEST_BINDING_STORE_KEY, USER_DISPLAY_STORE_KEY
 from efp_opencode_adapter import chat_api
 from efp_opencode_adapter.chat_api import _consume_background_chat_task, _is_stream_relevant_event
 from efp_opencode_adapter.skill_invocation import SkillDecision
 from test_t06_helpers import FakeOpenCodeClient
+
+
+class _UserOnlyIncompleteClient(FakeOpenCodeClient):
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        user_text = parts[0].get("text", "")
+        self.messages[session_id].append({"id": message_id or "u-incomplete", "role": "user", "parts": [{"type": "text", "text": user_text}]})
+        return {"message": {"id": message_id or "u-incomplete", "role": "user", "parts": [{"type": "text", "text": user_text}]}}
+
+
+class _FailingChatClient(FakeOpenCodeClient):
+    async def send_message(self, *args, **kwargs):
+        raise OpenCodeClientError("upstream boom token=ghp_secret", status=500)
+
+
+class _SlowChatClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.entered.set()
+        await self.release.wait()
+        return await super().send_message(session_id, parts=parts, model=model, agent=agent, system=system, message_id=message_id, no_reply=no_reply, tools=tools)
+
+
+class _SubmitTimeoutStillRunningClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.user_message_id = "u-timeout"
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        self.user_message_id = message_id or "u-timeout"
+        self.messages[session_id].append({"id": self.user_message_id, "role": "user", "parts": parts})
+        raise OpenCodeTransportTimeout("POST", f"/session/{session_id}/message", 300, asyncio.TimeoutError())
+
+    async def get_session_status(self, timeout_seconds=30):
+        return {"sessions": {"ses-1": {"state": "running"}}}
 
 
 @pytest.mark.asyncio
@@ -104,6 +142,114 @@ async def test_chat_and_stream(tmp_path, monkeypatch):
     assert "token-should-not-leak" not in json.dumps(p_secret["runtime_events"]).lower()
     assert "token-should-not-leak" not in json.dumps(p_secret["_llm_debug"]).lower()
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_handle_chat_payload_creates_and_completes_chat_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/chat", json={"message": "hello", "session_id": "s-run", "request_id": "r-run"})
+        body = await resp.json()
+
+        assert resp.status == 200
+        assert body["completion_state"] == "completed"
+        run = app[CHAT_RUN_STORE_KEY].get("r-run")
+        assert run.status == "completed"
+        assert run.completion_state == "completed"
+        assert run.user_message_id == body["user_message_id"]
+        assert run.assistant_message_id == body["assistant_message_id"]
+
+        run_resp = await client.get("/api/chat/runs/r-run")
+        run_body = await run_resp.json()
+        assert run_body["success"] is True
+        assert run_body["run"]["final_payload"]["response"] == "echo: hello"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_handle_chat_payload_marks_incomplete_and_failed_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state-incomplete"))
+    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_ENABLED", "false")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.01")
+    app = create_app(Settings.from_env(), opencode_client=_UserOnlyIncompleteClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/chat", json={"message": "no final", "session_id": "s-incomplete", "request_id": "r-incomplete"})
+        body = await resp.json()
+        assert resp.status == 200
+        assert body["completion_state"] == "incomplete"
+        assert app[CHAT_RUN_STORE_KEY].get("r-incomplete").status == "incomplete"
+    finally:
+        await client.close()
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state-failed"))
+    app = create_app(Settings.from_env(), opencode_client=_FailingChatClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/chat", json={"message": "fail", "session_id": "s-failed", "request_id": "r-failed"})
+        body = await resp.json()
+        assert resp.status == 502
+        assert body["error"] == "opencode_error"
+        run = app[CHAT_RUN_STORE_KEY].get("r-failed")
+        assert run.status == "failed"
+        assert run.completion_state == "error"
+        assert "ghp_secret" not in json.dumps(run.final_payload)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_active_chat_run_prevents_new_chat_same_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _SlowChatClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        first = asyncio.create_task(client.post("/api/chat", json={"message": "first", "session_id": "s-active", "request_id": "r-active-1"}))
+        await fake.entered.wait()
+        second = await client.post("/api/chat", json={"message": "second", "session_id": "s-active", "request_id": "r-active-2"})
+        body = await second.json()
+        assert second.status == 409
+        assert body["error"] == "chat_run_already_active"
+        assert body["active_run"]["request_id"] == "r-active-1"
+        fake.release.set()
+        await first
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_timeout_recovery_still_running_keeps_run_active_not_failed(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "0.01")
+    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.001")
+    monkeypatch.setenv("EFP_CHAT_TOTAL_WALL_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.01")
+    app = create_app(Settings.from_env(), opencode_client=_SubmitTimeoutStillRunningClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/chat", json={"message": "slow", "session_id": "s-timeout", "request_id": "r-timeout"})
+        body = await resp.json()
+
+        assert resp.status == 200
+        assert body["completion_state"] == "incomplete"
+        run = app[CHAT_RUN_STORE_KEY].get("r-timeout")
+        assert run.status in {"running", "stream_detached"}
+        assert run.status != "failed"
+        assert run.metadata["opencode_may_still_be_running"] is True
+        active = app[CHAT_RUN_STORE_KEY].active_for_session("s-timeout")
+        assert active.request_id == "r-timeout"
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
