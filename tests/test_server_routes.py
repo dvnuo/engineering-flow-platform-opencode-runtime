@@ -34,11 +34,13 @@ def test_chat_stream_and_events_routes_still_exist(tmp_path, monkeypatch):
     assert ("POST", "/api/chat/stream") in routes
     assert ("GET", "/api/chat/runs") in routes
     assert ("GET", "/api/chat/runs/{request_id}") in routes
+    assert ("POST", "/api/chat/runs/{request_id}/abort") in routes
     assert ("GET", "/api/internal/opencode/status") in routes
     assert ("GET", "/api/internal/opencode/log-tail") in routes
     assert ("GET", "/api/internal/chat/runs/{request_id}/diagnostics") in routes
     assert ("GET", "/api/events") in routes
     assert ("GET", "/api/sessions/{session_id}/active-run") in routes
+    assert ("POST", "/api/sessions/{session_id}/abort") in routes
 
 
 def test_event_bus_uses_replay_settings(tmp_path, monkeypatch):
@@ -134,4 +136,44 @@ async def test_active_run_route_returns_null_when_opencode_inactive_or_missing(t
 
     active_runs = await (await client.get("/api/chat/runs?session_id=portal-1&active=1")).json()
     assert active_runs["runs"] == []
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_abort_chat_run_marks_terminal_and_publishes_events(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(state="running")
+    fake.sessions["ses-abort"] = {"id": "ses-abort", "title": "Chat"}
+    fake.messages["ses-abort"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-abort", portal_session_id="portal-1", opencode_session_id="ses-abort", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.post("/api/chat/runs/req-abort/abort")).json()
+    assert payload["success"] is True
+    assert payload["run"]["status"] == "aborted"
+    assert fake.abort_tree_calls == ["ses-abort"]
+    assert app[CHAT_RUN_STORE_KEY].active_for_session("portal-1") is None
+    events = app[EVENT_BUS_KEY].recent_events(request_id="req-abort")
+    assert [event["type"] for event in events] == ["chat.run.aborted", "opencode.session.aborted"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_abort_session_marks_latest_run_terminal(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(state="running")
+    fake.sessions["ses-abort"] = {"id": "ses-abort", "title": "Chat"}
+    fake.messages["ses-abort"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-abort", portal_session_id="portal-1", opencode_session_id="ses-abort", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.post("/api/sessions/portal-1/abort")).json()
+    assert payload["success"] is True
+    assert payload["run"]["status"] == "aborted"
+    assert fake.abort_tree_calls == ["ses-abort"]
+    assert app[CHAT_RUN_STORE_KEY].active_for_session("portal-1") is None
     await client.close()
