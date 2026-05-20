@@ -33,7 +33,8 @@ from .chat_api import chat_handler, chat_stream_handler
 from .chat_run_validation import validate_chat_run_against_opencode
 from .chatlog_store import ChatLogStore
 from .chat_run_store import ChatRunStore
-from .opencode_run_state import ResolvedOpenCodeRunState, resolve_opencode_run_state
+from .active_run_payload import active_run_public_from_store, run_state_diagnostics, synthetic_active_run_from_resolved
+from .opencode_run_state import resolve_opencode_run_state
 from .compat_api import (
     git_info_handler,
     queue_status_handler,
@@ -458,47 +459,6 @@ async def list_chat_runs_handler(request: web.Request) -> web.Response:
     return web.json_response({"success": True, "engine": "opencode", "runs": [run for run in runs if run is not None]})
 
 
-def _run_state_diagnostics(resolved: ResolvedOpenCodeRunState | None) -> dict[str, Any]:
-    if resolved is None:
-        return {}
-    return safe_preview(
-        {
-            "opencode_session_id": resolved.opencode_session_id,
-            "opencode_status": resolved.status,
-            "opencode_exists": resolved.exists,
-            "opencode_active": resolved.active,
-            "has_final_assistant": resolved.has_final_assistant,
-            "child_sessions": list(resolved.child_sessions),
-            "active_child_sessions": list(resolved.active_child_sessions),
-            "reason": resolved.reason,
-        },
-        4000,
-    )
-
-
-def _active_run_from_resolved(*, portal_session_id: str, opencode_session_id: str, resolved: ResolvedOpenCodeRunState) -> dict[str, Any]:
-    return safe_preview(
-        {
-            "source_of_truth": "opencode",
-            "opencode_active": bool(resolved.active),
-            "opencode_status": resolved.status,
-            "opencode_exists": bool(resolved.exists),
-            "portal_session_id": portal_session_id,
-            "session_id": portal_session_id,
-            "opencode_session_id": opencode_session_id,
-            "request_id": "",
-            "assistant_message_id": "",
-            "assistant_message_ids": list(resolved.assistant_message_ids),
-            "active_child_sessions": list(resolved.active_child_sessions),
-            "can_abort": bool(resolved.active and resolved.exists),
-            "action_hint": "wait_reconnect_or_stop" if resolved.active else "safe_to_send",
-            "validation_reason": resolved.reason,
-            "diagnostics": _run_state_diagnostics(resolved),
-        },
-        12000,
-    )
-
-
 async def active_chat_run_for_session_handler(request: web.Request) -> web.Response:
     store = request.app[CHAT_RUN_STORE_KEY]
     client = request.app[OPENCODE_CLIENT_KEY]
@@ -535,14 +495,20 @@ async def active_chat_run_for_session_handler(request: web.Request) -> web.Respo
             client=client,
             record=active_record,
             event_bus=request.app.get(EVENT_BUS_KEY),
+            resolved=resolved,
         )
 
     active_run = None
     if resolved.active:
         if public is not None and public.get("opencode_active") is True:
-            active_run = public
+            active_run = active_run_public_from_store(
+                public,
+                portal_session_id=session_id,
+                opencode_session_id=opencode_session_id,
+                resolved=resolved,
+            )
         else:
-            active_run = _active_run_from_resolved(portal_session_id=session_id, opencode_session_id=opencode_session_id, resolved=resolved)
+            active_run = synthetic_active_run_from_resolved(portal_session_id=session_id, opencode_session_id=opencode_session_id, resolved=resolved)
     latest_record = store.latest_for_session(session_id) if hasattr(store, "latest_for_session") else None
     latest_run = store.to_public_dict(latest_record) if latest_record is not None else None
     stale_run = latest_run if latest_run is not None and latest_run.get("status") == "stale" else None
@@ -560,13 +526,14 @@ async def active_chat_run_for_session_handler(request: web.Request) -> web.Respo
             "latest_run": latest_run,
             "reason": reason,
             "action_hint": "wait_reconnect_or_stop" if active_run is not None else "safe_to_send",
-            "diagnostics": _run_state_diagnostics(resolved),
+            "diagnostics": run_state_diagnostics(resolved),
         }
     )
 
 
 async def session_status_handler(request: web.Request) -> web.Response:
     session_store = request.app.get(SESSION_STORE_KEY)
+    chat_run_store = request.app.get(CHAT_RUN_STORE_KEY)
     client = request.app[OPENCODE_CLIENT_KEY]
     session_id = request.match_info["session_id"]
 
@@ -583,14 +550,41 @@ async def session_status_handler(request: web.Request) -> web.Response:
                 "status": {"type": "unknown"},
                 "status_type": "unknown",
                 "active": False,
+                "can_abort": False,
                 "reason": "missing_session_binding",
                 "action_hint": "safe_to_send",
+                "active_run": None,
+                "active_child_sessions": [],
+                "diagnostics": {"missing_session_binding": True},
             }
         )
 
     opencode_session_id = str(getattr(session_record, "opencode_session_id", "") or "")
     resolved = await resolve_opencode_run_state(client, opencode_session_id)
     status_type = resolved.status or "unknown"
+    active_run = None
+    active_record = None
+    active_public = None
+    if chat_run_store is not None and hasattr(chat_run_store, "active_for_session"):
+        active_record = chat_run_store.active_for_session(session_id)
+    if active_record is not None:
+        active_public = await validate_chat_run_against_opencode(
+            store=chat_run_store,
+            client=client,
+            record=active_record,
+            event_bus=request.app.get(EVENT_BUS_KEY),
+            resolved=resolved,
+        )
+    if resolved.active:
+        if active_public is not None and active_public.get("opencode_active") is True:
+            active_run = active_run_public_from_store(
+                active_public,
+                portal_session_id=session_id,
+                opencode_session_id=opencode_session_id,
+                resolved=resolved,
+            )
+        else:
+            active_run = synthetic_active_run_from_resolved(portal_session_id=session_id, opencode_session_id=opencode_session_id, resolved=resolved)
 
     return web.json_response(
         {
@@ -606,8 +600,9 @@ async def session_status_handler(request: web.Request) -> web.Response:
             "can_abort": bool(resolved.active and resolved.exists),
             "reason": resolved.reason,
             "action_hint": "wait_reconnect_or_stop" if resolved.active else "safe_to_send",
+            "active_run": active_run,
             "active_child_sessions": list(resolved.active_child_sessions),
-            "diagnostics": _run_state_diagnostics(resolved),
+            "diagnostics": run_state_diagnostics(resolved),
         }
     )
 

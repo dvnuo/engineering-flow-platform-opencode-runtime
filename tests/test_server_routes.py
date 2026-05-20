@@ -272,7 +272,7 @@ async def test_active_run_route_uses_session_binding_when_no_local_run(tmp_path,
     assert payload["active_run"]["source_of_truth"] == "opencode"
     assert payload["active_run"]["opencode_active"] is True
     assert payload["active_run"]["opencode_status"] == "busy"
-    assert payload["active_run"]["request_id"] == ""
+    assert payload["active_run"]["request_id"] == "opencode-session-ses-busy"
     assert payload["active_run"]["can_abort"] is True
     assert payload["action_hint"] == "wait_reconnect_or_stop"
     await client.close()
@@ -377,6 +377,8 @@ async def test_session_status_route_missing_binding_is_safe_to_send(tmp_path, mo
     assert payload["source_of_truth"] == "opencode"
     assert payload["status_type"] == "unknown"
     assert payload["active"] is False
+    assert payload["active_run"] is None
+    assert payload["can_abort"] is False
     assert payload["action_hint"] == "safe_to_send"
     await client.close()
 
@@ -412,6 +414,11 @@ async def test_session_status_route_reports_root_busy(tmp_path, monkeypatch):
     assert payload["active"] is True
     assert payload["can_abort"] is True
     assert payload["action_hint"] == "wait_reconnect_or_stop"
+    assert payload["active_run"]["request_id"] == "opencode-session-oc-busy"
+    assert payload["active_run"]["session_id"] == "portal-busy"
+    assert payload["active_run"]["opencode_session_id"] == "oc-busy"
+    assert payload["active_run"]["source_of_truth"] == "opencode"
+    assert payload["active_run"]["opencode_active"] is True
     await client.close()
 
 
@@ -447,9 +454,45 @@ async def test_session_status_route_reports_child_busy_without_locking_root(tmp_
 
     assert payload["status_type"] == "idle"
     assert payload["active"] is False
+    assert payload["active_run"] is None
     assert payload["active_child_sessions"] == ["child"]
     assert payload["diagnostics"]["active_child_sessions"] == ["child"]
     assert payload["action_hint"] == "safe_to_send"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_status_route_uses_validated_local_active_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(session_states={"oc-busy": {"type": "busy"}})
+    fake.sessions["oc-busy"] = {"id": "oc-busy", "title": "Chat"}
+    fake.messages["oc-busy"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-busy",
+            opencode_session_id="oc-busy",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-busy", portal_session_id="portal-busy", opencode_session_id="oc-busy", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/portal-busy/status")).json()
+
+    assert payload["active"] is True
+    assert payload["active_run"]["request_id"] == "req-busy"
+    assert payload["active_run"]["source_of_truth"] == "opencode"
+    assert payload["active_run"]["opencode_active"] is True
+    assert payload["active_run"]["can_abort"] is True
+    assert payload["active_run"]["action_hint"] == "wait_reconnect_or_stop"
     await client.close()
 
 
