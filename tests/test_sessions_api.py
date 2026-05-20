@@ -189,7 +189,14 @@ async def test_session_metadata_includes_active_latest_run_and_projection(tmp_pa
 
         assert metadata["active_run"]["request_id"] == "r-active"
         assert metadata["active_run"]["status"] == "running"
+        assert metadata["active_run"]["source_of_truth"] == "opencode"
+        assert metadata["active_run"]["opencode_active"] is True
+        assert metadata["active_run"]["can_abort"] is True
+        assert metadata["active_run"]["action_hint"] == "wait_reconnect_or_stop"
         assert metadata["latest_run"]["request_id"] == "r-active"
+        assert metadata["session_status"]["active"] is True
+        assert metadata["session_status"]["active_run"]["request_id"] == "r-active"
+        assert metadata["session_status"]["action_hint"] == "wait_reconnect_or_stop"
         assert metadata["assistant_projection"]["request_id"] == "r-active"
         assert metadata["assistant_projection"]["assistant_message_id"] == "a-pending"
         assert metadata["assistant_projection"]["text"] == "partial live answer"
@@ -228,6 +235,43 @@ async def test_session_metadata_validates_active_run_against_opencode(tmp_path, 
     metadata = (await (await client.get("/api/sessions/portal-active")).json())["metadata"]
     assert metadata["active_run"]["request_id"] == "req-active"
     assert metadata["active_run"]["opencode_active"] is True
+    assert metadata["session_status"]["active"] is True
+    assert metadata["session_status"]["active_run"]["request_id"] == "req-active"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_metadata_synthesizes_active_run_from_opencode_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(state="busy")
+    fake.sessions["ses-busy"] = {"id": "ses-busy", "title": "Chat"}
+    fake.messages["ses-busy"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-busy",
+            opencode_session_id="ses-busy",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-19T00:00:00Z",
+            updated_at="2026-05-19T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/portal-busy")).json()
+    metadata = payload["metadata"]
+
+    assert metadata["active_run"]["request_id"] == "opencode-session-ses-busy"
+    assert metadata["active_run"]["source_of_truth"] == "opencode"
+    assert metadata["active_run"]["opencode_active"] is True
+    assert metadata["session_status"]["active"] is True
+    assert metadata["session_status"]["active_run"]["request_id"] == "opencode-session-ses-busy"
+    assert metadata["session_status"]["can_abort"] is True
     await client.close()
 
 
@@ -260,6 +304,9 @@ async def test_session_metadata_clears_inactive_local_run_and_keeps_projection(t
     assert metadata["active_run"] is None
     assert metadata["active_run_stale_reason"] == "opencode_not_active"
     assert metadata["latest_run"]["status"] == "stale"
+    assert metadata["session_status"]["active"] is False
+    assert metadata["session_status"]["active_run"] is None
+    assert metadata["session_status"]["action_hint"] == "safe_to_send"
     assert metadata["assistant_projection"]["text"] == "partial answer"
     assert app[CHAT_RUN_STORE_KEY].get("req-idle").status == "stale"
     await client.close()
