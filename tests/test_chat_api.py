@@ -253,10 +253,62 @@ async def test_active_chat_run_prevents_new_chat_same_session(tmp_path, monkeypa
         second = await client.post("/api/chat", json={"message": "second", "session_id": "s-active", "request_id": "r-active-2"})
         body = await second.json()
         assert second.status == 409
+        assert body["success"] is False
+        assert body["engine"] == "opencode"
         assert body["error"] == "chat_run_already_active"
+        assert body["detail"] == "chat_run_already_active"
+        assert body["session_id"] == "s-active"
+        assert body["request_id"] == "r-active-2"
         assert body["active_run"]["request_id"] == "r-active-1"
+        assert body["active_run"]["source_of_truth"] == "opencode"
+        assert body["active_run"]["opencode_active"] is True
+        assert body["action_hint"] == "wait_reconnect_or_stop"
+        assert body["can_abort"] is True
+        assert "continue" not in body["user_message"].lower()
         fake.release.set()
         await first
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_uses_prompt_async_when_available(tmp_path, monkeypatch):
+    class PromptAsyncClient(FakeOpenCodeClient):
+        def __init__(self):
+            super().__init__()
+            self.prompt_async_calls = []
+
+        async def prompt_async(self, session_id, payload):
+            self.prompt_async_calls.append((session_id, payload))
+            user_text = payload["parts"][0]["text"]
+            self.messages[session_id].extend(
+                [
+                    {"id": payload["messageID"], "role": "user", "parts": [{"type": "text", "text": user_text}]},
+                    {"id": "a-prompt-async", "role": "assistant", "parts": [{"type": "text", "text": "async done"}], "finish_reason": "stop"},
+                ]
+            )
+            return None
+
+        async def send_message(self, *args, **kwargs):
+            raise AssertionError("long chat should prefer prompt_async")
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = PromptAsyncClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        response = await client.post("/api/chat", json={"message": "hello", "session_id": "s-async", "request_id": "r-async", "model": "anthropic/claude-sonnet-4"})
+        payload = await response.json()
+
+        assert response.status == 200
+        assert payload["completion_state"] == "completed"
+        assert payload["response"] == "async done"
+        assert fake.prompt_async_calls
+        session_id, prompt_payload = fake.prompt_async_calls[0]
+        assert session_id == app[SESSION_STORE_KEY].get("s-async").opencode_session_id
+        assert prompt_payload["messageID"] == payload["user_message_id"]
+        assert prompt_payload["model"] == "anthropic/claude-sonnet-4"
     finally:
         await client.close()
 

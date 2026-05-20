@@ -66,6 +66,18 @@ def _send_message_accepts_message_id(client: Any) -> bool:
 
 async def _send_message(client: Any, session_id: str, *, parts: list[dict[str, Any]], model: str | None, agent: str | None, system: str | None, message_id: str | None = None) -> Any:
     kwargs: dict[str, Any] = {"parts": parts, "model": model, "agent": agent, "system": system}
+    if hasattr(client, "prompt_async") and callable(getattr(client, "prompt_async")):
+        payload: dict[str, Any] = {"parts": parts}
+        if message_id:
+            payload["messageID"] = message_id
+        if model:
+            payload["model"] = model
+        if agent:
+            payload["agent"] = agent
+        if system:
+            payload["system"] = system
+        result = await client.prompt_async(session_id, payload)
+        return {"prompt_async": True, "result": result}
     if message_id and _send_message_accepts_message_id(client):
         kwargs["message_id"] = message_id
     return await client.send_message(session_id, **kwargs)
@@ -188,6 +200,26 @@ def _chat_run_public(chat_run_store: Any | None, record: Any | None) -> dict[str
     if chat_run_store is None or record is None or not hasattr(chat_run_store, "to_public_dict"):
         return None
     return chat_run_store.to_public_dict(record)
+
+
+def _chat_run_already_active_payload(*, session_id: str, request_id: str, active_run: dict[str, Any]) -> dict[str, Any]:
+    public = dict(active_run or {})
+    public.setdefault("source_of_truth", "opencode")
+    public.setdefault("opencode_active", True)
+    public.setdefault("can_abort", True)
+    public.setdefault("action_hint", "wait_reconnect_or_stop")
+    return {
+        "success": False,
+        "engine": "opencode",
+        "error": "chat_run_already_active",
+        "detail": "chat_run_already_active",
+        "session_id": session_id,
+        "request_id": request_id,
+        "active_run": public,
+        "action_hint": "wait_reconnect_or_stop",
+        "can_abort": bool(public.get("can_abort", True)),
+        "user_message": "A previous OpenCode run is still active. Wait for it to finish or use Stop run.",
+    }
 
 
 async def _publish_run_lifecycle_event(
@@ -1307,14 +1339,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             active_public = None
         if active_public is not None and active_public.get("opencode_active") is True and active_run is not None and active_run.request_id != request_id:
             raise web.HTTPConflict(
-                text=json.dumps(
-                    {
-                        "success": False,
-                        "engine": "opencode",
-                        "error": "chat_run_already_active",
-                        "active_run": active_public,
-                    }
-                ),
+                text=json.dumps(_chat_run_already_active_payload(session_id=portal_session_id, request_id=request_id, active_run=active_public)),
                 content_type="application/json",
             )
 
@@ -2768,7 +2793,8 @@ def _stream_error_final_payload(
         or "chat_failed"
     )
     response = (
-        _optional_str(error_payload.get("response"))
+        _optional_str(error_payload.get("user_message"))
+        or _optional_str(error_payload.get("response"))
         or _optional_str(error_payload.get("detail"))
         or _optional_str(error_payload.get("error"))
         or "Chat stream failed before a final assistant response was produced."
@@ -2782,9 +2808,10 @@ def _stream_error_final_payload(
         "detail": safe_preview(str(error_payload.get("detail") or ""), 500),
         "incomplete_reason": safe_preview(str(error_payload.get("incomplete_reason") or ""), 200),
     }
-    return {
+    state = "blocked" if error_payload.get("error") == "chat_run_already_active" else "error"
+    out = {
         "ok": False,
-        "completion_state": "error",
+        "completion_state": state,
         "incomplete_reason": incomplete_reason,
         "response": response,
         "session_id": session_id,
@@ -2795,11 +2822,15 @@ def _stream_error_final_payload(
         "auto_continue_enabled": auto_continue_enabled,
         "context_state": {
             "summary": safe_preview(response, 200),
-            "current_state": "error",
-            "next_step": "Inspect runtime error detail and retry after fixing the upstream issue",
+            "current_state": state,
+            "next_step": "Reconnect to the active run or stop it before sending another message" if state == "blocked" else "Inspect runtime error detail and retry after fixing the upstream issue",
         },
         "_llm_debug": {"stream_error": debug_error},
     }
+    for key in ("engine", "error", "detail", "active_run", "action_hint", "can_abort", "user_message"):
+        if key in error_payload:
+            out[key] = error_payload[key]
+    return out
 
 
 async def _stream_error_response(request: web.Request, error: str, detail: str | None = None, *, session_id: str = "", request_id: str = "") -> web.StreamResponse:
@@ -2863,14 +2894,9 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         else:
             active_public = None
         if active_public is not None and active_public.get("opencode_active") is True and active_run is not None and active_run.request_id != req_id:
-            error_payload = {
-                "error": "chat_run_already_active",
-                "session_id": session_id,
-                "request_id": req_id,
-                "active_run": active_public,
-            }
+            error_payload = _chat_run_already_active_payload(session_id=session_id, request_id=req_id, active_run=active_public)
             final_payload = _stream_error_final_payload(
-                error_payload={**error_payload, "detail": "chat_run_already_active"},
+                error_payload=error_payload,
                 session_id=session_id,
                 request_id=req_id,
                 runtime_events=[],
