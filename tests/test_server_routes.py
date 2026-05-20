@@ -57,6 +57,7 @@ def test_chat_stream_and_events_routes_still_exist(tmp_path, monkeypatch):
     assert ("GET", "/api/internal/chat/runs/{request_id}/diagnostics") in routes
     assert ("GET", "/api/events") in routes
     assert ("GET", "/api/sessions/{session_id}/active-run") in routes
+    assert ("GET", "/api/sessions/{session_id}/status") in routes
     assert ("POST", "/api/sessions/{session_id}/abort") in routes
 
 
@@ -360,6 +361,95 @@ async def test_active_run_route_reports_child_active_without_locking_root(tmp_pa
     assert payload["diagnostics"]["active_child_sessions"] == ["child"]
     assert payload["action_hint"] == "safe_to_send"
     assert app[CHAT_RUN_STORE_KEY].get("req-child").status == "stale"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_status_route_missing_binding_is_safe_to_send(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=_RunStateFakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/s-missing/status")).json()
+
+    assert payload["success"] is True
+    assert payload["source_of_truth"] == "opencode"
+    assert payload["status_type"] == "unknown"
+    assert payload["active"] is False
+    assert payload["action_hint"] == "safe_to_send"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_status_route_reports_root_busy(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(session_states={"oc-busy": {"type": "busy"}})
+    fake.sessions["oc-busy"] = {"id": "oc-busy", "title": "Chat"}
+    fake.messages["oc-busy"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-busy",
+            opencode_session_id="oc-busy",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/portal-busy/status")).json()
+
+    assert payload["success"] is True
+    assert payload["source_of_truth"] == "opencode"
+    assert payload["status_type"] == "busy"
+    assert payload["active"] is True
+    assert payload["can_abort"] is True
+    assert payload["action_hint"] == "wait_reconnect_or_stop"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_status_route_reports_child_busy_without_locking_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(
+        session_states={"root": {"type": "idle"}, "child": {"type": "busy"}},
+        children={"root": [{"id": "child"}]},
+    )
+    fake.sessions["root"] = {"id": "root", "title": "Chat"}
+    fake.sessions["child"] = {"id": "child", "title": "Subsession"}
+    fake.messages["root"] = []
+    fake.messages["child"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-root",
+            opencode_session_id="root",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/portal-root/status")).json()
+
+    assert payload["status_type"] == "idle"
+    assert payload["active"] is False
+    assert payload["active_child_sessions"] == ["child"]
+    assert payload["diagnostics"]["active_child_sessions"] == ["child"]
+    assert payload["action_hint"] == "safe_to_send"
     await client.close()
 
 

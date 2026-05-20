@@ -565,6 +565,53 @@ async def active_chat_run_for_session_handler(request: web.Request) -> web.Respo
     )
 
 
+async def session_status_handler(request: web.Request) -> web.Response:
+    session_store = request.app.get(SESSION_STORE_KEY)
+    client = request.app[OPENCODE_CLIENT_KEY]
+    session_id = request.match_info["session_id"]
+
+    session_record = session_store.get(session_id) if session_store is not None and hasattr(session_store, "get") else None
+    if session_record is None or getattr(session_record, "deleted", False):
+        return web.json_response(
+            {
+                "success": True,
+                "engine": "opencode",
+                "source_of_truth": "opencode",
+                "session_id": session_id,
+                "opencode_session_id": "",
+                "exists": False,
+                "status": {"type": "unknown"},
+                "status_type": "unknown",
+                "active": False,
+                "reason": "missing_session_binding",
+                "action_hint": "safe_to_send",
+            }
+        )
+
+    opencode_session_id = str(getattr(session_record, "opencode_session_id", "") or "")
+    resolved = await resolve_opencode_run_state(client, opencode_session_id)
+    status_type = resolved.status or "unknown"
+
+    return web.json_response(
+        {
+            "success": True,
+            "engine": "opencode",
+            "source_of_truth": "opencode",
+            "session_id": session_id,
+            "opencode_session_id": opencode_session_id,
+            "exists": bool(resolved.exists),
+            "status": {"type": status_type},
+            "status_type": status_type,
+            "active": bool(resolved.active),
+            "can_abort": bool(resolved.active and resolved.exists),
+            "reason": resolved.reason,
+            "action_hint": "wait_reconnect_or_stop" if resolved.active else "safe_to_send",
+            "active_child_sessions": list(resolved.active_child_sessions),
+            "diagnostics": _run_state_diagnostics(resolved),
+        }
+    )
+
+
 def _abort_result_succeeded(abort_result: dict[str, Any]) -> bool:
     if not isinstance(abort_result, dict):
         return False
@@ -886,6 +933,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/api/sessions", list_sessions_handler)
     app.router.add_post("/api/clear", clear_sessions_handler)
     app.router.add_get("/api/sessions/{session_id}/active-run", active_chat_run_for_session_handler)
+    app.router.add_get("/api/sessions/{session_id}/status", session_status_handler)
     app.router.add_post("/api/sessions/{session_id}/abort", abort_session_handler)
     app.router.add_get("/api/sessions/{session_id}/chatlog", session_chatlog_handler)
     app.router.add_post("/api/sessions/{session_id}/rename", rename_session_handler)
