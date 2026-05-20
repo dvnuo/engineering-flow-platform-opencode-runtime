@@ -2667,6 +2667,15 @@ async def _wait_for_event_or_completion(sub_queue: asyncio.Queue, run_task: asyn
         if queue_task in done:
             return "event", queue_task.result()
         if run_task in done:
+            if queue_task.done():
+                return "event", queue_task.result()
+            await asyncio.sleep(0)
+            if queue_task.done():
+                return "event", queue_task.result()
+            try:
+                return "event", sub_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
             return "completed", None
         return "timeout", None
     finally:
