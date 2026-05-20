@@ -79,6 +79,92 @@ async def test_sessions_endpoints(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_session_exposes_canonical_opencode_messages_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient()
+    fake.sessions["oc-canonical"] = {"id": "oc-canonical", "title": "Chat"}
+    fake.messages["oc-canonical"] = [
+        {
+            "info": {"id": "msg_user_1", "role": "user", "time": {"created": 1710000000000}},
+            "parts": [{"id": "part_user_1", "type": "text", "text": "hi"}],
+        },
+        {
+            "info": {"id": "efp-auto-continue-1", "role": "user"},
+            "parts": [{"id": "part_internal_1", "type": "text", "text": "continue"}],
+        },
+        {
+            "info": {
+                "id": "msg_asst_1",
+                "role": "assistant",
+                "time": {"created": 1710000001000, "updated": 1710000002000, "completed": 1710000003000},
+                "finishReason": "stop",
+            },
+            "parts": [
+                {"id": "part_reason_1", "type": "reasoning", "text": "plan"},
+                {"id": "part_tool_1", "type": "tool", "tool": "bash", "state": {"status": "completed"}},
+                {"id": "part_text_1", "type": "text", "text": "answer"},
+            ],
+        },
+    ]
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-canonical",
+            opencode_session_id="oc-canonical",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="answer",
+            message_count=2,
+        )
+    )
+    app[CHAT_RUN_STORE_KEY].start_run(
+        request_id="req-local-projection",
+        portal_session_id="portal-canonical",
+        opencode_session_id="oc-canonical",
+        status="running",
+    )
+    app[CHAT_RUN_STORE_KEY].complete_run(
+        "req-local-projection",
+        {
+            "completion_state": "completed",
+            "response": "local projection should not become canonical",
+            "assistant_message_id": "local_assistant_only",
+            "assistant_message_ids": ["local_assistant_only"],
+        },
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/portal-canonical")).json()
+
+    assert payload["source_of_truth"] == "opencode"
+    assert payload["opencode_session_id"] == "oc-canonical"
+    assert payload["metadata"]["source_of_truth"] == "opencode"
+    assert payload["messages"]
+    assert payload["canonical_messages"]
+    assert len(payload["canonical_messages"]) == 2
+    assert payload["canonical_messages"][0]["info"]["id"] == "msg_user_1"
+    assert payload["canonical_messages"][0]["message_id"] == "msg_user_1"
+    assert payload["canonical_messages"][0]["created_at"] == 1710000000000
+    assert payload["canonical_messages"][1]["role"] == "assistant"
+    assert payload["canonical_messages"][1]["created_at"] == 1710000001000
+    assert payload["canonical_messages"][1]["updated_at"] == 1710000002000
+    assert payload["canonical_messages"][1]["completed_at"] == 1710000003000
+    assert payload["canonical_messages"][1]["finish_reason"] == "stop"
+    part_ids = {part["id"] for part in payload["canonical_messages"][1]["parts"]}
+    assert {"part_reason_1", "part_tool_1", "part_text_1"} <= part_ids
+    encoded_canonical = json.dumps(payload["canonical_messages"])
+    assert "efp-auto-continue-1" not in encoded_canonical
+    assert "part_internal_1" not in encoded_canonical
+    assert "local_assistant_only" not in encoded_canonical
+    assert "local projection should not become canonical" not in encoded_canonical
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_session_metadata_includes_active_latest_run_and_projection(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())

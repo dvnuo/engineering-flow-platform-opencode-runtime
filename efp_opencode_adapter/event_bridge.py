@@ -52,6 +52,9 @@ def _canonical(raw_event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _event_type(raw_event: dict[str, Any], canonical: dict[str, Any]) -> str:
+    explicit_event = canonical.get("event") or raw_event.get("event")
+    if isinstance(explicit_event, str) and explicit_event.lower().startswith("session.status"):
+        return "session.status"
     value = ""
     for key in ("type", "event"):
         v = canonical.get(key)
@@ -373,6 +376,57 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     data["message_id"] = _sanitize_event_text(values.get("__part_message_id") or _raw_message_id_from_event(canonical, values), 300)
     data["part_id"] = _sanitize_event_text(values.get("__part_id") or _raw_part_id_from_event(canonical, values), 300)
 
+    if raw_type == "message.updated":
+        info = canonical.get("info") if isinstance(canonical.get("info"), dict) else {}
+        data["raw_type"] = "message.updated"
+        data["info"] = _sanitize_event_value(info, max_chars)
+        data["message_id"] = _sanitize_event_text(str(info.get("id") or data.get("message_id") or ""), 300)
+    elif raw_type == "message.part.updated":
+        part = canonical.get("part") if isinstance(canonical.get("part"), dict) else {}
+        part_message_id = str(part.get("messageID") or part.get("messageId") or part.get("message_id") or data.get("message_id") or "")
+        part_id = str(part.get("id") or data.get("part_id") or "")
+        part_type = str(part.get("type") or data.get("part_type") or "")
+        data["raw_type"] = "message.part.updated"
+        data["part"] = _sanitize_event_value(part, max_chars)
+        data["part_id"] = _sanitize_event_text(part_id, 300)
+        data["part_type"] = _sanitize_event_text(part_type, 100)
+        data["message_id"] = _sanitize_event_text(part_message_id, 300)
+    elif raw_type == "message.part.delta":
+        delta = canonical.get("delta") if isinstance(canonical.get("delta"), str) else values.get("delta", "")
+        pmeta = part_meta if isinstance(part_meta, dict) and part_meta else {}
+        canonical_part = canonical.get("part") if isinstance(canonical.get("part"), dict) else {}
+        if not pmeta and canonical_part:
+            pmeta = _part_meta_from_part(canonical_part)
+        data["raw_type"] = "message.part.delta"
+        if isinstance(delta, str) and delta:
+            data["delta"] = _sanitize_event_text(delta, max_chars)
+        data["field"] = _sanitize_event_text(str(canonical.get("field") or values.get("field") or data.get("field") or ""), 100)
+        data["part_id"] = _sanitize_event_text(data.get("part_id") or _raw_part_id_from_event(canonical, values), 300)
+        data["message_id"] = _sanitize_event_text(data.get("message_id") or _raw_message_id_from_event(canonical, values), 300)
+        data["part_type"] = _sanitize_event_text(str(data.get("part_type") or pmeta.get("type") or ""), 100)
+    elif raw_type == "session.status":
+        status_obj = canonical.get("status") if isinstance(canonical.get("status"), dict) else {}
+        status_type = ""
+        if status_obj:
+            status_type = str(status_obj.get("type") or status_obj.get("status") or "")
+        else:
+            for key in ("status_type", "type", "status", "state"):
+                value = canonical.get(key)
+                if isinstance(value, str) and value:
+                    if key == "type" and value == raw_type:
+                        continue
+                    status_type = value
+                    break
+        data["raw_type"] = "session.status"
+        if status_obj:
+            data["status"] = _sanitize_event_value(status_obj, max_chars)
+        else:
+            data["status"] = _sanitize_event_value({"type": status_type or "unknown"}, max_chars)
+        data["status_type"] = _sanitize_event_text(status_type or "unknown", 100)
+    elif raw_type == "session.idle":
+        data["raw_type"] = "session.idle"
+        data["reconcile_hint"] = "fetch_session_messages"
+
     evt = {
         "type": normalized_type,
         "event_type": normalized_type,
@@ -390,6 +444,10 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     }
     if data.get("message_id"):
         evt["opencode_message_id"] = data["message_id"]
+    if data.get("part_id"):
+        evt["opencode_part_id"] = data["part_id"]
+    if data.get("status_type"):
+        evt["opencode_status"] = data["status_type"]
     if s_raw_request_id:
         evt["raw_request_id"] = s_raw_request_id
         evt["opencode_request_id"] = s_raw_request_id

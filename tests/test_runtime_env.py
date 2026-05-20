@@ -4,6 +4,8 @@ from pathlib import Path
 
 from efp_opencode_adapter.runtime_env import (
     build_runtime_env_from_config,
+    ensure_opencode_xdg_data_home,
+    opencode_xdg_data_home,
     read_runtime_env_file,
     redact_env_for_status,
     strip_managed_external_env,
@@ -252,3 +254,29 @@ def test_runtime_env_sets_disable_claude_prompt_default(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     env = build_runtime_env_from_config(s, {}).env
     assert env["OPENCODE_DISABLE_CLAUDE_CODE_PROMPT"] == "1"
+
+
+def test_runtime_env_maps_opencode_xdg_data_home_to_configured_data_dir(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    env = build_runtime_env_from_config(s, {}).env
+    xdg_home = opencode_xdg_data_home(s)
+    opencode_link = xdg_home / "opencode"
+
+    assert env["OPENCODE_DATA_DIR"] == str(s.opencode_data_dir)
+    assert env["XDG_DATA_HOME"] == str(xdg_home)
+    assert opencode_link.exists()
+    assert opencode_link.resolve() == s.opencode_data_dir.resolve()
+
+
+def test_ensure_opencode_xdg_data_home_rejects_conflicting_regular_path(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    xdg_home = opencode_xdg_data_home(s)
+    xdg_home.mkdir(parents=True)
+    (xdg_home / "opencode").write_text("not a directory", encoding="utf-8")
+
+    try:
+        ensure_opencode_xdg_data_home(s)
+    except RuntimeError as exc:
+        assert "OpenCode XDG data path conflict" in str(exc)
+    else:
+        raise AssertionError("expected conflicting OpenCode XDG data path to fail")

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from .agents_md import ensure_default_agents_md
 from .index_loader import read_json_file, load_skills_index
 from .opencode_config import build_opencode_config, merge_with_existing_config, write_opencode_config
+from .runtime_env import ensure_opencode_xdg_data_home
 from .settings import Settings
 from .skill_sync import sync_runtime_skills
 
@@ -24,6 +25,7 @@ def init_assets(settings: Settings) -> None:
     ]
     for d in required_dirs:
         d.mkdir(parents=True, exist_ok=True)
+    ensure_opencode_xdg_data_home(settings)
     sync_runtime_skills(settings)
 
     ensure_default_agents_md(settings)

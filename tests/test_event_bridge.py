@@ -32,6 +32,14 @@ class FakeClientNoFetch(FakeClient):
         raise AssertionError("get_message should not be called when message.updated and part.updated cache are available")
 
 
+def _normalize_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    paths = ensure_state_dirs(settings)
+    return settings, SessionStore(paths.sessions_dir), TaskStore(paths.tasks_dir)
+
+
 @pytest.mark.asyncio
 async def test_normalizes_permission_event_and_maps_portal_session(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
@@ -125,6 +133,135 @@ async def test_message_part_updated_text_snapshot_not_delta(tmp_path, monkeypatc
     assert event["data"].get("message") != "hello delta"
 
 
+def test_message_updated_keeps_canonical_info_identity(tmp_path, monkeypatch):
+    settings, session_store, task_store = _normalize_context(tmp_path, monkeypatch)
+
+    event = normalize_opencode_event(
+        {"type": "message.updated", "info": {"id": "msg_asst_1", "role": "assistant"}},
+        session_store=session_store,
+        task_store=task_store,
+        settings=settings,
+    )
+
+    assert event["data"]["raw_type"] == "message.updated"
+    assert event["data"]["info"]["id"] == "msg_asst_1"
+    assert event["data"]["message_id"] == "msg_asst_1"
+    assert event["opencode_message_id"] == "msg_asst_1"
+
+
+def test_message_part_updated_keeps_canonical_part_identity(tmp_path, monkeypatch):
+    settings, session_store, task_store = _normalize_context(tmp_path, monkeypatch)
+
+    event = normalize_opencode_event(
+        {
+            "type": "message.part.updated",
+            "part": {"id": "part_tool_1", "type": "tool", "messageID": "msg_asst_1", "tool": "bash"},
+        },
+        session_store=session_store,
+        task_store=task_store,
+        settings=settings,
+    )
+
+    assert event["data"]["raw_type"] == "message.part.updated"
+    assert event["data"]["part"]["id"] == "part_tool_1"
+    assert event["data"]["part_type"] == "tool"
+    assert event["data"]["message_id"] == "msg_asst_1"
+    assert event["opencode_message_id"] == "msg_asst_1"
+    assert event["opencode_part_id"] == "part_tool_1"
+
+
+def test_message_part_delta_keeps_delta_identity(tmp_path, monkeypatch):
+    settings, session_store, task_store = _normalize_context(tmp_path, monkeypatch)
+
+    event = normalize_opencode_event(
+        {
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "oc-1",
+                "messageID": "msg_asst_1",
+                "partID": "part_text_1",
+                "field": "text",
+                "delta": "abc",
+            },
+        },
+        session_store=session_store,
+        task_store=task_store,
+        settings=settings,
+        message_role="assistant",
+        part_meta={"type": "text", "ignored": False, "synthetic": False},
+    )
+
+    assert event["data"]["raw_type"] == "message.part.delta"
+    assert event["data"]["delta"] == "abc"
+    assert event["data"]["field"] == "text"
+    assert event["data"]["part_id"] == "part_text_1"
+    assert event["data"]["message_id"] == "msg_asst_1"
+    assert event["data"]["part_type"] == "text"
+    assert event["opencode_part_id"] == "part_text_1"
+
+
+def test_session_status_keeps_status_type_identity(tmp_path, monkeypatch):
+    settings, session_store, task_store = _normalize_context(tmp_path, monkeypatch)
+
+    event = normalize_opencode_event(
+        {"type": "session.status", "status": {"type": "busy"}},
+        session_store=session_store,
+        task_store=task_store,
+        settings=settings,
+    )
+
+    assert event["data"]["raw_type"] == "session.status"
+    assert event["data"]["status"]["type"] == "busy"
+    assert event["data"]["status_type"] == "busy"
+    assert event["opencode_status"] == "busy"
+
+
+def test_session_status_string_status_keeps_status_type_identity(tmp_path, monkeypatch):
+    settings, session_store, task_store = _normalize_context(tmp_path, monkeypatch)
+
+    event = normalize_opencode_event(
+        {"type": "session.status", "status": "busy"},
+        session_store=session_store,
+        task_store=task_store,
+        settings=settings,
+    )
+
+    assert event["data"]["raw_type"] == "session.status"
+    assert event["data"]["status"]["type"] == "busy"
+    assert event["data"]["status_type"] == "busy"
+    assert event["opencode_status"] == "busy"
+
+
+def test_session_status_top_level_type_fallback_keeps_status_type_identity(tmp_path, monkeypatch):
+    settings, session_store, task_store = _normalize_context(tmp_path, monkeypatch)
+
+    event = normalize_opencode_event(
+        {"event": "session.status", "type": "retry"},
+        session_store=session_store,
+        task_store=task_store,
+        settings=settings,
+    )
+
+    assert event["data"]["raw_type"] == "session.status"
+    assert event["data"]["status"]["type"] == "retry"
+    assert event["data"]["status_type"] == "retry"
+    assert event["opencode_status"] == "retry"
+
+
+def test_session_idle_adds_message_reconcile_hint(tmp_path, monkeypatch):
+    settings, session_store, task_store = _normalize_context(tmp_path, monkeypatch)
+
+    event = normalize_opencode_event(
+        {"type": "session.idle", "sessionID": "oc-1"},
+        session_store=session_store,
+        task_store=task_store,
+        settings=settings,
+    )
+
+    assert event["data"]["raw_type"] == "session.idle"
+    assert event["data"]["reconcile_hint"] == "fetch_session_messages"
+
+
 
 
 def test_message_part_delta_requires_assistant_role_and_text_part(tmp_path, monkeypatch):
@@ -169,7 +306,8 @@ def test_message_part_delta_user_role_not_streamed(tmp_path, monkeypatch):
     paths = ensure_state_dirs(settings)
     event = normalize_opencode_event({"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-user", "partID": "p1", "field": "text", "delta": "hi"}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="user", part_meta={"type": "text", "ignored": False, "synthetic": False})
     assert event["type"] != "message.delta"
-    assert not event["data"].get("delta")
+    assert event["data"]["delta"] == "hi"
+    assert event["data"]["message_role"] == "user"
 
 
 def test_unknown_event_maps_to_opencode_raw_with_metadata(tmp_path, monkeypatch):
@@ -201,7 +339,8 @@ def test_message_part_delta_raw_user_role_not_streamed_when_cache_missing(tmp_pa
     raw_event = {"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-user", "partID": "p1", "field": "text", "delta": "user text", "role": "user"}}
     event = normalize_opencode_event(raw_event, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="", part_meta={})
     assert event["type"] != "message.delta"
-    assert not event["data"].get("delta")
+    assert event["data"]["delta"] == "user text"
+    assert event["data"]["message_role"] == "user"
 
 
 @pytest.mark.asyncio

@@ -839,6 +839,47 @@ async def test_chat_stream_filters_noise_events_and_keeps_useful_events(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_active_run_conflict_includes_reconnect_payload(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeOpenCodeClient()
+    fake.sessions["ses-active"] = {"id": "ses-active", "title": "Chat"}
+    fake.messages["ses-active"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[CHAT_RUN_STORE_KEY].start_run(
+        request_id="req-active",
+        portal_session_id="portal-stream-active",
+        opencode_session_id="ses-active",
+        status="running",
+    )
+    c = TestClient(TestServer(app))
+    await c.start_server()
+    try:
+        resp = await c.post(
+            "/api/chat/stream",
+            json={"message": "second", "session_id": "portal-stream-active", "request_id": "req-second"},
+        )
+        body = await resp.text()
+        events = _sse_events(body)
+        error_payload = next(payload for event_name, payload in events if event_name == "error")
+        final_payload = next(payload for event_name, payload in events if event_name == "final")
+
+        assert error_payload["error"] == "chat_run_already_active"
+        assert error_payload["detail"] == "chat_run_already_active"
+        assert error_payload["active_run"]["request_id"] == "req-active"
+        assert error_payload["active_run"]["source_of_truth"] == "opencode"
+        assert error_payload["active_run"]["opencode_active"] is True
+        assert error_payload["action_hint"] == "wait_reconnect_or_stop"
+        assert error_payload["can_abort"] is True
+        assert final_payload["completion_state"] in {"blocked", "error"}
+        assert final_payload["incomplete_reason"] == "chat_run_already_active"
+        assert final_payload["active_run"]["request_id"] == "req-active"
+        assert final_payload["action_hint"] == "wait_reconnect_or_stop"
+        assert "continue" not in final_payload["user_message"].lower()
+    finally:
+        await c.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("completion_state", "ok"),
     [
