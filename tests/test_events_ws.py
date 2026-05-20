@@ -97,6 +97,28 @@ async def test_events_ws_replay_session_level_events_without_request_id(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_events_ws_replay_with_request_id_is_request_scoped(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await app[EVENT_BUS_KEY].publish({"type": "message.delta", "session_id": "portal-request-scope", "request_id": "req-one", "data": {"delta": "one"}})
+    await app[EVENT_BUS_KEY].publish({"type": "message.delta", "session_id": "portal-request-scope", "request_id": "req-two", "data": {"delta": "two"}})
+    await app[EVENT_BUS_KEY].publish({"type": "session.status", "session_id": "portal-request-scope", "opencode_session_id": "oc-request-scope", "request_id": "", "data": {"raw_type": "session.status"}})
+
+    ws = await client.ws_connect("/api/events?session_id=portal-request-scope&request_id=req-one&replay=1")
+    assert (await ws.receive_json())["type"] == "connected"
+    event = await ws.receive_json(timeout=2)
+
+    assert event["request_id"] == "req-one"
+    assert event["data"]["delta"] == "one"
+
+    await ws.close()
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_events_ws_replay_limit(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
