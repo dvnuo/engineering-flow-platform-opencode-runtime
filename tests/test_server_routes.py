@@ -1,7 +1,7 @@
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from efp_opencode_adapter.app_keys import CHAT_RUN_STORE_KEY, EVENT_BUS_KEY, SESSION_STORE_KEY
+from efp_opencode_adapter.app_keys import CHAT_RUN_STORE_KEY, EVENT_BRIDGE_KEY, EVENT_BUS_KEY, SESSION_STORE_KEY
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.session_store import SessionRecord
 from efp_opencode_adapter.settings import Settings
@@ -87,6 +87,23 @@ class _StatusManager:
 
     def log_tail(self, lines=200):
         return self._log_tail
+
+
+class _EventStreamFakeOpenCodeClient(FakeOpenCodeClient):
+    async def event_stream(self, *args, **kwargs):
+        if False:
+            yield {}
+
+
+def test_managed_opencode_app_enables_event_bridge_with_injected_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(
+        Settings.from_env(),
+        opencode_client=_EventStreamFakeOpenCodeClient(),
+        opencode_process_manager=_StatusManager(),
+    )
+
+    assert EVENT_BRIDGE_KEY in app
 
 
 @pytest.mark.asyncio

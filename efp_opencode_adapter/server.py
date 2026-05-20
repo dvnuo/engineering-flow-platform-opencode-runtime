@@ -850,7 +850,8 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.on_cleanup.append(cleanup_task_background_tasks)
     app[PORTAL_METADATA_CLIENT_KEY] = PortalMetadataClient(settings, pending_file=state_paths.portal_metadata_pending_file)
     app[RECOVERY_MANAGER_KEY] = RecoveryManager(settings=settings, state_paths=state_paths, session_store=app[SESSION_STORE_KEY], chatlog_store=app[CHATLOG_STORE_KEY], opencode_client=app[OPENCODE_CLIENT_KEY])
-    should_start_event_bridge = settings.event_bridge_enabled and (start_event_bridge if start_event_bridge is not None else not injected_client) and hasattr(client, "event_stream")
+    managed_opencode = opencode_process_manager is not None
+    should_start_event_bridge = settings.event_bridge_enabled and (start_event_bridge if start_event_bridge is not None else (not injected_client or managed_opencode)) and hasattr(client, "event_stream")
     if should_start_event_bridge:
         app[EVENT_BRIDGE_KEY] = OpenCodeEventBridge(settings, client, app[EVENT_BUS_KEY], app[SESSION_STORE_KEY], app[TASK_STORE_KEY], app[CHATLOG_STORE_KEY], app[REQUEST_BINDING_STORE_KEY])
     register_file_routes(app)
