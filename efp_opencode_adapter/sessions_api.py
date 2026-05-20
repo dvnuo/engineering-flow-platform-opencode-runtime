@@ -125,6 +125,8 @@ def normalize_canonical_messages(messages: list[dict[str, Any]]) -> list[dict[st
     for raw in messages:
         if not isinstance(raw, dict):
             continue
+        if _is_internal_efp_message(raw):
+            continue
 
         info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
         parts = raw.get("parts") if isinstance(raw.get("parts"), list) else []
@@ -139,6 +141,7 @@ def normalize_canonical_messages(messages: list[dict[str, Any]]) -> list[dict[st
 
         message_id = str(info.get("id") or raw.get("id") or raw.get("message_id") or "")
         role = str(info.get("role") or raw.get("role") or "")
+        time_info = info.get("time") if isinstance(info.get("time"), dict) else {}
 
         out.append(
             {
@@ -146,6 +149,10 @@ def normalize_canonical_messages(messages: list[dict[str, Any]]) -> list[dict[st
                 "parts": safe_preview([p for p in parts if isinstance(p, dict)], 50000),
                 "message_id": message_id,
                 "role": role,
+                "created_at": time_info.get("created") or info.get("created") or raw.get("created_at") or "",
+                "updated_at": time_info.get("updated") or info.get("updated") or raw.get("updated_at") or "",
+                "completed_at": time_info.get("completed") or info.get("completed") or raw.get("completed_at") or "",
+                "finish_reason": info.get("finishReason") or info.get("finish_reason") or raw.get("finish_reason") or "",
                 "source_of_truth": "opencode",
             }
         )
