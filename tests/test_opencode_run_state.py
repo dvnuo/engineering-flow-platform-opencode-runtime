@@ -27,9 +27,19 @@ class _RunStateClient:
         return self.children
 
 
-def test_opencode_status_helpers_are_flexible():
+def test_opencode_status_active_uses_official_and_strict_values():
+    assert is_opencode_status_active("running") is True
+    assert is_opencode_status_active("busy") is True
+    assert is_opencode_status_active({"type": "busy"}) is True
+    assert is_opencode_status_active({"status": "busy"}) is True
     assert is_opencode_status_active({"state": "busy"}) is True
     assert is_opencode_status_active({"running": True}) is True
+    assert is_opencode_status_active("not-running") is False
+    assert is_opencode_status_active("not_running") is False
+    assert is_opencode_status_active("not-busy") is False
+    assert is_opencode_status_active("inactive") is False
+    assert is_opencode_status_active("idle") is False
+    assert is_opencode_status_active({"type": "idle"}) is False
     assert is_opencode_status_terminal_or_idle({"status": "completed"}) is True
     assert is_opencode_status_terminal_or_idle("idle") is True
 
@@ -77,7 +87,7 @@ async def test_resolve_run_state_final_assistant_is_inactive_and_visible_only():
 
 
 @pytest.mark.asyncio
-async def test_resolve_run_state_marks_active_child_session():
+async def test_resolve_run_state_keeps_active_child_session_non_blocking_for_idle_root():
     state = await resolve_opencode_run_state(
         _RunStateClient(
             status={"sessions": {"parent": {"state": "idle"}, "child": {"state": "streaming"}}},
@@ -87,10 +97,43 @@ async def test_resolve_run_state_marks_active_child_session():
         "parent",
     )
 
-    assert state.active is True
+    assert state.active is False
     assert state.child_sessions == ["child"]
     assert state.active_child_sessions == ["child"]
-    assert state.reason == "active_child_session"
+    assert state.reason == "active_child_session_non_blocking"
+
+
+@pytest.mark.asyncio
+async def test_resolve_run_state_root_busy_stays_active_with_idle_child():
+    state = await resolve_opencode_run_state(
+        _RunStateClient(
+            status={"sessions": {"parent": {"type": "busy"}, "child": {"type": "idle"}}},
+            messages=[],
+            children=[{"id": "child"}],
+        ),
+        "parent",
+    )
+
+    assert state.active is True
+    assert state.status == "busy"
+    assert state.child_sessions == ["child"]
+    assert state.active_child_sessions == []
+    assert state.reason == "opencode_status_active"
+
+
+@pytest.mark.asyncio
+async def test_resolve_run_state_idle_without_final_assistant_is_inactive():
+    state = await resolve_opencode_run_state(
+        _RunStateClient(
+            status={"sessions": {"ses-1": {"type": "idle"}}},
+            messages=[{"id": "u-1", "role": "user", "parts": [{"type": "text", "text": "hi"}]}],
+        ),
+        "ses-1",
+    )
+
+    assert state.active is False
+    assert state.has_final_assistant is False
+    assert state.reason == "opencode_not_active"
 
 
 @pytest.mark.asyncio

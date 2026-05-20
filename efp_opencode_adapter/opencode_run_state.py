@@ -18,6 +18,8 @@ _ACTIVE_STATUS_VALUES = {
     "pending",
     "processing",
     "queued",
+    "retry",
+    "retrying",
     "running",
     "streaming",
     "working",
@@ -65,7 +67,7 @@ def _normalize_status_value(status: Any) -> str:
     if isinstance(status, str):
         return status.strip().lower()
     if isinstance(status, dict):
-        for key in ("status", "state", "phase", "run_state", "current_status"):
+        for key in ("type", "status", "state", "phase", "run_state", "current_status"):
             value = status.get(key)
             if value is not None:
                 return _normalize_status_value(value)
@@ -80,9 +82,7 @@ def _normalize_status_value(status: Any) -> str:
 
 def is_opencode_status_active(status: Any) -> bool:
     normalized = _normalize_status_value(status)
-    if normalized in _ACTIVE_STATUS_VALUES:
-        return True
-    return any(part in _ACTIVE_STATUS_VALUES for part in normalized.replace("-", "_").split())
+    return normalized in _ACTIVE_STATUS_VALUES
 
 
 def is_opencode_status_terminal_or_idle(status: Any) -> bool:
@@ -217,11 +217,11 @@ async def resolve_opencode_run_state(client, opencode_session_id: str) -> Resolv
         if is_opencode_status_active(child_entry):
             active_child_sessions.append(child_id)
 
-    active = bool(status_active or active_child_sessions)
-    if active_child_sessions:
-        reason = "active_child_session"
-    elif status_active:
+    active = bool(status_active)
+    if status_active:
         reason = "opencode_status_active"
+    elif active_child_sessions:
+        reason = "active_child_session_non_blocking"
     elif has_final_assistant:
         reason = "final_assistant_message"
     elif status_entry is None:
@@ -249,5 +249,7 @@ async def resolve_opencode_run_state(client, opencode_session_id: str) -> Resolv
             "message_count": len(messages),
             "assistant_completion": safe_preview(assistant_completion, 2000),
             "child_count": len(child_sessions),
+            "child_sessions": list(child_sessions),
+            "active_child_sessions": list(active_child_sessions),
         },
     )

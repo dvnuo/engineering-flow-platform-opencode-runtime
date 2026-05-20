@@ -101,3 +101,26 @@ async def test_validate_chat_run_idle_without_final_marks_stale(tmp_path):
     assert public is None
     assert store.get("req-1").status == "stale"
     assert store.active_for_session("portal-1") is None
+
+
+@pytest.mark.asyncio
+async def test_validate_chat_run_child_active_root_idle_does_not_block_root(tmp_path):
+    store = ChatRunStore(tmp_path / "chat_runs.json")
+    record = store.start_run(request_id="req-1", portal_session_id="portal-1", opencode_session_id="root", status="running")
+
+    public = await validate_chat_run_against_opencode(
+        store=store,
+        client=_ValidationClient(
+            status={"sessions": {"root": {"type": "idle"}, "child": {"type": "busy"}}},
+            messages=[],
+            children=[{"id": "child"}],
+        ),
+        record=record,
+    )
+
+    assert public is None
+    stale = store.get("req-1")
+    assert stale.status == "stale"
+    assert stale.metadata["opencode_active"] is False
+    assert stale.metadata["opencode_active_child_sessions"] == ["child"]
+    assert stale.metadata["validation_reason"] == "active_child_session_non_blocking"

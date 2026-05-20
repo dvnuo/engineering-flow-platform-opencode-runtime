@@ -54,12 +54,24 @@ def _public_with_validation(store: ChatRunStore, record: ChatRunRecord | None, r
     if public is None:
         return None
     public["source_of_truth"] = "opencode"
+    public["portal_session_id"] = getattr(record, "portal_session_id", "") if record is not None else str(public.get("session_id") or "")
     public["validated_at"] = public.get("validated_at") or utc_now_iso()
     public["validation_reason"] = resolved.reason
     public["opencode_active"] = bool(resolved.active)
     public["opencode_status"] = resolved.status
     public["opencode_exists"] = bool(resolved.exists)
     public["active_child_sessions"] = list(resolved.active_child_sessions)
+    public["can_abort"] = bool(resolved.active and resolved.exists)
+    public["action_hint"] = "wait_reconnect_or_stop" if resolved.active else "safe_to_send"
+    diagnostics = public.get("diagnostics") if isinstance(public.get("diagnostics"), dict) else {}
+    public["diagnostics"] = {
+        **diagnostics,
+        "opencode_status": resolved.status,
+        "opencode_exists": bool(resolved.exists),
+        "opencode_active": bool(resolved.active),
+        "child_sessions": list(resolved.child_sessions),
+        "active_child_sessions": list(resolved.active_child_sessions),
+    }
     return safe_preview(public, 12000)
 
 
@@ -107,7 +119,8 @@ async def validate_chat_run_against_opencode(
         updated = store.record_validation(record.request_id, metadata) or updated or record
         return _public_with_validation(store, updated, resolved)
 
-    stale = store.mark_stale(record.request_id, reason="opencode_not_active", metadata=metadata)
+    stale_reason = "active_child_session_non_blocking" if resolved.reason == "active_child_session_non_blocking" else "opencode_not_active"
+    stale = store.mark_stale(record.request_id, reason=stale_reason, metadata=metadata)
     if stale is not None:
         await _publish_validation_event(event_bus, "chat.run.stale", record=stale, resolved=resolved, state="stale")
     return None
