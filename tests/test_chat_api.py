@@ -87,6 +87,21 @@ class _SubmitTimeoutStillRunningClient(FakeOpenCodeClient):
         return {"sessions": {"ses-1": {"state": "running"}}}
 
 
+def _parse_sse_events(body: str) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    for chunk in body.strip().split("\n\n"):
+        event_name = None
+        data_line = None
+        for line in chunk.splitlines():
+            if line.startswith("event: "):
+                event_name = line.removeprefix("event: ")
+            elif line.startswith("data: "):
+                data_line = line.removeprefix("data: ")
+        if event_name is not None and data_line is not None:
+            events.append((event_name, json.loads(data_line)))
+    return events
+
+
 @pytest.mark.asyncio
 async def test_chat_and_stream(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
@@ -268,6 +283,43 @@ async def test_active_chat_run_prevents_new_chat_same_session(tmp_path, monkeypa
         fake.release.set()
         await first
     finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_active_run_conflict_emits_hydratable_error_and_final(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _SlowChatClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    first = asyncio.create_task(client.post("/api/chat", json={"message": "first", "session_id": "s-active-stream", "request_id": "r-active-1"}))
+    try:
+        await fake.entered.wait()
+
+        response = await client.post("/api/chat/stream", json={"message": "second", "session_id": "s-active-stream", "request_id": "r-active-2"})
+        body = await response.text()
+        events = _parse_sse_events(body)
+        error_payload = next(payload for event_name, payload in events if event_name == "error")
+        final_payload = next(payload for event_name, payload in events if event_name == "final")
+
+        for payload in (error_payload, final_payload):
+            assert payload["error"] == "chat_run_already_active"
+            assert payload["detail"] == "chat_run_already_active"
+            assert payload["session_id"] == "s-active-stream"
+            assert payload["request_id"] == "r-active-2"
+            assert payload["active_run"]["request_id"] == "r-active-1"
+            assert payload["active_run"]["source_of_truth"] == "opencode"
+            assert payload["active_run"]["opencode_active"] is True
+            assert payload["active_run"]["can_abort"] is True
+            assert payload["active_run"]["action_hint"] == "wait_reconnect_or_stop"
+            assert payload["can_abort"] is True
+            assert payload["action_hint"] == "wait_reconnect_or_stop"
+            assert payload["user_message"]
+        assert final_payload["completion_state"] == "blocked"
+    finally:
+        fake.release.set()
+        await first
         await client.close()
 
 
