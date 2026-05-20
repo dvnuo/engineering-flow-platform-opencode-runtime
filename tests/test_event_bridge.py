@@ -262,6 +262,24 @@ def test_session_idle_adds_message_reconcile_hint(tmp_path, monkeypatch):
     assert event["data"]["reconcile_hint"] == "fetch_session_messages"
 
 
+def test_session_level_events_map_portal_session_without_request_id(tmp_path, monkeypatch):
+    settings, session_store, task_store = _normalize_context(tmp_path, monkeypatch)
+    session_store.upsert(SessionRecord("portal-1", "oc-1", "t", None, None, "a", "a", "", 0))
+
+    event = normalize_opencode_event(
+        {"type": "message.part.updated", "sessionID": "oc-1", "part": {"id": "p1", "messageID": "m1", "type": "text"}},
+        session_store=session_store,
+        task_store=task_store,
+        settings=settings,
+    )
+
+    assert event["session_id"] == "portal-1"
+    assert event["opencode_session_id"] == "oc-1"
+    assert event["request_id"] == ""
+    assert event["raw_type"] == "message.part.updated"
+    assert event["data"]["raw_type"] == "message.part.updated"
+
+
 
 
 def test_message_part_delta_requires_assistant_role_and_text_part(tmp_path, monkeypatch):

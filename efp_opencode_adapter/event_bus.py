@@ -103,17 +103,18 @@ class EventBus:
     ) -> list[dict[str, Any]]:
         now = time.time()
         last_event_ts = _parse_event_time(last_event_at)
-        buckets: list[deque[tuple[float, int, dict[str, Any]]]] = []
-        if session_id:
-            bucket = self._recent_by_session.get(session_id)
-            if bucket is not None:
-                self._prune_bucket(bucket, now=now)
-                buckets.append(bucket)
         if request_id:
             bucket = self._recent_by_request.get(request_id)
             if bucket is not None:
                 self._prune_bucket(bucket, now=now)
-                buckets.append(bucket)
+            buckets = [bucket] if bucket is not None else []
+        else:
+            buckets: list[deque[tuple[float, int, dict[str, Any]]]] = []
+            if session_id:
+                bucket = self._recent_by_session.get(session_id)
+                if bucket is not None:
+                    self._prune_bucket(bucket, now=now)
+                    buckets.append(bucket)
         if not buckets:
             return []
         seen: set[int] = set()
@@ -125,6 +126,8 @@ class EventBus:
                 seen.add(seq)
                 event_type = str(event.get("type") or event.get("event_type") or "")
                 if types and event_type not in types:
+                    continue
+                if request_id and session_id and self._event_value(event, "session_id") != session_id:
                     continue
                 event_ts = _event_sort_time(event, ts)
                 if last_event_ts is not None and event_ts <= last_event_ts:
