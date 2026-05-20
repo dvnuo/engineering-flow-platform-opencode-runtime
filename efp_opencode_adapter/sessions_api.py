@@ -120,6 +120,38 @@ def _message_parts(message: Any) -> list[dict[str, Any]]:
     return []
 
 
+def normalize_canonical_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for raw in messages:
+        if not isinstance(raw, dict):
+            continue
+
+        info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
+        parts = raw.get("parts") if isinstance(raw.get("parts"), list) else []
+
+        if not info and isinstance(raw.get("message"), dict):
+            msg = raw["message"]
+            info = msg.get("info") if isinstance(msg.get("info"), dict) else {
+                k: v for k, v in msg.items() if k != "parts"
+            }
+            if not parts and isinstance(msg.get("parts"), list):
+                parts = msg["parts"]
+
+        message_id = str(info.get("id") or raw.get("id") or raw.get("message_id") or "")
+        role = str(info.get("role") or raw.get("role") or "")
+
+        out.append(
+            {
+                "info": safe_preview(info, 12000),
+                "parts": safe_preview([p for p in parts if isinstance(p, dict)], 50000),
+                "message_id": message_id,
+                "role": role,
+                "source_of_truth": "opencode",
+            }
+        )
+    return out
+
+
 def _is_internal_efp_message(message: Any) -> bool:
     mid = _message_id(message)
     if mid.startswith("efp-auto-continue-"):
@@ -566,13 +598,20 @@ async def get_session_handler(request: web.Request) -> web.Response:
         portal_session_id=sid,
         opencode_session_id=record.opencode_session_id,
     )
+    canonical_messages = normalize_canonical_messages(messages)
     return web.json_response(
         {
+            "success": True,
+            "engine": "opencode",
+            "source_of_truth": "opencode",
             "session_id": sid,
+            "opencode_session_id": record.opencode_session_id,
             "name": record.title,
             "messages": efp_messages,
+            "canonical_messages": canonical_messages,
             "metadata": {
                 "engine": "opencode",
+                "source_of_truth": "opencode",
                 "opencode_session_id": record.opencode_session_id,
                 "partial_recovery": record.partial_recovery,
                 **_latest_session_runtime_status_metadata(request.app.get(CHATLOG_STORE_KEY), sid),
