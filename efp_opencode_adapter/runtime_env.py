@@ -104,6 +104,38 @@ class RuntimeEnvBuildResult:
     warnings: list[str]
 
 
+def opencode_xdg_data_home(settings: Settings) -> Path:
+    return settings.adapter_state_dir / "xdg-data"
+
+
+def ensure_opencode_xdg_data_home(settings: Settings) -> Path:
+    """Map OpenCode's XDG data path back to the adapter-managed data dir."""
+    data_dir = settings.opencode_data_dir
+    data_dir.mkdir(parents=True, exist_ok=True)
+    if data_dir.name == "opencode":
+        data_dir.parent.mkdir(parents=True, exist_ok=True)
+        return data_dir.parent
+
+    xdg_home = opencode_xdg_data_home(settings)
+    xdg_home.mkdir(parents=True, exist_ok=True)
+    opencode_path = xdg_home / "opencode"
+    desired = data_dir.resolve(strict=False)
+
+    if opencode_path.is_symlink():
+        if opencode_path.resolve(strict=False) != desired:
+            opencode_path.unlink()
+            opencode_path.symlink_to(data_dir, target_is_directory=True)
+        return xdg_home
+
+    if opencode_path.exists():
+        raise RuntimeError(
+            f"OpenCode XDG data path conflict: {opencode_path} already exists and is not managed by the adapter"
+        )
+
+    opencode_path.symlink_to(data_dir, target_is_directory=True)
+    return xdg_home
+
+
 def _trim_url(url: str) -> str:
     return url.rstrip("/")
 
@@ -123,10 +155,12 @@ def _inject_proxy_auth(url: str, username: str | None, password: str | None) -> 
 
 def build_runtime_env_from_config(settings: Settings, runtime_config: dict | None) -> RuntimeEnvBuildResult:
     cfg = runtime_config if isinstance(runtime_config, dict) else {}
+    xdg_data_home = ensure_opencode_xdg_data_home(settings)
     env: dict[str, str] = {
         "HOME": os.getenv("HOME", "/root"),
         "OPENCODE_CONFIG": str(settings.opencode_config_path),
         "OPENCODE_DATA_DIR": str(settings.opencode_data_dir),
+        "XDG_DATA_HOME": str(xdg_data_home),
         "ATLASSIAN_CONFIG": str(settings.atlassian_config_path),
         "EFP_RUNTIME_TYPE": "opencode",
         "EFP_WORKSPACE_DIR": str(settings.workspace_dir),
