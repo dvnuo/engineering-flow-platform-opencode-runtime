@@ -8,7 +8,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.sessions_api import _extract_opencode_session_id, _to_efp_messages
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
-from efp_opencode_adapter.app_keys import CHAT_RUN_STORE_KEY, SESSION_STORE_KEY, PORTAL_METADATA_CLIENT_KEY, CHATLOG_STORE_KEY, TASK_BACKGROUND_TASKS_KEY
+from efp_opencode_adapter.app_keys import CHAT_RUN_STORE_KEY, EVENT_BUS_KEY, SESSION_STORE_KEY, PORTAL_METADATA_CLIENT_KEY, CHATLOG_STORE_KEY, TASK_BACKGROUND_TASKS_KEY
 from efp_opencode_adapter.session_store import SessionRecord
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
@@ -21,6 +21,17 @@ class _RunStateFakeOpenCodeClient(FakeOpenCodeClient):
 
     async def get_session_status(self):
         return {"sessions": {sid: {"state": self.state} for sid in self.sessions}}
+
+
+class _AbortableRunStateFakeOpenCodeClient(_RunStateFakeOpenCodeClient):
+    def __init__(self, *, state: str = "busy"):
+        super().__init__(state=state)
+        self.abort_session_tree_calls: list[str] = []
+
+    async def abort_session_tree(self, session_id):
+        self.abort_session_tree_calls.append(session_id)
+        self.state = "idle"
+        return {"success": True, "supported": True, "aborted_session_ids": [session_id], "missing_session_ids": [], "errors": []}
 
 
 def _role_content_pairs(messages):
@@ -189,7 +200,14 @@ async def test_session_metadata_includes_active_latest_run_and_projection(tmp_pa
 
         assert metadata["active_run"]["request_id"] == "r-active"
         assert metadata["active_run"]["status"] == "running"
+        assert metadata["active_run"]["source_of_truth"] == "opencode"
+        assert metadata["active_run"]["opencode_active"] is True
+        assert metadata["active_run"]["can_abort"] is True
+        assert metadata["active_run"]["action_hint"] == "wait_reconnect_or_stop"
         assert metadata["latest_run"]["request_id"] == "r-active"
+        assert metadata["session_status"]["active"] is True
+        assert metadata["session_status"]["active_run"]["request_id"] == "r-active"
+        assert metadata["session_status"]["action_hint"] == "wait_reconnect_or_stop"
         assert metadata["assistant_projection"]["request_id"] == "r-active"
         assert metadata["assistant_projection"]["assistant_message_id"] == "a-pending"
         assert metadata["assistant_projection"]["text"] == "partial live answer"
@@ -228,6 +246,176 @@ async def test_session_metadata_validates_active_run_against_opencode(tmp_path, 
     metadata = (await (await client.get("/api/sessions/portal-active")).json())["metadata"]
     assert metadata["active_run"]["request_id"] == "req-active"
     assert metadata["active_run"]["opencode_active"] is True
+    assert metadata["session_status"]["active"] is True
+    assert metadata["session_status"]["active_run"]["request_id"] == "req-active"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_metadata_synthesizes_active_run_from_opencode_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(state="busy")
+    fake.sessions["ses-busy"] = {"id": "ses-busy", "title": "Chat"}
+    fake.messages["ses-busy"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-busy",
+            opencode_session_id="ses-busy",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-19T00:00:00Z",
+            updated_at="2026-05-19T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/portal-busy")).json()
+    metadata = payload["metadata"]
+
+    assert metadata["active_run"]["request_id"] == "opencode-session-ses-busy"
+    assert metadata["active_run"]["source_of_truth"] == "opencode"
+    assert metadata["active_run"]["opencode_active"] is True
+    assert metadata["session_status"]["active"] is True
+    assert metadata["session_status"]["active_run"]["request_id"] == "opencode-session-ses-busy"
+    assert metadata["session_status"]["can_abort"] is True
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_abort_works_without_chat_run_store_active_record(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _AbortableRunStateFakeOpenCodeClient(state="busy")
+    fake.sessions["ses-abort-synthetic"] = {"id": "ses-abort-synthetic", "title": "Chat"}
+    fake.messages["ses-abort-synthetic"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-abort-synthetic",
+            opencode_session_id="ses-abort-synthetic",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    before = await (await client.get("/api/sessions/portal-abort-synthetic/status")).json()
+    assert before["active"] is True
+    assert before["active_run"]["request_id"].startswith("opencode-session-")
+    assert before["can_abort"] is True
+
+    abort_payload = await (await client.post("/api/sessions/portal-abort-synthetic/abort")).json()
+    assert fake.abort_session_tree_calls == ["ses-abort-synthetic"]
+    assert abort_payload["success"] is True
+    assert abort_payload["engine"] == "opencode"
+    assert abort_payload["session_id"] == "portal-abort-synthetic"
+    assert abort_payload["opencode_session_id"] == "ses-abort-synthetic"
+    assert abort_payload["aborted"] is True
+    assert abort_payload["action_hint"] == "safe_to_send"
+    assert abort_payload["status"]["type"] in {"idle", "aborted"}
+    assert abort_payload["run"] is None
+
+    after = await (await client.get("/api/sessions/portal-abort-synthetic/status")).json()
+    assert after["active"] is False
+    assert after["active_run"] is None
+    assert after["action_hint"] == "safe_to_send"
+    assert after["can_abort"] is False
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_abort_publishes_session_aborted_for_synthetic_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _AbortableRunStateFakeOpenCodeClient(state="busy")
+    fake.sessions["ses-abort-event"] = {"id": "ses-abort-event", "title": "Chat"}
+    fake.messages["ses-abort-event"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-abort-event",
+            opencode_session_id="ses-abort-event",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    abort_payload = await (await client.post("/api/sessions/portal-abort-event/abort")).json()
+
+    assert fake.abort_session_tree_calls == ["ses-abort-event"]
+    assert abort_payload["success"] is True
+    assert abort_payload["aborted"] is True
+    assert abort_payload["action_hint"] == "safe_to_send"
+    assert abort_payload["run"] is None
+
+    events = app[EVENT_BUS_KEY].recent_events(session_id="portal-abort-event")
+    event_types = [event["type"] for event in events]
+    assert "opencode.session.aborted" in event_types
+    assert "chat.run.aborted" not in event_types
+    aborted_event = next(event for event in events if event["type"] == "opencode.session.aborted")
+    assert aborted_event["session_id"] == "portal-abort-event"
+    assert aborted_event["request_id"] == ""
+    assert aborted_event["opencode_session_id"] == "ses-abort-event"
+
+    status_payload = await (await client.get("/api/sessions/portal-abort-event/status")).json()
+    assert status_payload["active"] is False
+    assert status_payload["active_run"] is None
+    assert status_payload["can_abort"] is False
+    assert status_payload["action_hint"] == "safe_to_send"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_status_and_active_run_consistent_for_synthetic_active_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(state="busy")
+    fake.sessions["ses-synthetic"] = {"id": "ses-synthetic", "title": "Chat"}
+    fake.messages["ses-synthetic"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-synthetic",
+            opencode_session_id="ses-synthetic",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    status_payload = await (await client.get("/api/sessions/portal-synthetic/status")).json()
+    active_payload = await (await client.get("/api/sessions/portal-synthetic/active-run")).json()
+
+    assert status_payload["active"] is True
+    assert status_payload["active_run"]["source_of_truth"] == "opencode"
+    assert status_payload["active_run"]["opencode_active"] is True
+    assert status_payload["action_hint"] == "wait_reconnect_or_stop"
+    assert active_payload["active"] is True
+    assert active_payload["active_run"]["source_of_truth"] == "opencode"
+    assert active_payload["active_run"]["opencode_active"] is True
+    assert active_payload["run"] == active_payload["active_run"]
+    assert active_payload["action_hint"] == "wait_reconnect_or_stop"
     await client.close()
 
 
@@ -260,6 +448,9 @@ async def test_session_metadata_clears_inactive_local_run_and_keeps_projection(t
     assert metadata["active_run"] is None
     assert metadata["active_run_stale_reason"] == "opencode_not_active"
     assert metadata["latest_run"]["status"] == "stale"
+    assert metadata["session_status"]["active"] is False
+    assert metadata["session_status"]["active_run"] is None
+    assert metadata["session_status"]["action_hint"] == "safe_to_send"
     assert metadata["assistant_projection"]["text"] == "partial answer"
     assert app[CHAT_RUN_STORE_KEY].get("req-idle").status == "stale"
     await client.close()

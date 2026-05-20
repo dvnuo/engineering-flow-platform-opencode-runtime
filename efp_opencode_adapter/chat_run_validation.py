@@ -81,11 +81,13 @@ async def validate_chat_run_against_opencode(
     client,
     record: ChatRunRecord | None,
     event_bus=None,
+    resolved: ResolvedOpenCodeRunState | None = None,
 ) -> dict[str, Any] | None:
     if record is None:
         return None
 
-    resolved = await resolve_opencode_run_state(client, record.opencode_session_id)
+    if resolved is None:
+        resolved = await resolve_opencode_run_state(client, record.opencode_session_id)
     metadata = _validation_metadata(resolved)
 
     if resolved.active:

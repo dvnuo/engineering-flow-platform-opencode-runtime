@@ -72,6 +72,53 @@ async def test_events_ws_replay_and_type_filter(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_events_ws_replay_session_level_events_without_request_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await app[EVENT_BUS_KEY].publish({"type": "session.status", "session_id": "portal-session", "opencode_session_id": "oc-session", "request_id": "", "raw_type": "session.status", "data": {"raw_type": "session.status"}})
+    await app[EVENT_BUS_KEY].publish({"type": "opencode.message.part.updated", "session_id": "portal-session", "opencode_session_id": "oc-session", "request_id": "", "raw_type": "message.part.updated", "data": {"raw_type": "message.part.updated"}})
+    await app[EVENT_BUS_KEY].publish({"type": "session.updated", "session_id": "portal-session", "opencode_session_id": "oc-session", "request_id": "", "raw_type": "session.idle", "data": {"raw_type": "session.idle"}})
+
+    ws = await client.ws_connect("/api/events?session_id=portal-session&replay=1")
+    assert (await ws.receive_json())["type"] == "connected"
+    first = await ws.receive_json(timeout=2)
+    second = await ws.receive_json(timeout=2)
+    third = await ws.receive_json(timeout=2)
+
+    assert [first["data"]["raw_type"], second["data"]["raw_type"], third["data"]["raw_type"]] == ["session.status", "message.part.updated", "session.idle"]
+    assert {first["request_id"], second["request_id"], third["request_id"]} == {""}
+    assert {first["opencode_session_id"], second["opencode_session_id"], third["opencode_session_id"]} == {"oc-session"}
+
+    await ws.close()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_events_ws_replay_with_request_id_is_request_scoped(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    await app[EVENT_BUS_KEY].publish({"type": "message.delta", "session_id": "portal-request-scope", "request_id": "req-one", "data": {"delta": "one"}})
+    await app[EVENT_BUS_KEY].publish({"type": "message.delta", "session_id": "portal-request-scope", "request_id": "req-two", "data": {"delta": "two"}})
+    await app[EVENT_BUS_KEY].publish({"type": "session.status", "session_id": "portal-request-scope", "opencode_session_id": "oc-request-scope", "request_id": "", "data": {"raw_type": "session.status"}})
+
+    ws = await client.ws_connect("/api/events?session_id=portal-request-scope&request_id=req-one&replay=1")
+    assert (await ws.receive_json())["type"] == "connected"
+    event = await ws.receive_json(timeout=2)
+
+    assert event["request_id"] == "req-one"
+    assert event["data"]["delta"] == "one"
+
+    await ws.close()
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_events_ws_replay_limit(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())

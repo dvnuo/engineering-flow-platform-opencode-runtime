@@ -28,18 +28,38 @@ class _RunStateClient:
 
 
 def test_opencode_status_active_uses_official_and_strict_values():
-    assert is_opencode_status_active("running") is True
-    assert is_opencode_status_active("busy") is True
-    assert is_opencode_status_active({"type": "busy"}) is True
-    assert is_opencode_status_active({"status": "busy"}) is True
-    assert is_opencode_status_active({"state": "busy"}) is True
-    assert is_opencode_status_active({"running": True}) is True
-    assert is_opencode_status_active("not-running") is False
-    assert is_opencode_status_active("not_running") is False
-    assert is_opencode_status_active("not-busy") is False
-    assert is_opencode_status_active("inactive") is False
-    assert is_opencode_status_active("idle") is False
-    assert is_opencode_status_active({"type": "idle"}) is False
+    active_statuses = [
+        "busy",
+        "running",
+        "retry",
+        "streaming",
+        "working",
+        "pending",
+        {"type": "busy"},
+        {"status": "running"},
+        {"state": "busy"},
+        {"active": True},
+    ]
+    inactive_statuses = [
+        "not-running",
+        "not_running",
+        "not-busy",
+        "inactive",
+        "stopped",
+        "complete",
+        "completed",
+        "idle",
+        "failed",
+        {"type": "not-running"},
+        {"status": {"type": "inactive"}},
+        {"type": "idle"},
+    ]
+
+    for status in active_statuses:
+        assert is_opencode_status_active(status) is True
+    for status in inactive_statuses:
+        assert is_opencode_status_active(status) is False
+
     assert is_opencode_status_terminal_or_idle({"status": "completed"}) is True
     assert is_opencode_status_terminal_or_idle("idle") is True
 
@@ -134,6 +154,22 @@ async def test_resolve_run_state_idle_without_final_assistant_is_inactive():
     assert state.active is False
     assert state.has_final_assistant is False
     assert state.reason == "opencode_not_active"
+
+
+@pytest.mark.asyncio
+async def test_resolve_run_state_missing_status_entry_is_inactive():
+    state = await resolve_opencode_run_state(
+        _RunStateClient(
+            status={"sessions": {}},
+            messages=[{"id": "u-1", "role": "user", "parts": [{"type": "text", "text": "hi"}]}],
+        ),
+        "ses-1",
+    )
+
+    assert state.exists is True
+    assert state.active is False
+    assert state.status == "unknown"
+    assert state.reason == "opencode_status_missing"
 
 
 @pytest.mark.asyncio

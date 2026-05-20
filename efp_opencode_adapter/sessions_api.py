@@ -18,11 +18,13 @@ from .app_keys import (
     USER_DISPLAY_STORE_KEY,
 )
 
+from .active_run_payload import active_run_public_from_store, session_status_summary, synthetic_active_run_from_resolved
 from .chat_api import handle_chat_payload_for_app
 from .chat_run_validation import validate_chat_run_against_opencode
 from .opencode_client import OpenCodeClientError
 from .opencode_ids import new_opencode_message_id
 from .opencode_message_adapter import message_to_visible_text, to_efp_message
+from .opencode_run_state import resolve_opencode_run_state
 from .thinking_events import safe_preview, utc_now_iso
 
 
@@ -544,18 +546,31 @@ def _latest_session_runtime_status_metadata(chatlog_store, sid: str) -> dict[str
     }
 
 
-async def _chat_run_session_metadata(chat_run_store: Any, client: Any, sid: str, messages: list[dict[str, Any]], event_bus: Any = None) -> dict[str, Any]:
+async def _chat_run_session_metadata(
+    chat_run_store: Any,
+    client: Any,
+    sid: str,
+    opencode_session_id: str,
+    messages: list[dict[str, Any]],
+    event_bus: Any = None,
+) -> dict[str, Any]:
+    resolved = await resolve_opencode_run_state(client, opencode_session_id)
+    session_status = session_status_summary(resolved, active_run=None)
     if chat_run_store is None:
-        return {"active_run": None, "latest_run": None}
+        active_run = synthetic_active_run_from_resolved(portal_session_id=sid, opencode_session_id=opencode_session_id, resolved=resolved) if resolved.active else None
+        session_status = session_status_summary(resolved, active_run=active_run)
+        return {"active_run": active_run, "latest_run": None, "session_status": session_status}
     try:
         active_record = chat_run_store.active_for_session(sid)
         latest_record = chat_run_store.latest_for_session(sid)
     except Exception:
-        return {"active_run": None, "latest_run": None}
+        active_run = synthetic_active_run_from_resolved(portal_session_id=sid, opencode_session_id=opencode_session_id, resolved=resolved) if resolved.active else None
+        session_status = session_status_summary(resolved, active_run=active_run)
+        return {"active_run": active_run, "latest_run": None, "session_status": session_status}
     active_public = None
     active_run_stale_reason = ""
     if active_record is not None:
-        active_public = await validate_chat_run_against_opencode(store=chat_run_store, client=client, record=active_record, event_bus=event_bus)
+        active_public = await validate_chat_run_against_opencode(store=chat_run_store, client=client, record=active_record, event_bus=event_bus, resolved=resolved)
         if active_public is None or active_public.get("opencode_active") is not True:
             refreshed = chat_run_store.get(active_record.request_id) if hasattr(chat_run_store, "get") else active_record
             active_run_stale_reason = str(
@@ -567,9 +582,21 @@ async def _chat_run_session_metadata(chat_run_store: Any, client: Any, sid: str,
         else:
             active_record = chat_run_store.get(active_record.request_id) if hasattr(chat_run_store, "get") else active_record
     latest_record = chat_run_store.latest_for_session(sid)
-    active_run = chat_run_store.to_session_summary(active_record) if active_record is not None else None
+    if resolved.active:
+        if active_public is not None and active_public.get("opencode_active") is True:
+            active_run = active_run_public_from_store(
+                active_public,
+                portal_session_id=sid,
+                opencode_session_id=opencode_session_id,
+                resolved=resolved,
+            )
+        else:
+            active_run = synthetic_active_run_from_resolved(portal_session_id=sid, opencode_session_id=opencode_session_id, resolved=resolved)
+    else:
+        active_run = None
     latest_run = chat_run_store.to_session_summary(latest_record) if latest_record is not None else None
-    metadata: dict[str, Any] = {"active_run": active_run, "latest_run": latest_run}
+    session_status = session_status_summary(resolved, active_run=active_run)
+    metadata: dict[str, Any] = {"active_run": active_run, "latest_run": latest_run, "session_status": session_status}
     if not active_run_stale_reason and active_record is None and latest_record is not None and getattr(latest_record, "status", "") == "stale":
         active_run_stale_reason = str(getattr(latest_record, "incomplete_reason", "") or latest_record.metadata.get("validation_reason") or "opencode_not_active")
     if active_run_stale_reason:
@@ -622,7 +649,14 @@ async def get_session_handler(request: web.Request) -> web.Response:
                 "opencode_session_id": record.opencode_session_id,
                 "partial_recovery": record.partial_recovery,
                 **_latest_session_runtime_status_metadata(request.app.get(CHATLOG_STORE_KEY), sid),
-                **await _chat_run_session_metadata(request.app.get(CHAT_RUN_STORE_KEY), client, sid, efp_messages, request.app.get(EVENT_BUS_KEY)),
+                **await _chat_run_session_metadata(
+                    request.app.get(CHAT_RUN_STORE_KEY),
+                    client,
+                    sid,
+                    record.opencode_session_id,
+                    efp_messages,
+                    request.app.get(EVENT_BUS_KEY),
+                ),
             },
         }
     )
