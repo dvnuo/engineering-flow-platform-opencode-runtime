@@ -8,7 +8,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.sessions_api import _extract_opencode_session_id, _to_efp_messages
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
-from efp_opencode_adapter.app_keys import CHAT_RUN_STORE_KEY, SESSION_STORE_KEY, PORTAL_METADATA_CLIENT_KEY, CHATLOG_STORE_KEY, TASK_BACKGROUND_TASKS_KEY
+from efp_opencode_adapter.app_keys import CHAT_RUN_STORE_KEY, EVENT_BUS_KEY, SESSION_STORE_KEY, PORTAL_METADATA_CLIENT_KEY, CHATLOG_STORE_KEY, TASK_BACKGROUND_TASKS_KEY
 from efp_opencode_adapter.session_store import SessionRecord
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
@@ -330,6 +330,54 @@ async def test_session_abort_works_without_chat_run_store_active_record(tmp_path
     assert after["active_run"] is None
     assert after["action_hint"] == "safe_to_send"
     assert after["can_abort"] is False
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_abort_publishes_session_aborted_for_synthetic_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _AbortableRunStateFakeOpenCodeClient(state="busy")
+    fake.sessions["ses-abort-event"] = {"id": "ses-abort-event", "title": "Chat"}
+    fake.messages["ses-abort-event"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-abort-event",
+            opencode_session_id="ses-abort-event",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    abort_payload = await (await client.post("/api/sessions/portal-abort-event/abort")).json()
+
+    assert fake.abort_session_tree_calls == ["ses-abort-event"]
+    assert abort_payload["success"] is True
+    assert abort_payload["aborted"] is True
+    assert abort_payload["action_hint"] == "safe_to_send"
+    assert abort_payload["run"] is None
+
+    events = app[EVENT_BUS_KEY].recent_events(session_id="portal-abort-event")
+    event_types = [event["type"] for event in events]
+    assert "opencode.session.aborted" in event_types
+    assert "chat.run.aborted" not in event_types
+    aborted_event = next(event for event in events if event["type"] == "opencode.session.aborted")
+    assert aborted_event["session_id"] == "portal-abort-event"
+    assert aborted_event["request_id"] == ""
+    assert aborted_event["opencode_session_id"] == "ses-abort-event"
+
+    status_payload = await (await client.get("/api/sessions/portal-abort-event/status")).json()
+    assert status_payload["active"] is False
+    assert status_payload["active_run"] is None
+    assert status_payload["can_abort"] is False
+    assert status_payload["action_hint"] == "safe_to_send"
     await client.close()
 
 
