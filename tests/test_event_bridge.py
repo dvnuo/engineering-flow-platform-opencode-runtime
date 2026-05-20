@@ -216,6 +216,38 @@ def test_session_status_keeps_status_type_identity(tmp_path, monkeypatch):
     assert event["opencode_status"] == "busy"
 
 
+def test_session_status_string_status_keeps_status_type_identity(tmp_path, monkeypatch):
+    settings, session_store, task_store = _normalize_context(tmp_path, monkeypatch)
+
+    event = normalize_opencode_event(
+        {"type": "session.status", "status": "busy"},
+        session_store=session_store,
+        task_store=task_store,
+        settings=settings,
+    )
+
+    assert event["data"]["raw_type"] == "session.status"
+    assert event["data"]["status"]["type"] == "busy"
+    assert event["data"]["status_type"] == "busy"
+    assert event["opencode_status"] == "busy"
+
+
+def test_session_status_top_level_type_fallback_keeps_status_type_identity(tmp_path, monkeypatch):
+    settings, session_store, task_store = _normalize_context(tmp_path, monkeypatch)
+
+    event = normalize_opencode_event(
+        {"event": "session.status", "type": "retry"},
+        session_store=session_store,
+        task_store=task_store,
+        settings=settings,
+    )
+
+    assert event["data"]["raw_type"] == "session.status"
+    assert event["data"]["status"]["type"] == "retry"
+    assert event["data"]["status_type"] == "retry"
+    assert event["opencode_status"] == "retry"
+
+
 def test_session_idle_adds_message_reconcile_hint(tmp_path, monkeypatch):
     settings, session_store, task_store = _normalize_context(tmp_path, monkeypatch)
 

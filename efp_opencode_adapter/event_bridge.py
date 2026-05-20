@@ -52,6 +52,9 @@ def _canonical(raw_event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _event_type(raw_event: dict[str, Any], canonical: dict[str, Any]) -> str:
+    explicit_event = canonical.get("event") or raw_event.get("event")
+    if isinstance(explicit_event, str) and explicit_event.lower().startswith("session.status"):
+        return "session.status"
     value = ""
     for key in ("type", "event"):
         v = canonical.get(key)
@@ -403,11 +406,23 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         data["part_type"] = _sanitize_event_text(str(data.get("part_type") or pmeta.get("type") or ""), 100)
     elif raw_type == "session.status":
         status_obj = canonical.get("status") if isinstance(canonical.get("status"), dict) else {}
-        status_type = str(status_obj.get("type") or "")
+        status_type = ""
+        if status_obj:
+            status_type = str(status_obj.get("type") or status_obj.get("status") or "")
+        else:
+            for key in ("status_type", "type", "status", "state"):
+                value = canonical.get(key)
+                if isinstance(value, str) and value:
+                    if key == "type" and value == raw_type:
+                        continue
+                    status_type = value
+                    break
         data["raw_type"] = "session.status"
         if status_obj:
             data["status"] = _sanitize_event_value(status_obj, max_chars)
-        data["status_type"] = _sanitize_event_text(status_type, 100)
+        else:
+            data["status"] = _sanitize_event_value({"type": status_type or "unknown"}, max_chars)
+        data["status_type"] = _sanitize_event_text(status_type or "unknown", 100)
     elif raw_type == "session.idle":
         data["raw_type"] = "session.idle"
         data["reconcile_hint"] = "fetch_session_messages"
