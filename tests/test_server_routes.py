@@ -269,9 +269,11 @@ async def test_active_run_route_uses_session_binding_when_no_local_run(tmp_path,
     payload = await (await client.get("/api/sessions/portal-1/active-run")).json()
     assert payload["active"] is True
     assert payload["active_run"]["source_of_truth"] == "opencode"
+    assert payload["active_run"]["opencode_active"] is True
     assert payload["active_run"]["opencode_status"] == "busy"
     assert payload["active_run"]["request_id"] == ""
     assert payload["active_run"]["can_abort"] is True
+    assert payload["action_hint"] == "wait_reconnect_or_stop"
     await client.close()
 
 
@@ -356,6 +358,7 @@ async def test_active_run_route_reports_child_active_without_locking_root(tmp_pa
     assert payload["active_run"] is None
     assert payload["reason"] == "active_child_session_non_blocking"
     assert payload["diagnostics"]["active_child_sessions"] == ["child"]
+    assert payload["action_hint"] == "safe_to_send"
     assert app[CHAT_RUN_STORE_KEY].get("req-child").status == "stale"
     await client.close()
 
