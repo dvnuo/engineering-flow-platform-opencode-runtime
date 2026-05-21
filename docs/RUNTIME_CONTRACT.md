@@ -39,6 +39,13 @@ At minimum, runtime provides:
 - `/actuator/health`
 - `/api/chat`
 - `/api/chat/stream`
+- `/api/opencode/health`
+- `/api/opencode/conversations`
+- `/api/opencode/conversations/{conversation_id}/status`
+- `/api/opencode/conversations/{conversation_id}/messages`
+- `/api/opencode/conversations/{conversation_id}/send`
+- `/api/opencode/conversations/{conversation_id}/abort`
+- `/api/opencode/conversations/{conversation_id}/events`
 - `/api/sessions`
 - `/api/skills`
 - `/api/capabilities`
@@ -52,6 +59,17 @@ At minimum, runtime provides:
 OpenCode is an implementation detail behind adapter APIs.
 - It is bound to `:4096` internal loopback.
 - It must not be exposed as a direct Portal target.
+
+## OpenCode thin adapter namespace
+New OpenCode Chat UI integrations should use `/api/opencode/*`.
+This namespace binds Portal conversation ids to OpenCode root session ids and
+keeps OpenCode as the source of truth for status, messages, events, aborts, and
+permission responses. It must not use `ChatRunStore` active/latest run records
+as the source of truth and must not expose the internal OpenCode URL or
+credentials to the browser.
+
+Legacy `/api/chat`, `/api/chat/stream`, and `/api/chat/runs/*` routes remain for
+compatibility, but new OpenCode UI contracts should not depend on them.
 
 ## Skills asset mapping
 - Portal provides skills only (`EFP_SKILLS_DIR`, default `/app/skills`).
