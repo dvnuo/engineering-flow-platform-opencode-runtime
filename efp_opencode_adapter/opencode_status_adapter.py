@@ -17,6 +17,17 @@ _ACTIVE_STATUS_VALUES = {
     "queued",
 }
 _RETRY_STATUS_VALUES = {"retry", "retrying"}
+_NEGATIVE_STATUS_VALUES = {
+    "inactive",
+    "not_active",
+    "not_running",
+    "not_busy",
+    "not_streaming",
+    "not_pending",
+    "not_processing",
+    "not_working",
+    "not_retrying",
+}
 _IDLE_STATUS_VALUES = {
     "idle",
     "complete",
@@ -96,17 +107,14 @@ def normalize_status_type(status: Any, *, missing: bool = False, unreachable: bo
     if missing:
         return "missing"
     raw = _raw_status_value(status)
-    normalized = raw.replace("-", "_").strip()
+    normalized = raw.replace("-", "_").strip().lower()
+    if normalized in _NEGATIVE_STATUS_VALUES:
+        return "idle"
     if normalized in _RETRY_STATUS_VALUES:
         return "retry"
     if normalized in _ACTIVE_STATUS_VALUES:
         return "busy"
     if normalized in _IDLE_STATUS_VALUES:
-        return "idle"
-    parts = set(normalized.split("_"))
-    if parts & (_ACTIVE_STATUS_VALUES | _RETRY_STATUS_VALUES):
-        return "retry" if parts & _RETRY_STATUS_VALUES else "busy"
-    if parts & _IDLE_STATUS_VALUES:
         return "idle"
     return "unknown"
 

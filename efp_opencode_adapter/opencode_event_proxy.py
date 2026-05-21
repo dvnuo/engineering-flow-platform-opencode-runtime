@@ -36,6 +36,7 @@ def normalize_opencode_event(
     opencode_session_id: str,
 ) -> tuple[str, dict[str, Any]]:
     raw_type = str(event.get("type") or event.get("event_type") or "message").strip()
+    raw_lower = raw_type.lower()
     lowered = raw_type.lower().replace("_", ".").replace("-", ".")
     data = event.get("data") if isinstance(event.get("data"), dict) else {}
 
@@ -62,22 +63,57 @@ def normalize_opencode_event(
         "conversation_id": conversation_id,
         "opencode_session_id": opencode_session_id,
         "opencode_event_type": raw_type,
-        "data": safe_preview(data or event, 4000),
+        "data": safe_preview(data, 4000),
+        "raw": safe_preview(event, 4000),
     }
+
+    if lowered in {"session.idle", "session.idle.event"} or raw_lower == "session.idle":
+        payload.update(
+            {
+                "status": "idle",
+                "active": False,
+                "can_abort": False,
+                "can_send": True,
+                "action_hint": "safe_to_send",
+                "snapshot_required": True,
+            }
+        )
+        name = "opencode.session.status"
+
     status_value = data.get("status") or data.get("state") or event.get("status") or event.get("state")
     if name == "opencode.session.status" and status_value is not None:
         status_type = normalize_status_type(status_value)
+        active = status_type in {"busy", "retry"}
         payload.update(
             {
                 "status": status_type,
-                "active": status_type in {"busy", "retry"},
-                "can_abort": status_type in {"busy", "retry"},
+                "active": active,
+                "can_abort": active,
+                "can_send": status_type == "idle",
+                "action_hint": "wait_or_stop" if active else ("safe_to_send" if status_type == "idle" else "refresh_status"),
             }
         )
-    for key in ("messageID", "message_id", "partID", "part_id", "permissionID", "permission_id"):
-        value = event.get(key) or data.get(key)
+
+    for source_key, target_keys in {
+        "messageID": ("messageID", "message_id", "messageId"),
+        "message_id": ("messageID", "message_id", "messageId"),
+        "messageId": ("messageID", "message_id", "messageId"),
+        "partID": ("partID", "part_id", "partId"),
+        "part_id": ("partID", "part_id", "partId"),
+        "partId": ("partID", "part_id", "partId"),
+        "permissionID": ("permissionID", "permission_id", "permissionId"),
+        "permission_id": ("permissionID", "permission_id", "permissionId"),
+        "permissionId": ("permissionID", "permission_id", "permissionId"),
+    }.items():
+        value = event.get(source_key) or data.get(source_key)
         if value:
-            payload[key] = str(value)
+            for target_key in target_keys:
+                payload[target_key] = str(value)
+
+    for key in ("message", "part", "permission"):
+        value = data.get(key) if isinstance(data.get(key), dict) else event.get(key)
+        if isinstance(value, dict):
+            payload[key] = safe_preview(value, 4000)
     return name, payload
 
 

@@ -85,6 +85,74 @@ async def test_send_idle_calls_prompt_async_with_normalized_body(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_send_passes_system_tools_and_no_reply_to_prompt_async(tmp_path, monkeypatch):
+    fake = SendClient(state="idle")
+    client, _app, conversation = await _setup(tmp_path, monkeypatch, fake)
+    try:
+        resp = await client.post(
+            f"/api/opencode/conversations/{conversation['id']}/send",
+            json={
+                "text": "hello",
+                "message_id": "msg_user_123",
+                "system": "Use the repo instructions.",
+                "tools": {"bash": False, "read": True},
+                "noReply": True,
+            },
+        )
+        body = await resp.json()
+
+        assert resp.status == 200
+        assert body["status"] == "accepted"
+        assert fake.prompt_async_calls[-1]["payload"] == {
+            "messageID": "msg_user_123",
+            "parts": [{"type": "text", "text": "hello"}],
+            "system": "Use the repo instructions.",
+            "tools": {"bash": False, "read": True},
+            "noReply": True,
+        }
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_send_no_reply_alias_passes_no_reply_to_prompt_async(tmp_path, monkeypatch):
+    fake = SendClient(state="idle")
+    client, _app, conversation = await _setup(tmp_path, monkeypatch, fake)
+    try:
+        resp = await client.post(
+            f"/api/opencode/conversations/{conversation['id']}/send",
+            json={"text": "hello", "no_reply": True},
+        )
+
+        assert resp.status == 200
+        assert fake.prompt_async_calls[-1]["payload"]["noReply"] is True
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_send_with_attachments_returns_400_without_prompt_async(tmp_path, monkeypatch):
+    fake = SendClient(state="idle")
+    client, _app, conversation = await _setup(tmp_path, monkeypatch, fake)
+    try:
+        resp = await client.post(
+            f"/api/opencode/conversations/{conversation['id']}/send",
+            json={
+                "text": "hello",
+                "attachments": [{"name": "context.txt", "content": "data"}],
+            },
+        )
+        body = await resp.json()
+
+        assert resp.status == 400
+        assert body["error"] == "attachments_unsupported_for_thin_send"
+        assert body["action_hint"] == "send_without_attachments_or_use_file_context"
+        assert fake.prompt_async_calls == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_send_busy_returns_opencode_session_busy_without_prompt_async(tmp_path, monkeypatch):
     fake = SendClient(state="busy")
     client, _app, conversation = await _setup(tmp_path, monkeypatch, fake)

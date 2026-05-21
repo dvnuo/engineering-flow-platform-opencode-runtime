@@ -15,6 +15,11 @@ async def _events():
     yield {"type": "message.part.delta", "data": {"sessionID": "other", "partID": "part-other"}}
 
 
+async def _iter(items):
+    for item in items:
+        yield item
+
+
 @pytest.mark.asyncio
 async def test_event_proxy_filters_session_and_normalizes_events():
     out = [
@@ -34,7 +39,111 @@ async def test_event_proxy_filters_session_and_normalizes_events():
     assert out[1][1]["conversation_id"] == "pc-1"
     assert out[1][1]["opencode_session_id"] == "ses-1"
     assert out[1][1]["messageID"] == "msg-1"
+    assert out[1][1]["message_id"] == "msg-1"
+    assert out[1][1]["messageId"] == "msg-1"
+    assert out[1][1]["raw"]["messageID"] == "msg-1"
     assert out[2][1]["partID"] == "part-1"
+    assert out[2][1]["part_id"] == "part-1"
+    assert out[2][1]["partId"] == "part-1"
+    assert out[2][1]["data"]["partID"] == "part-1"
+
+
+@pytest.mark.asyncio
+async def test_event_proxy_session_idle_sets_idle_status():
+    out = [
+        item
+        async for item in iter_filtered_events(
+            _iter([{"type": "session.idle", "sessionID": "ses-1"}]),
+            conversation_id="pc-1",
+            opencode_session_id="ses-1",
+        )
+    ]
+
+    assert out[0][0] == "opencode.session.status"
+    payload = out[0][1]
+    assert payload["status"] == "idle"
+    assert payload["active"] is False
+    assert payload["can_abort"] is False
+    assert payload["can_send"] is True
+    assert payload["action_hint"] == "safe_to_send"
+    assert payload["snapshot_required"] is True
+    assert payload["data"] == {}
+    assert payload["raw"]["type"] == "session.idle"
+
+
+@pytest.mark.asyncio
+async def test_event_proxy_status_event_sets_send_abort_hints():
+    out = [
+        item
+        async for item in iter_filtered_events(
+            _iter(
+                [
+                    {"type": "session.updated", "sessionID": "ses-1", "data": {"state": "busy"}},
+                    {"type": "session.updated", "sessionID": "ses-1", "data": {"state": "idle"}},
+                    {"type": "session.updated", "sessionID": "ses-1", "data": {"state": "unknown"}},
+                ]
+            ),
+            conversation_id="pc-1",
+            opencode_session_id="ses-1",
+        )
+    ]
+
+    assert out[0][1]["status"] == "busy"
+    assert out[0][1]["active"] is True
+    assert out[0][1]["can_abort"] is True
+    assert out[0][1]["can_send"] is False
+    assert out[0][1]["action_hint"] == "wait_or_stop"
+    assert out[1][1]["status"] == "idle"
+    assert out[1][1]["can_send"] is True
+    assert out[1][1]["action_hint"] == "safe_to_send"
+    assert out[2][1]["status"] == "unknown"
+    assert out[2][1]["can_send"] is False
+    assert out[2][1]["action_hint"] == "refresh_status"
+
+
+@pytest.mark.asyncio
+async def test_event_proxy_preserves_id_aliases_and_objects():
+    out = [
+        item
+        async for item in iter_filtered_events(
+            _iter(
+                [
+                    {
+                        "type": "message.updated",
+                        "sessionID": "ses-1",
+                        "messageID": "msg-1",
+                        "data": {"message": {"id": "msg-1", "role": "assistant"}},
+                    },
+                    {
+                        "type": "message.part.updated",
+                        "sessionID": "ses-1",
+                        "data": {"partID": "part-1", "part": {"id": "part-1", "type": "text"}},
+                    },
+                    {
+                        "type": "permission.requested",
+                        "sessionID": "ses-1",
+                        "permissionID": "perm-1",
+                        "data": {"permission": {"id": "perm-1", "tool": "bash"}},
+                    },
+                ]
+            ),
+            conversation_id="pc-1",
+            opencode_session_id="ses-1",
+        )
+    ]
+
+    assert out[0][1]["messageID"] == "msg-1"
+    assert out[0][1]["message_id"] == "msg-1"
+    assert out[0][1]["messageId"] == "msg-1"
+    assert out[0][1]["message"]["id"] == "msg-1"
+    assert out[1][1]["partID"] == "part-1"
+    assert out[1][1]["part_id"] == "part-1"
+    assert out[1][1]["partId"] == "part-1"
+    assert out[1][1]["part"]["id"] == "part-1"
+    assert out[2][1]["permissionID"] == "perm-1"
+    assert out[2][1]["permission_id"] == "perm-1"
+    assert out[2][1]["permissionId"] == "perm-1"
+    assert out[2][1]["permission"]["id"] == "perm-1"
 
 
 class EventStreamClient(FakeOpenCodeClient):

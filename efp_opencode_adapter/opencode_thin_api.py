@@ -233,6 +233,15 @@ async def send_conversation_handler(request: web.Request) -> web.Response:
     if binding is None:
         return _conversation_not_found()
     body = await read_json_object(request)
+    attachments = body.get("attachments")
+    if isinstance(attachments, list) and attachments:
+        return web.json_response(
+            error_payload(
+                "attachments_unsupported_for_thin_send",
+                action_hint="send_without_attachments_or_use_file_context",
+            ),
+            status=400,
+        )
     raw_status, status = await _status_for_session(_client(request), binding.opencode_session_id, include_children=False)
     if status["status"]["active"]:
         return web.json_response(
@@ -266,6 +275,12 @@ async def send_conversation_handler(request: web.Request) -> web.Response:
             prompt_body["model"] = model_ref
     if body.get("agent") is not None:
         prompt_body["agent"] = body.get("agent")
+    if isinstance(body.get("system"), str) and body.get("system").strip():
+        prompt_body["system"] = body.get("system")
+    if "tools" in body and isinstance(body.get("tools"), dict):
+        prompt_body["tools"] = body.get("tools")
+    if "noReply" in body or "no_reply" in body:
+        prompt_body["noReply"] = bool(body.get("noReply", body.get("no_reply")))
     try:
         await _client(request).prompt_async(binding.opencode_session_id, prompt_body)
     except OpenCodeClientError as exc:
