@@ -5,6 +5,7 @@ from copy import deepcopy
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+import efp_opencode_adapter.server as server_mod
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.sessions_api import _extract_opencode_session_id, _to_efp_messages
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
@@ -34,8 +35,30 @@ class _AbortableRunStateFakeOpenCodeClient(_RunStateFakeOpenCodeClient):
         return {"success": True, "supported": True, "aborted_session_ids": [session_id], "missing_session_ids": [], "errors": []}
 
 
+class _StickyAbortRunStateFakeOpenCodeClient(_RunStateFakeOpenCodeClient):
+    def __init__(self, *, state: str = "busy"):
+        super().__init__(state=state)
+        self.abort_session_tree_calls: list[str] = []
+
+    async def abort_session_tree(self, session_id):
+        self.abort_session_tree_calls.append(session_id)
+        return {"success": True, "supported": True, "aborted_session_ids": [session_id], "missing_session_ids": [], "errors": []}
+
+
+class _ChildActiveRunStateFakeOpenCodeClient(_RunStateFakeOpenCodeClient):
+    async def get_session_status(self):
+        return {"sessions": {"root": {"state": "idle"}, "child": {"state": "busy"}}}
+
+    async def list_session_children(self, session_id):
+        return [{"id": "child"}] if session_id == "root" else []
+
+
 def _role_content_pairs(messages):
     return [(message["role"], message["content"]) for message in messages]
+
+
+async def _fast_wait_until_opencode_inactive(client, opencode_session_id, **_kwargs):
+    return await server_mod.resolve_opencode_run_state(client, opencode_session_id)
 
 
 @pytest.mark.asyncio
@@ -382,6 +405,120 @@ async def test_session_abort_publishes_session_aborted_for_synthetic_run(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_session_abort_204_still_busy_force_detach_false_returns_conflict(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(server_mod, "_wait_until_opencode_inactive", _fast_wait_until_opencode_inactive)
+    fake = _StickyAbortRunStateFakeOpenCodeClient(state="busy")
+    fake.sessions["ses-still-busy"] = {"id": "ses-still-busy", "title": "Chat"}
+    fake.messages["ses-still-busy"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-still-busy",
+            opencode_session_id="ses-still-busy",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-still-busy", portal_session_id="portal-still-busy", opencode_session_id="ses-still-busy", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    response = await client.post("/api/sessions/portal-still-busy/abort", json={"force_detach": False})
+    payload = await response.json()
+
+    assert response.status == 409
+    assert payload["success"] is False
+    assert payload["error"] == "opencode_abort_still_active"
+    assert payload["active"] is True
+    assert payload["action_hint"] == "hard_reset_or_new_session"
+    assert app[CHAT_RUN_STORE_KEY].get("req-still-busy").status == "running"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_abort_204_still_busy_force_detach_rebinds_fresh_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(server_mod, "_wait_until_opencode_inactive", _fast_wait_until_opencode_inactive)
+    fake = _StickyAbortRunStateFakeOpenCodeClient(state="busy")
+    fake.sessions["ses-old-busy"] = {"id": "ses-old-busy", "title": "Chat"}
+    fake.messages["ses-old-busy"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-detach",
+            opencode_session_id="ses-old-busy",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=3,
+        )
+    )
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-detach", portal_session_id="portal-detach", opencode_session_id="ses-old-busy", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.post("/api/sessions/portal-detach/abort", json={"force_detach": True})).json()
+
+    assert payload["success"] is True
+    assert payload["detached_old_session"] is True
+    assert payload["old_opencode_session_id"] == "ses-old-busy"
+    assert payload["opencode_session_id"] != "ses-old-busy"
+    assert payload["active"] is False
+    assert payload["action_hint"] == "safe_to_send"
+    assert app[SESSION_STORE_KEY].get("portal-detach").opencode_session_id == payload["opencode_session_id"]
+    stale = app[CHAT_RUN_STORE_KEY].get("req-detach")
+    assert stale.status == "stale"
+    assert stale.incomplete_reason == "opencode_abort_still_active_detached"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_hard_reset_endpoint_rebinds_without_chat_run_store_active_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _StickyAbortRunStateFakeOpenCodeClient(state="busy")
+    fake.sessions["ses-hard-old"] = {"id": "ses-hard-old", "title": "Chat"}
+    fake.messages["ses-hard-old"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-hard-reset",
+            opencode_session_id="ses-hard-old",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=4,
+        )
+    )
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-hard", portal_session_id="portal-hard-reset", opencode_session_id="ses-hard-old", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.post("/api/sessions/portal-hard-reset/hard-reset")).json()
+
+    assert payload["success"] is True
+    assert payload["detached_old_session"] is True
+    assert payload["old_opencode_session_id"] == "ses-hard-old"
+    assert payload["opencode_session_id"] != "ses-hard-old"
+    assert payload["active"] is False
+    assert payload["action_hint"] == "safe_to_send"
+    assert app[SESSION_STORE_KEY].get("portal-hard-reset").opencode_session_id == payload["opencode_session_id"]
+    assert app[CHAT_RUN_STORE_KEY].get("req-hard").status == "stale"
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_session_status_and_active_run_consistent_for_synthetic_active_run(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     fake = _RunStateFakeOpenCodeClient(state="busy")
@@ -416,6 +553,147 @@ async def test_session_status_and_active_run_consistent_for_synthetic_active_run
     assert active_payload["active_run"]["opencode_active"] is True
     assert active_payload["run"] == active_payload["active_run"]
     assert active_payload["action_hint"] == "wait_reconnect_or_stop"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_active_run_opencode_idle_overrides_chat_run_store_running(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(state="idle")
+    fake.sessions["ses-idle-active-run"] = {"id": "ses-idle-active-run", "title": "Chat"}
+    fake.messages["ses-idle-active-run"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-idle-active-run",
+            opencode_session_id="ses-idle-active-run",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-stale", portal_session_id="portal-idle-active-run", opencode_session_id="ses-idle-active-run", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/portal-idle-active-run/active-run")).json()
+
+    assert payload["source_of_truth"] == "opencode"
+    assert payload["active"] is False
+    assert payload["active_run"] is None
+    assert payload["run"] is None
+    assert payload["action_hint"] == "safe_to_send"
+    assert payload["diagnostics"]["chat_run_store_stale_count"] == 1
+    assert app[CHAT_RUN_STORE_KEY].get("req-stale").status == "stale"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_active_run_opencode_busy_overrides_empty_chat_run_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(state="busy")
+    fake.sessions["ses-busy-active-run"] = {"id": "ses-busy-active-run", "title": "Chat"}
+    fake.messages["ses-busy-active-run"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-busy-active-run",
+            opencode_session_id="ses-busy-active-run",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/portal-busy-active-run/active-run")).json()
+
+    assert payload["source_of_truth"] == "opencode"
+    assert payload["active"] is True
+    assert payload["active_run"]["source_of_truth"] == "opencode"
+    assert payload["active_run"]["opencode_active"] is True
+    assert payload["active_run"]["can_abort"] is True
+    assert payload["action_hint"] == "wait_reconnect_or_stop"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_status_opencode_idle_overrides_chat_run_store_running(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RunStateFakeOpenCodeClient(state="idle")
+    fake.sessions["ses-idle-status"] = {"id": "ses-idle-status", "title": "Chat"}
+    fake.messages["ses-idle-status"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-idle-status",
+            opencode_session_id="ses-idle-status",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-status-stale", portal_session_id="portal-idle-status", opencode_session_id="ses-idle-status", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/portal-idle-status/status")).json()
+
+    assert payload["source_of_truth"] == "opencode"
+    assert payload["active"] is False
+    assert payload["can_abort"] is False
+    assert payload["status"]["type"] == "idle"
+    assert payload["active_run"] is None
+    assert payload["action_hint"] == "safe_to_send"
+    assert payload["diagnostics"]["chat_run_store_stale_count"] == 1
+    assert app[CHAT_RUN_STORE_KEY].get("req-status-stale").status == "stale"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_child_active_session_does_not_block_root_active_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _ChildActiveRunStateFakeOpenCodeClient()
+    fake.sessions["root"] = {"id": "root", "title": "Chat"}
+    fake.sessions["child"] = {"id": "child", "title": "Child"}
+    fake.messages["root"] = []
+    fake.messages["child"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-root",
+            opencode_session_id="root",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    payload = await (await client.get("/api/sessions/portal-root/active-run")).json()
+
+    assert payload["active"] is False
+    assert payload["reason"] == "active_child_session_non_blocking"
+    assert payload["active_child_sessions"] == ["child"]
+    assert payload["action_hint"] == "safe_to_send"
     await client.close()
 
 

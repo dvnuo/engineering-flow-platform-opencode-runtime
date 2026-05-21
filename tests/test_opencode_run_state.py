@@ -53,6 +53,7 @@ def test_opencode_status_active_uses_official_and_strict_values():
         {"type": "not-running"},
         {"status": {"type": "inactive"}},
         {"type": "idle"},
+        {"active": False},
     ]
 
     for status in active_statuses:

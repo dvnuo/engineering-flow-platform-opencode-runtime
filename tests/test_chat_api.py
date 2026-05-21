@@ -4,6 +4,7 @@ import asyncio
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+import efp_opencode_adapter.server as server_mod
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.opencode_client import OpenCodeClientError, OpenCodeTransportDisconnected, OpenCodeTransportTimeout
 from efp_opencode_adapter.opencode_process import OpenCodeProcessManager
@@ -12,6 +13,7 @@ from efp_opencode_adapter.app_keys import ATTACHMENT_SERVICE_KEY, CHAT_RUN_STORE
 from efp_opencode_adapter import chat_api
 from efp_opencode_adapter.chat_api import _consume_background_chat_task, _is_stream_relevant_event
 from efp_opencode_adapter.skill_invocation import SkillDecision
+from efp_opencode_adapter.session_store import SessionRecord
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -71,6 +73,23 @@ class _SlowChatClient(FakeOpenCodeClient):
         self.entered.set()
         await self.release.wait()
         return await super().send_message(session_id, parts=parts, model=model, agent=agent, system=system, message_id=message_id, no_reply=no_reply, tools=tools)
+
+
+class _RequestAbortStatusClient(FakeOpenCodeClient):
+    def __init__(self, *, state: str = "busy", abort_sets_idle: bool = True):
+        super().__init__()
+        self.state = state
+        self.abort_sets_idle = abort_sets_idle
+        self.abort_session_tree_calls: list[str] = []
+
+    async def get_session_status(self):
+        return {"sessions": {sid: {"state": self.state} for sid in self.sessions}}
+
+    async def abort_session_tree(self, session_id):
+        self.abort_session_tree_calls.append(session_id)
+        if self.abort_sets_idle:
+            self.state = "idle"
+        return {"success": True, "supported": True, "aborted_session_ids": [session_id], "missing_session_ids": [], "errors": []}
 
 
 class _SubmitTimeoutStillRunningClient(FakeOpenCodeClient):
@@ -284,6 +303,85 @@ async def test_active_chat_run_prevents_new_chat_same_session(tmp_path, monkeypa
         await first
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_abort_chat_run_handler_waits_for_post_abort_idle_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = _RequestAbortStatusClient(state="busy", abort_sets_idle=True)
+    fake.sessions["ses-run-abort"] = {"id": "ses-run-abort", "title": "Chat"}
+    fake.messages["ses-run-abort"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-run-abort",
+            opencode_session_id="ses-run-abort",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-run-abort", portal_session_id="portal-run-abort", opencode_session_id="ses-run-abort", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    response = await client.post("/api/chat/runs/req-run-abort/abort")
+    payload = await response.json()
+
+    assert response.status == 200
+    assert payload["source_of_truth"] == "opencode"
+    assert payload["success"] is True
+    assert payload["active"] is False
+    assert payload["action_hint"] == "safe_to_send"
+    assert payload["status"]["type"] == "idle"
+    assert app[CHAT_RUN_STORE_KEY].get("req-run-abort").status == "aborted"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_abort_chat_run_handler_returns_conflict_when_post_abort_still_busy(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+
+    async def _fast_wait(client, opencode_session_id, **_kwargs):
+        return await server_mod.resolve_opencode_run_state(client, opencode_session_id)
+
+    monkeypatch.setattr(server_mod, "_wait_until_opencode_inactive", _fast_wait)
+    fake = _RequestAbortStatusClient(state="busy", abort_sets_idle=False)
+    fake.sessions["ses-run-busy"] = {"id": "ses-run-busy", "title": "Chat"}
+    fake.messages["ses-run-busy"] = []
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            portal_session_id="portal-run-busy",
+            opencode_session_id="ses-run-busy",
+            title="Chat",
+            agent=None,
+            model=None,
+            created_at="2026-05-20T00:00:00Z",
+            updated_at="2026-05-20T00:00:00Z",
+            last_message="",
+            message_count=0,
+        )
+    )
+    app[CHAT_RUN_STORE_KEY].start_run(request_id="req-run-busy", portal_session_id="portal-run-busy", opencode_session_id="ses-run-busy", status="running")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    response = await client.post("/api/chat/runs/req-run-busy/abort")
+    payload = await response.json()
+
+    assert response.status == 409
+    assert payload["source_of_truth"] == "opencode"
+    assert payload["success"] is False
+    assert payload["error"] == "opencode_abort_still_active"
+    assert payload["active"] is True
+    assert payload["action_hint"] == "hard_reset_or_new_session"
+    assert app[CHAT_RUN_STORE_KEY].get("req-run-busy").status == "running"
+    await client.close()
 
 
 @pytest.mark.asyncio
