@@ -158,13 +158,6 @@ def normalize_canonical_messages(messages: list[dict[str, Any]]) -> list[dict[st
 
 
 def _is_internal_efp_message(message: Any) -> bool:
-    mid = _message_id(message)
-    if mid.startswith("efp-auto-continue-"):
-        return True
-    for part in _message_parts(message):
-        metadata = part.get("metadata")
-        if isinstance(metadata, dict) and metadata.get("efp_internal") == "auto_continue":
-            return True
     return False
 
 
