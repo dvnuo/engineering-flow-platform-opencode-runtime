@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import inspect
 import json
 import logging
 import re
@@ -11,80 +8,42 @@ from typing import Any, Iterable
 from uuid import uuid4
 
 from aiohttp import web
+
 from .app_keys import (
     ATTACHMENT_SERVICE_KEY,
-    CHAT_RUN_STORE_KEY,
     CHATLOG_STORE_KEY,
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
-    OPENCODE_PROCESS_MANAGER_KEY,
     PORTAL_METADATA_CLIENT_KEY,
     SETTINGS_KEY,
     SESSION_STORE_KEY,
-    TASK_BACKGROUND_TASKS_KEY,
     USAGE_TRACKER_KEY,
-    REQUEST_BINDING_STORE_KEY,
     USER_DISPLAY_STORE_KEY,
 )
-
-from .opencode_client import OpenCodeClientError, OpenCodeTransportDisconnected, OpenCodeTransportTimeout
-from .chat_run_validation import validate_chat_run_against_opencode
 from .attachment_service import build_opencode_attachment_parts
-from .session_store import SessionDeletedError, SessionRecord
-from .thinking_events import (
-    assistant_delta_event,
-    chat_complete_event,
-    chat_completed_compat_event,
-    chat_failed_event,
-    chat_started_event,
-    llm_thinking_event,
-    safe_preview,
-    utc_now_iso,
-)
-from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
+from .opencode_client import OpenCodeClientError
 from .opencode_config import normalize_opencode_provider_id
-from .opencode_ids import is_opencode_message_id, new_opencode_message_id
+from .opencode_ids import is_opencode_message_id, new_opencode_message_id, require_opencode_message_id
 from .opencode_message_adapter import (
-    extract_last_assistant_visible_text,
-    find_latest_assistant_completion,
     extract_assistant_message_ids,
+    extract_last_assistant_visible_text,
     extract_reasoning_texts_from_parts,
     message_id as adapter_message_id,
     message_role as adapter_message_role,
 )
-from .skill_invocation import build_skill_prompt, evaluate_skill_invocation, parse_slash_invocation
 from .repository_workspace import ensure_repo_checkout, parse_create_pr_repo_request
+from .session_store import SessionDeletedError, SessionRecord
+from .skill_invocation import build_skill_prompt, evaluate_skill_invocation, parse_slash_invocation
+from .thinking_events import safe_preview, utc_now_iso
+from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
 
-
-def _send_message_accepts_message_id(client: Any) -> bool:
-    try:
-        sig = inspect.signature(client.send_message)
-    except (TypeError, ValueError):
-        return True
-    return "message_id" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-
-
-async def _send_message(client: Any, session_id: str, *, parts: list[dict[str, Any]], model: str | None, agent: str | None, system: str | None, message_id: str | None = None) -> Any:
-    kwargs: dict[str, Any] = {"parts": parts, "model": model, "agent": agent, "system": system}
-    if hasattr(client, "prompt_async") and callable(getattr(client, "prompt_async")):
-        payload: dict[str, Any] = {"parts": parts}
-        if message_id:
-            payload["messageID"] = message_id
-        if model:
-            payload["model"] = model
-        if agent:
-            payload["agent"] = agent
-        if system:
-            payload["system"] = system
-        result = await client.prompt_async(session_id, payload)
-        return {"prompt_async": True, "result": result}
-    if message_id and _send_message_accepts_message_id(client):
-        kwargs["message_id"] = message_id
-    return await client.send_message(session_id, **kwargs)
 
 logger = logging.getLogger(__name__)
 
-FINAL_RESPONSE_CONTRACT_SUFFIX = "\n\nRuntime contract: Never end a user-visible answer with only progress text. If work is complete, provide a final answer with summary and evidence. If blocked, state the exact blocker. If more tool work is needed, continue tool work instead of returning a progress-only final."
+FINAL_RESPONSE_CONTRACT_SUFFIX = (
+    "\n\nRuntime contract: Return the final visible answer for this request. "
+    "If blocked, state the exact blocker."
+)
 
 DATA_URL_RE = re.compile(r"data:[A-Za-z0-9.+/_-]+(?:;[A-Za-z0-9.+/_=-]+)*;base64,[A-Za-z0-9+/=]+")
 
@@ -138,7 +97,7 @@ def _model_from_chat_payload(payload: dict[str, Any], metadata: dict[str, Any], 
 
 def _extract_session_id(payload: Any) -> str:
     if isinstance(payload, dict):
-        for key in ("id", "session_id", "uuid"):
+        for key in ("id", "session_id", "sessionID", "uuid"):
             if payload.get(key):
                 return str(payload[key])
     return ""
@@ -168,19 +127,29 @@ def _request_id_from_payload(payload: dict[str, Any]) -> str:
     return _optional_nonempty_string_from_payload(payload, "request_id", generated=f"chat-{uuid4()}", error="request_id_must_be_string")
 
 
+def _requested_message_id(payload: dict[str, Any]) -> str:
+    value = payload.get("message_id") if payload.get("message_id") is not None else payload.get("opencode_message_id")
+    if value is None or value == "":
+        return new_opencode_message_id()
+    try:
+        return require_opencode_message_id(value, field="message_id")
+    except ValueError as exc:
+        raise _bad_request(str(exc))
+
+
 def _detect_new_message_ids(before_messages: list[dict[str, Any]], after_messages: list[dict[str, Any]]) -> tuple[str, str]:
     before_ids = {adapter_message_id(message) for message in before_messages if adapter_message_id(message)}
     user_message_id = ""
     assistant_message_id = ""
     for message in after_messages:
-        message_id = adapter_message_id(message)
-        if not message_id or message_id in before_ids:
+        current_id = adapter_message_id(message)
+        if not current_id or current_id in before_ids:
             continue
         role = adapter_message_role(message).lower()
         if role == "user":
-            user_message_id = message_id
+            user_message_id = current_id
         elif role == "assistant":
-            assistant_message_id = message_id
+            assistant_message_id = current_id
     return user_message_id, assistant_message_id
 
 
@@ -190,1067 +159,6 @@ def _append_unique_message_ids(target: list[str], candidates: Iterable[str]) -> 
         if candidate and candidate not in seen:
             target.append(candidate)
             seen.add(candidate)
-
-
-def _is_chat_mutation_path(metadata: dict[str, Any]) -> bool:
-    return bool(metadata.get("edit") or metadata.get("retry") or metadata.get("source") == "message_edit_async")
-
-
-def _chat_run_public(chat_run_store: Any | None, record: Any | None) -> dict[str, Any] | None:
-    if chat_run_store is None or record is None or not hasattr(chat_run_store, "to_public_dict"):
-        return None
-    return chat_run_store.to_public_dict(record)
-
-
-def _chat_run_already_active_payload(*, session_id: str, request_id: str, active_run: dict[str, Any]) -> dict[str, Any]:
-    public = dict(active_run or {})
-    public.setdefault("source_of_truth", "opencode")
-    public.setdefault("opencode_active", True)
-    public.setdefault("can_abort", True)
-    public.setdefault("action_hint", "wait_reconnect_or_stop")
-    return {
-        "success": False,
-        "engine": "opencode",
-        "error": "chat_run_already_active",
-        "detail": "chat_run_already_active",
-        "session_id": session_id,
-        "request_id": request_id,
-        "active_run": public,
-        "action_hint": "wait_reconnect_or_stop",
-        "can_abort": bool(public.get("can_abort", True)),
-        "user_message": "A previous OpenCode run is still active. Wait for it to finish or use Stop run.",
-    }
-
-
-async def _publish_run_lifecycle_event(
-    *,
-    chat_run_store: Any | None,
-    runtime_events: list[dict[str, Any]],
-    bus,
-    trace_context: dict[str, str],
-    event_type: str,
-    session_id: str,
-    request_id: str,
-    opencode_session_id: str,
-    state: str,
-    data: dict[str, Any] | None = None,
-    summary: str = "",
-) -> dict[str, Any]:
-    payload = {
-        "type": event_type,
-        "event_type": event_type,
-        "engine": "opencode",
-        "session_id": session_id,
-        "request_id": request_id,
-        "opencode_session_id": opencode_session_id,
-        "state": state,
-        "summary": safe_preview(summary or event_type, 500),
-        "data": safe_preview(data or {}, 1000),
-        "created_at": utc_now_iso(),
-        "ts": time.time(),
-    }
-    event = add_trace_context(payload, trace_context)
-    runtime_events.append(event)
-    await bus.publish(event)
-    if chat_run_store is not None and hasattr(chat_run_store, "update_from_runtime_event"):
-        try:
-            chat_run_store.update_from_runtime_event(request_id, event)
-        except Exception:
-            logger.warning("failed to update chat run from lifecycle event", exc_info=True)
-    return event
-
-
-async def _publish_assistant_message_event(
-    *,
-    chat_run_store: Any | None,
-    runtime_events: list[dict[str, Any]],
-    bus,
-    trace_context: dict[str, str],
-    event_type: str,
-    session_id: str,
-    request_id: str,
-    opencode_session_id: str,
-    assistant_message_id: str = "",
-    assistant_message_ids: list[str] | None = None,
-    text: str = "",
-    delta: str = "",
-    display_blocks: list[Any] | None = None,
-    state: str = "running",
-) -> dict[str, Any]:
-    data = {
-        "request_id": request_id,
-        "session_id": session_id,
-        "assistant_message_id": assistant_message_id,
-        "assistant_message_ids": assistant_message_ids or ([] if not assistant_message_id else [assistant_message_id]),
-        "delta": safe_preview(delta, 1000) if delta else "",
-        "text": safe_preview(text, 12000) if text else "",
-        "display_blocks": safe_preview(display_blocks or [], 4000),
-    }
-    payload = {
-        "type": event_type,
-        "event_type": event_type,
-        "engine": "opencode",
-        "session_id": session_id,
-        "request_id": request_id,
-        "opencode_session_id": opencode_session_id,
-        "assistant_message_id": assistant_message_id,
-        "state": state,
-        "summary": safe_preview(text or delta or event_type, 500),
-        "data": data,
-        "created_at": utc_now_iso(),
-        "ts": time.time(),
-    }
-    event = add_trace_context(payload, trace_context)
-    runtime_events.append(event)
-    await bus.publish(event)
-    if chat_run_store is not None and hasattr(chat_run_store, "update_from_runtime_event"):
-        try:
-            chat_run_store.update_from_runtime_event(request_id, event)
-        except Exception:
-            logger.warning("failed to update chat run from assistant message event", exc_info=True)
-    return event
-
-
-
-
-def extract_assistant_text(payload: Any) -> str:
-    return extract_last_assistant_visible_text(payload)
-
-
-async def _wait_for_assistant_completion(*, client, opencode_session_id: str, response_payload: Any, before_messages: list[dict[str, Any]], timeout_seconds: float, poll_seconds: float, before_snapshot_unreliable: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    before_ids = {adapter_message_id(m) for m in before_messages if adapter_message_id(m)}
-    probe = find_latest_assistant_completion(response_payload, exclude_message_ids=before_ids)
-    if probe.get("completion_state") in {"completed", "empty_final"}:
-        return probe, []
-    if probe.get("completion_state") in {"error", "failed"}:
-        return probe, []
-    if before_snapshot_unreliable:
-        return {
-            "text": "",
-            "message_id": str(probe.get("message_id") or ""),
-            "completion_state": "incomplete",
-            "reason": "before_snapshot_unreliable",
-            "diagnostics": {"before_snapshot_unreliable": True, "initial_probe": probe},
-        }, []
-
-    loop = asyncio.get_running_loop()
-    timeout = max(0.0, float(timeout_seconds))
-    sleep_for = max(0.1, float(poll_seconds))
-    deadline = loop.time() + timeout
-    after_messages: list[dict[str, Any]] = []
-    last_probe = probe
-
-    while True:
-        after_messages = await client.list_messages(opencode_session_id)
-        last_probe = find_latest_assistant_completion(after_messages, exclude_message_ids=before_ids)
-        if before_snapshot_unreliable and last_probe.get("completion_state") == "completed":
-            last_probe = {
-                "text": "",
-                "message_id": "",
-                "completion_state": "incomplete",
-                "reason": "before_snapshot_unreliable",
-                "diagnostics": {"before_snapshot_unreliable": True},
-            }
-
-        if last_probe.get("completion_state") in {"completed", "error", "blocked", "empty_final"}:
-            return last_probe, after_messages
-
-        if loop.time() >= deadline:
-            diagnostics = last_probe.get("diagnostics") if isinstance(last_probe.get("diagnostics"), dict) else {}
-            preview = diagnostics.get("text") if isinstance(diagnostics.get("text"), str) else ""
-            return {"text": "", "message_id": last_probe.get("message_id", ""), "completion_state": "incomplete", "reason": "final_assistant_message_timeout", "diagnostics": {**diagnostics, "progress_preview": safe_preview(preview, 300), "timeout_seconds": timeout, "poll_seconds": sleep_for}}, after_messages
-
-        await asyncio.sleep(sleep_for)
-
-
-async def _send_skill_prompt(
-    *,
-    client,
-    record,
-    parts: list[dict[str, Any]],
-    skill_decision,
-    invocation,
-    model: str | None,
-    agent: str | None,
-    system: str | None,
-    skill_debug: dict[str, Any],
-    runtime_events: list[dict[str, Any]],
-    bus,
-    trace_context: dict[str, str],
-    portal_session_id: str,
-    request_id: str,
-    command_error: str | None = None,
-    repository_context: Any | None = None,
-    user_message_id: str | None = None,
-) -> Any:
-    prompt = build_skill_prompt(skill_decision.skill or {}, invocation)
-    if repository_context is not None:
-        prompt += (
-            f"\n\nRepository has been prepared at: {repository_context.path}\n"
-            "All local git inspection commands must run from that directory\n"
-            f"Use base branch: {repository_context.base_branch}\n"
-            f"Use head branch: {repository_context.head_branch}\n"
-            "Do not run git inspection from /workspace unless /workspace/.git exists"
-        )
-    part_metadata = parts[0].get("metadata") if isinstance(parts[0].get("metadata"), dict) else {}
-    parts[0] = {
-        **parts[0],
-        "type": "text",
-        "text": prompt,
-        "synthetic": True,
-        "metadata": {
-            **part_metadata,
-            "efp_internal": "skill_prompt",
-            "portal_request_id": request_id,
-            "original_user_message_hidden": True,
-        },
-    }
-    skill_debug["used_skill_prompt"] = True
-    if command_error:
-        skill_debug["command_execution_error"] = command_error
-    response_payload = await _send_message(
-        client,
-        record.opencode_session_id,
-        parts=parts,
-        model=model,
-        agent=agent,
-        system=system,
-        message_id=user_message_id,
-    )
-    prompt_data = {
-        "skill": skill_decision.skill.get("opencode_name") if skill_decision.skill else invocation.skill_name
-    }
-    if skill_debug.get("command_lookup_error"):
-        prompt_data["command_lookup_error"] = skill_debug["command_lookup_error"]
-    if skill_debug.get("command_execution_error"):
-        prompt_data["command_execution_error"] = skill_debug["command_execution_error"]
-    prompt_evt = add_trace_context(
-        {
-            "type": "skill.prompt_applied",
-            "session_id": portal_session_id,
-            "request_id": request_id,
-            "opencode_session_id": record.opencode_session_id,
-            "data": prompt_data,
-        },
-        trace_context,
-    )
-    runtime_events.append(prompt_evt)
-    await bus.publish(prompt_evt)
-    return response_payload
-
-
-def _redact_attachment_payloads_for_debug(value: Any) -> Any:
-    if isinstance(value, dict):
-        out = {}
-        for key, item in value.items():
-            if key == "url" and isinstance(item, str) and item.startswith("data:"):
-                out[key] = "data:<redacted>"
-            else:
-                out[key] = _redact_attachment_payloads_for_debug(item)
-        return out
-    if isinstance(value, list):
-        return [_redact_attachment_payloads_for_debug(item) for item in value]
-    if isinstance(value, str):
-        return DATA_URL_RE.sub("data:<redacted>;base64,<redacted>", value)
-    return value
-
-
-def _completion_progress_signature(probe: dict[str, Any], assistant_text: str, after_messages: list[dict[str, Any]] | None) -> tuple[str, str, int]:
-    message_id = str(probe.get("message_id") or "")
-    text_preview = safe_preview(assistant_text or "", 120)
-    msg_count = len(after_messages or [])
-    return (message_id, text_preview, msg_count)
-
-
-def _signature_hash(signature: tuple[str, str, int]) -> str:
-    return hashlib.sha256(json.dumps(signature, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
-
-
-def _remaining_seconds(deadline: float, *, minimum: float = 0.0) -> float:
-    return max(minimum, deadline - asyncio.get_running_loop().time())
-
-
-def _deadline_expired(deadline: float) -> bool:
-    return asyncio.get_running_loop().time() >= deadline
-
-
-CHAT_PROGRESS_EVENT_TYPES = {
-    "assistant_delta",
-    "message.delta",
-    "llm_thinking",
-    "tool.started",
-    "tool.completed",
-    "tool.failed",
-    "permission_request",
-    "permission_resolved",
-    "provider.retry",
-    "chat.timeout_recovery.poll",
-    "chat.timeout_recovery.recovered",
-    "chat.transport_recovery.poll",
-    "chat.transport_recovery.recovered",
-    "continuation.completed",
-}
-
-SESSION_LEVEL_PROGRESS_EVENT_TYPES = {
-    "event_bridge.connected",
-    "event_bridge.disconnected",
-    "event_bridge.reconnected",
-    "chat.timeout_recovery.poll",
-    "chat.timeout_recovery.recovered",
-    "chat.timeout_recovery.exhausted",
-    "chat.transport_recovery.poll",
-    "chat.transport_recovery.recovered",
-    "chat.transport_recovery.exhausted",
-}
-
-
-def _should_mark_progress(event_type: str, data: dict[str, Any] | None = None) -> bool:
-    metadata = (data or {}).get("metadata") if isinstance((data or {}).get("metadata"), dict) else {}
-    if event_type == "continuation.completed":
-        return bool((data or {}).get("changed_signature") or metadata.get("changed_signature"))
-    return (
-        event_type in CHAT_PROGRESS_EVENT_TYPES
-        or event_type.startswith("tool.")
-        or event_type.startswith("permission")
-        or event_type.startswith("provider.retry")
-    )
-
-
-def _touch_progress(progress_state: dict[str, Any] | None, *, event_type: str, data: dict[str, Any] | None = None) -> None:
-    if progress_state is not None and _should_mark_progress(event_type, data):
-        progress_state["last_progress_at"] = asyncio.get_running_loop().time()
-        progress_state["last_event_type"] = event_type
-        progress_state["count"] = int(progress_state.get("count") or 0) + 1
-
-
-def _binding_matches_request(
-    event: dict[str, Any],
-    data: dict[str, Any],
-    *,
-    request_id: str,
-    binding_store: Any | None = None,
-    opencode_session_id: str = "",
-    request_id_candidate: str = "",
-    include_completed_binding: bool = False,
-) -> bool:
-    if binding_store is None or not opencode_session_id or not hasattr(binding_store, "resolve_exact"):
-        return False
-    message_candidates = [
-        request_id_candidate,
-        event.get("message_id"),
-        event.get("messageID"),
-        event.get("messageId"),
-        event.get("opencode_message_id"),
-        data.get("message_id"),
-        data.get("messageID"),
-        data.get("messageId"),
-        data.get("opencode_message_id"),
-    ]
-    task_candidates = [event.get("task_id"), data.get("task_id")]
-    for candidate in message_candidates:
-        if not candidate:
-            continue
-        binding = binding_store.resolve_exact(opencode_session_id, message_id=str(candidate), include_completed=include_completed_binding)
-        if binding is not None:
-            return binding.request_id == request_id
-    for candidate in task_candidates:
-        if not candidate:
-            continue
-        binding = binding_store.resolve_exact(opencode_session_id, task_id=str(candidate), include_completed=include_completed_binding)
-        if binding is not None:
-            return binding.request_id == request_id
-    return False
-
-
-def _event_belongs_to_chat(event: dict[str, Any], *, session_id: str, request_id: str, binding_store: Any | None = None, opencode_session_id: str = "") -> bool:
-    data = event.get("data") if isinstance(event.get("data"), dict) else {}
-    event_type = str(event.get("type") or event.get("event_type") or "")
-    event_session_id = event.get("session_id") or event.get("portal_session_id") or data.get("session_id")
-    if not event_session_id or str(event_session_id) != session_id:
-        return False
-    event_portal_request_id = event.get("portal_request_id") or data.get("portal_request_id")
-    if event_portal_request_id:
-        return str(event_portal_request_id) == request_id
-    event_request_id = event.get("request_id") or data.get("request_id")
-    if not event_request_id:
-        return event_type in SESSION_LEVEL_PROGRESS_EVENT_TYPES
-    if str(event_request_id) == request_id:
-        return True
-    # Raw OpenCode IDs are not portal request IDs. Only accept them when an exact
-    # request binding proves the message/task belongs to this portal request.
-    return _binding_matches_request(
-        event,
-        data,
-        request_id=request_id,
-        binding_store=binding_store,
-        opencode_session_id=opencode_session_id or str(event.get("opencode_session_id") or data.get("opencode_session_id") or ""),
-        request_id_candidate=str(event_request_id),
-    )
-
-
-def _drain_progress_events(sub: Any, *, session_id: str, request_id: str, progress_state: dict[str, Any], binding_store: Any | None = None, opencode_session_id: str = "") -> None:
-    if sub is None:
-        return
-    while True:
-        try:
-            event = sub.queue.get_nowait()
-        except asyncio.QueueEmpty:
-            return
-        if not isinstance(event, dict) or not _event_belongs_to_chat(event, session_id=session_id, request_id=request_id, binding_store=binding_store, opencode_session_id=opencode_session_id):
-            continue
-        event_type = str(event.get("type") or event.get("event_type") or "")
-        data = event.get("data") if isinstance(event.get("data"), dict) else {}
-        _touch_progress(progress_state, event_type=event_type, data=data)
-
-
-async def _publish_chat_runtime_event(
-    *,
-    runtime_events: list[dict[str, Any]],
-    bus,
-    trace_context: dict[str, str],
-    event_type: str,
-    session_id: str,
-    request_id: str,
-    opencode_session_id: str,
-    state: str = "running",
-    summary: str = "",
-    data: dict[str, Any] | None = None,
-    metadata: dict[str, Any] | None = None,
-    progress_state: dict[str, Any] | None = None,
-    chat_run_store: Any | None = None,
-) -> dict[str, Any]:
-    safe_metadata = safe_preview(metadata or {}, 1000)
-    if not isinstance(safe_metadata, dict):
-        safe_metadata = {}
-    payload = {
-        "type": event_type,
-        "event_type": event_type,
-        "engine": "opencode",
-        "session_id": session_id,
-        "request_id": request_id,
-        "opencode_session_id": opencode_session_id,
-        "state": state,
-        "summary": safe_preview(summary or event_type, 500),
-        "data": safe_preview(data or {}, 1000),
-        "metadata": safe_metadata,
-        "created_at": utc_now_iso(),
-        "ts": time.time(),
-    }
-    event = add_trace_context(payload, trace_context)
-    runtime_events.append(event)
-    await bus.publish(event)
-    if chat_run_store is not None and hasattr(chat_run_store, "update_from_runtime_event"):
-        try:
-            chat_run_store.update_from_runtime_event(request_id, event)
-        except Exception:
-            logger.warning("failed to update chat run from runtime event", exc_info=True)
-    _touch_progress(progress_state, event_type=event_type, data=payload["data"] if isinstance(payload["data"], dict) else {})
-    return event
-
-
-async def _publish_continuation_event(
-    *,
-    runtime_events: list[dict[str, Any]],
-    bus,
-    trace_context: dict[str, str],
-    chatlog_store: Any | None,
-    opencode_session_id: str,
-    event_type: str,
-    request_id: str,
-    session_id: str,
-    chatlog_id: str | None,
-    turn_index: int,
-    chat_run_store: Any | None = None,
-    message_id: str | None = None,
-    reason: str | None = None,
-    state: str | None = None,
-    summary: str | None = None,
-    metadata: dict[str, Any] | None = None,
-    progress_state: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    safe_metadata = safe_preview(metadata or {}, 1000)
-    if not isinstance(safe_metadata, dict):
-        safe_metadata = {}
-    created_at = utc_now_iso()
-    payload = {
-        "type": event_type,
-        "event_type": event_type,
-        "engine": "opencode",
-        "session_id": session_id,
-        "request_id": request_id,
-        "opencode_session_id": opencode_session_id,
-        "turn_index": turn_index,
-        "message_id": message_id or "",
-        "reason": reason or "",
-        "state": state or "running",
-        "summary": safe_preview(summary or event_type, 500),
-        "metadata": safe_metadata,
-        "data": {
-            **safe_metadata,
-            "event_type": event_type,
-            "request_id": request_id,
-            "session_id": session_id,
-            "turn_index": turn_index,
-            "message_id": message_id or "",
-            "reason": reason or "",
-            "state": state or "running",
-            "created_at": created_at,
-            "metadata": safe_metadata,
-        },
-        "created_at": created_at,
-        "ts": time.time(),
-    }
-    event = add_trace_context(payload, trace_context)
-    runtime_events.append(event)
-    await bus.publish(event)
-    if chat_run_store is not None and hasattr(chat_run_store, "update_from_runtime_event"):
-        try:
-            chat_run_store.update_from_runtime_event(request_id, event)
-        except Exception:
-            logger.warning("failed to update chat run from continuation event", exc_info=True)
-    if chatlog_store is not None:
-        try:
-            chatlog_store.append_event(session_id, request_id=chatlog_id or request_id, event=event, runtime=True)
-        except Exception:
-            pass
-    _touch_progress(progress_state, event_type=event_type, data=safe_metadata)
-    return event
-
-
-def _status_snapshot_for_session(status_payload: Any, opencode_session_id: str) -> dict[str, Any]:
-    if not isinstance(status_payload, dict):
-        return {"raw": safe_preview(status_payload, 500)}
-    candidates = [
-        status_payload.get(opencode_session_id),
-        (status_payload.get("sessions") or {}).get(opencode_session_id) if isinstance(status_payload.get("sessions"), dict) else None,
-        (status_payload.get("data") or {}).get(opencode_session_id) if isinstance(status_payload.get("data"), dict) else None,
-    ]
-    for candidate in candidates:
-        if isinstance(candidate, dict):
-            return candidate
-        if isinstance(candidate, str):
-            return {"state": candidate}
-    return status_payload
-
-
-def _status_indicates_running(snapshot: dict[str, Any]) -> bool:
-    raw_values: list[str] = []
-    for key in ("state", "status", "phase", "type"):
-        value = snapshot.get(key)
-        if isinstance(value, str):
-            raw_values.append(value.lower())
-    nested_status = snapshot.get("status")
-    if isinstance(nested_status, dict):
-        for key in ("state", "status", "phase", "type"):
-            value = nested_status.get(key)
-            if isinstance(value, str):
-                raw_values.append(value.lower())
-    return any(value in {"running", "busy", "working", "pending", "queued", "retry"} for value in raw_values)
-
-
-async def _list_session_messages_for_recovery(client: Any, opencode_session_id: str) -> list[dict[str, Any]]:
-    if hasattr(client, "get_session_messages"):
-        return await client.get_session_messages(opencode_session_id)
-    return await client.list_messages(opencode_session_id)
-
-
-async def _recover_after_submit_timeout(
-    *,
-    client: Any,
-    opencode_session_id: str,
-    portal_session_id: str,
-    request_id: str,
-    timeout_exc: OpenCodeTransportTimeout,
-    settings,
-    runtime_events: list[dict[str, Any]],
-    bus,
-    trace_context: dict[str, str],
-    before_assistant_message_ids: set[str],
-    before_snapshot_unreliable: bool,
-    wall_deadline: float,
-    chat_run_store: Any | None = None,
-) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
-    await _publish_chat_runtime_event(
-        runtime_events=runtime_events,
-        bus=bus,
-        trace_context=trace_context,
-        chat_run_store=chat_run_store,
-        event_type="chat.timeout_recovery.started",
-        session_id=portal_session_id,
-        request_id=request_id,
-        opencode_session_id=opencode_session_id,
-        summary="OpenCode message request timed out; checking whether the session is still running.",
-        data={
-            "session_id": portal_session_id,
-            "request_id": request_id,
-            "opencode_session_id": opencode_session_id,
-            "method": timeout_exc.method,
-            "path": timeout_exc.path,
-            "timeout_seconds": timeout_exc.timeout_seconds,
-        },
-    )
-    loop = asyncio.get_running_loop()
-    recovery_deadline = min(loop.time() + float(settings.chat_timeout_recovery_max_seconds), wall_deadline)
-    poll_seconds = max(0.001, float(settings.chat_timeout_recovery_poll_seconds))
-    exclude_ids = set() if before_snapshot_unreliable else set(before_assistant_message_ids)
-    last_probe: dict[str, Any] = {
-        "text": "",
-        "message_id": "",
-        "completion_state": "incomplete",
-        "reason": "submit_timeout_recovery_started",
-        "diagnostics": {"timeout_seconds": timeout_exc.timeout_seconds},
-    }
-    last_messages: list[dict[str, Any]] = []
-    polls = 0
-
-    while True:
-        polls += 1
-        status_payload: Any = None
-        status_error = ""
-        status_snapshot: dict[str, Any] = {}
-        if hasattr(client, "get_session_status"):
-            try:
-                status_payload = await client.get_session_status(timeout_seconds=30)
-                status_snapshot = _status_snapshot_for_session(status_payload, opencode_session_id)
-            except Exception as exc:
-                status_error = safe_preview(str(exc), 300)
-        messages_error = ""
-        try:
-            last_messages = await _list_session_messages_for_recovery(client, opencode_session_id)
-            last_probe = find_latest_assistant_completion(last_messages, exclude_message_ids=exclude_ids)
-        except Exception as exc:
-            messages_error = safe_preview(str(exc), 300)
-
-        state = str(last_probe.get("completion_state") or "incomplete")
-        if state in {"completed", "error", "blocked", "empty_final"}:
-            await _publish_chat_runtime_event(
-                runtime_events=runtime_events,
-                bus=bus,
-                trace_context=trace_context,
-                chat_run_store=chat_run_store,
-                event_type="chat.timeout_recovery.recovered",
-                session_id=portal_session_id,
-                request_id=request_id,
-                opencode_session_id=opencode_session_id,
-                state="success" if state == "completed" else state,
-                summary="OpenCode session produced a result after the submit timeout.",
-                data={
-                    "polls": polls,
-                    "completion_state": state,
-                    "reason": last_probe.get("reason"),
-                    "message_count": len(last_messages),
-                },
-            )
-            return last_probe, last_messages, {"recovered": True, "polls": polls, "status": status_snapshot}
-
-        running = _status_indicates_running(status_snapshot)
-        await _publish_chat_runtime_event(
-            runtime_events=runtime_events,
-            bus=bus,
-            trace_context=trace_context,
-            chat_run_store=chat_run_store,
-            event_type="chat.timeout_recovery.poll",
-            session_id=portal_session_id,
-            request_id=request_id,
-            opencode_session_id=opencode_session_id,
-            summary="Polling OpenCode session after submit timeout.",
-            data={
-                "poll": polls,
-                "running": running,
-                "completion_state": state,
-                "reason": last_probe.get("reason"),
-                "message_count": len(last_messages),
-                "status": safe_preview(status_snapshot, 500),
-                "status_error": status_error,
-                "messages_error": messages_error,
-            },
-        )
-
-        if loop.time() >= recovery_deadline:
-            reason = "wall_timeout" if _deadline_expired(wall_deadline) else "submit_timeout_recovery_exhausted"
-            exhausted_probe = {
-                "text": str(last_probe.get("text") or ""),
-                "message_id": str(last_probe.get("message_id") or ""),
-                "completion_state": "incomplete",
-                "reason": reason,
-                "diagnostics": {
-                    "polls": polls,
-                    "timeout_seconds": timeout_exc.timeout_seconds,
-                    "recovery_max_seconds": settings.chat_timeout_recovery_max_seconds,
-                    "opencode_may_still_be_running": running,
-                    "last_probe": safe_preview(last_probe, 1000),
-                    "status": safe_preview(status_snapshot, 500),
-                },
-            }
-            await _publish_chat_runtime_event(
-                runtime_events=runtime_events,
-                bus=bus,
-                trace_context=trace_context,
-                chat_run_store=chat_run_store,
-                event_type="chat.timeout_recovery.exhausted",
-                session_id=portal_session_id,
-                request_id=request_id,
-                opencode_session_id=opencode_session_id,
-                state="incomplete",
-                summary="OpenCode submit timeout recovery exhausted before a final result was visible.",
-                data=exhausted_probe["diagnostics"],
-            )
-            return exhausted_probe, last_messages, {"recovered": False, "polls": polls, "status": status_snapshot, "reason": reason}
-
-        await asyncio.sleep(min(poll_seconds, max(0.001, recovery_deadline - loop.time())))
-
-
-def _transport_error_payload(transport_exc: OpenCodeTransportDisconnected) -> dict[str, Any]:
-    raw_payload = transport_exc.payload if isinstance(transport_exc.payload, dict) else {}
-    return {
-        "exception_type": str(raw_payload.get("exception_type") or transport_exc.exception_type or type(transport_exc).__name__),
-        "method": str(raw_payload.get("method") or transport_exc.method or ""),
-        "path": str(raw_payload.get("path") or transport_exc.path or ""),
-        "recoverable": True,
-    }
-
-
-async def _recover_after_submit_transport_error(
-    *,
-    client: Any,
-    opencode_session_id: str,
-    portal_session_id: str,
-    request_id: str,
-    transport_exc: OpenCodeTransportDisconnected,
-    settings,
-    runtime_events: list[dict[str, Any]],
-    bus,
-    trace_context: dict[str, str],
-    before_assistant_message_ids: set[str],
-    before_snapshot_unreliable: bool,
-    wall_deadline: float,
-    chat_run_store: Any | None = None,
-    opencode_process_manager: Any | None = None,
-) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
-    error_payload = _transport_error_payload(transport_exc)
-    if chat_run_store is not None and hasattr(chat_run_store, "record_transport_error"):
-        try:
-            chat_run_store.record_transport_error(request_id, error_payload)
-        except Exception:
-            logger.warning("failed to record OpenCode transport error", exc_info=True)
-
-    await _publish_chat_runtime_event(
-        runtime_events=runtime_events,
-        bus=bus,
-        trace_context=trace_context,
-        chat_run_store=chat_run_store,
-        event_type="chat.transport_recovery.started",
-        session_id=portal_session_id,
-        request_id=request_id,
-        opencode_session_id=opencode_session_id,
-        summary="OpenCode message request disconnected; checking process and session recovery state.",
-        data={
-            **error_payload,
-            "session_id": portal_session_id,
-            "request_id": request_id,
-            "opencode_session_id": opencode_session_id,
-        },
-        metadata={
-            **error_payload,
-            "opencode_session_id": opencode_session_id,
-            "request_id": request_id,
-        },
-    )
-
-    process_status: dict[str, Any] = {}
-    restart_attempted = False
-    restart_status = "not_attempted"
-    restart_error = ""
-    health_payload: dict[str, Any] = {}
-    process_running = False
-
-    if opencode_process_manager is not None:
-        if hasattr(opencode_process_manager, "status_snapshot"):
-            try:
-                process_status = opencode_process_manager.status_snapshot()
-                process_running = bool(process_status.get("running"))
-            except Exception as exc:
-                process_status = {"error": safe_preview(str(exc), 300)}
-        if not process_running:
-            await _publish_chat_runtime_event(
-                runtime_events=runtime_events,
-                bus=bus,
-                trace_context=trace_context,
-                chat_run_store=chat_run_store,
-                event_type="opencode.process.exited",
-                session_id=portal_session_id,
-                request_id=request_id,
-                opencode_session_id=opencode_session_id,
-                state="failed",
-                summary="Managed OpenCode process was not running during transport recovery.",
-                data={"status": safe_preview(process_status, 1000), "reason": "transport_disconnected"},
-            )
-            restart_attempted = True
-        else:
-            try:
-                health_payload = await client.health()
-            except Exception as exc:
-                health_payload = {"healthy": False, "error": safe_preview(str(exc), 300)}
-            if not bool(health_payload.get("healthy")):
-                await _publish_chat_runtime_event(
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    chat_run_store=chat_run_store,
-                    event_type="opencode.health.failed",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=opencode_session_id,
-                    state="degraded",
-                    summary="Managed OpenCode health check failed during transport recovery.",
-                    data={"health": safe_preview(health_payload, 1000), "reason": "transport_disconnected"},
-                )
-                restart_attempted = True
-
-        if restart_attempted:
-            try:
-                restart_meta = await opencode_process_manager.restart(reason="transport_disconnected")
-                restart_status = "restarted"
-                process_status = restart_meta if isinstance(restart_meta, dict) else {}
-                process_running = bool(process_status.get("running", process_status.get("pid") is not None))
-                await _publish_chat_runtime_event(
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    chat_run_store=chat_run_store,
-                    event_type="opencode.process.restarted",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=opencode_session_id,
-                    state="running",
-                    summary="Managed OpenCode process restarted after transport disconnect.",
-                    data={"reason": "transport_disconnected", "status": safe_preview(process_status, 1000)},
-                )
-            except Exception as exc:
-                restart_status = "failed"
-                restart_error = safe_preview(str(exc), 500)
-                await _publish_chat_runtime_event(
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    chat_run_store=chat_run_store,
-                    event_type="opencode.process.restart_failed",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=opencode_session_id,
-                    state="failed",
-                    summary="Managed OpenCode process restart failed after transport disconnect.",
-                    data={"reason": "transport_disconnected", "error": restart_error, "status": safe_preview(process_status, 1000)},
-                )
-
-    if chat_run_store is not None and hasattr(chat_run_store, "mark_recovering") and (process_running or restart_attempted):
-        try:
-            chat_run_store.mark_recovering(
-                request_id,
-                "opencode_transport_disconnected",
-                {
-                    "last_transport_error": error_payload,
-                    "opencode_disconnected": True,
-                    "opencode_process_status": safe_preview(process_status, 1000),
-                    "restart_attempted": restart_attempted,
-                    "restart_status": restart_status,
-                    "recovery_state": "recovering",
-                },
-            )
-        except Exception:
-            logger.warning("failed to mark chat run recovering", exc_info=True)
-
-    loop = asyncio.get_running_loop()
-    recovery_deadline = min(loop.time() + float(settings.chat_timeout_recovery_max_seconds), wall_deadline)
-    poll_seconds = max(0.001, float(settings.chat_timeout_recovery_poll_seconds))
-    exclude_ids = set() if before_snapshot_unreliable else set(before_assistant_message_ids)
-    last_probe: dict[str, Any] = {
-        "text": "",
-        "message_id": "",
-        "completion_state": "incomplete",
-        "reason": "opencode_transport_disconnected",
-        "diagnostics": {
-            **error_payload,
-            "opencode_process_status": safe_preview(process_status, 1000),
-            "restart_attempted": restart_attempted,
-            "restart_status": restart_status,
-        },
-    }
-    last_messages: list[dict[str, Any]] = []
-    polls = 0
-    opencode_may_still_be_running = bool(process_running or opencode_process_manager is None)
-
-    while True:
-        polls += 1
-        status_payload: Any = None
-        status_error = ""
-        status_snapshot: dict[str, Any] = {}
-        if hasattr(client, "get_session_status"):
-            try:
-                status_payload = await client.get_session_status(timeout_seconds=30)
-                status_snapshot = _status_snapshot_for_session(status_payload, opencode_session_id)
-            except Exception as exc:
-                status_error = safe_preview(str(exc), 300)
-        messages_error = ""
-        try:
-            last_messages = await _list_session_messages_for_recovery(client, opencode_session_id)
-            last_probe = find_latest_assistant_completion(last_messages, exclude_message_ids=exclude_ids)
-        except Exception as exc:
-            messages_error = safe_preview(str(exc), 300)
-
-        state = str(last_probe.get("completion_state") or "incomplete")
-        if state in {"completed", "error", "blocked", "empty_final"}:
-            await _publish_chat_runtime_event(
-                runtime_events=runtime_events,
-                bus=bus,
-                trace_context=trace_context,
-                chat_run_store=chat_run_store,
-                event_type="chat.transport_recovery.recovered",
-                session_id=portal_session_id,
-                request_id=request_id,
-                opencode_session_id=opencode_session_id,
-                state="success" if state == "completed" else state,
-                summary="OpenCode session produced a result after the transport disconnect.",
-                data={
-                    **error_payload,
-                    "polls": polls,
-                    "completion_state": state,
-                    "reason": last_probe.get("reason"),
-                    "message_count": len(last_messages),
-                    "restart_attempted": restart_attempted,
-                    "restart_status": restart_status,
-                },
-            )
-            return last_probe, last_messages, {
-                "recovered": True,
-                "polls": polls,
-                "status": status_snapshot,
-                "transport_error": error_payload,
-                "restart_attempted": restart_attempted,
-                "restart_status": restart_status,
-                "opencode_process_status": process_status,
-            }
-
-        session_running = _status_indicates_running(status_snapshot)
-        opencode_may_still_be_running = bool(opencode_may_still_be_running or session_running)
-        await _publish_chat_runtime_event(
-            runtime_events=runtime_events,
-            bus=bus,
-            trace_context=trace_context,
-            chat_run_store=chat_run_store,
-            event_type="chat.transport_recovery.poll",
-            session_id=portal_session_id,
-            request_id=request_id,
-            opencode_session_id=opencode_session_id,
-            summary="Polling OpenCode session after transport disconnect.",
-            data={
-                **error_payload,
-                "poll": polls,
-                "running": session_running,
-                "completion_state": state,
-                "reason": last_probe.get("reason"),
-                "message_count": len(last_messages),
-                "status": safe_preview(status_snapshot, 500),
-                "status_error": status_error,
-                "messages_error": messages_error,
-                "restart_attempted": restart_attempted,
-                "restart_status": restart_status,
-            },
-        )
-
-        if loop.time() >= recovery_deadline:
-            diagnostics = {
-                **error_payload,
-                "opencode_process_status": safe_preview(process_status, 1000),
-                "restart_attempted": restart_attempted,
-                "restart_status": restart_status,
-                "restart_error": restart_error,
-                "recovery_polls": polls,
-                "opencode_may_still_be_running": opencode_may_still_be_running,
-                "last_probe": safe_preview(last_probe, 1000),
-                "status": safe_preview(status_snapshot, 500),
-            }
-            exhausted_probe = {
-                "text": str(last_probe.get("text") or ""),
-                "message_id": str(last_probe.get("message_id") or ""),
-                "completion_state": "incomplete",
-                "reason": "opencode_transport_disconnected",
-                "diagnostics": diagnostics,
-            }
-            await _publish_chat_runtime_event(
-                runtime_events=runtime_events,
-                bus=bus,
-                trace_context=trace_context,
-                chat_run_store=chat_run_store,
-                event_type="chat.transport_recovery.exhausted",
-                session_id=portal_session_id,
-                request_id=request_id,
-                opencode_session_id=opencode_session_id,
-                state="recovering" if opencode_may_still_be_running or restart_attempted else "incomplete",
-                summary="OpenCode transport recovery did not find a final result before the recovery deadline.",
-                data=diagnostics,
-            )
-            if chat_run_store is not None and hasattr(chat_run_store, "mark_recovering") and (opencode_may_still_be_running or restart_attempted):
-                try:
-                    chat_run_store.mark_recovering(
-                        request_id,
-                        "opencode_transport_disconnected",
-                        {
-                            **diagnostics,
-                            "recovery_state": "recovering",
-                            "last_transport_error": error_payload,
-                            "opencode_disconnected": True,
-                        },
-                    )
-                except Exception:
-                    logger.warning("failed to mark chat run recovering", exc_info=True)
-            return exhausted_probe, last_messages, {
-                "recovered": False,
-                "polls": polls,
-                "status": status_snapshot,
-                "reason": "opencode_transport_disconnected",
-                "transport_error": error_payload,
-                "restart_attempted": restart_attempted,
-                "restart_status": restart_status,
-                "opencode_process_status": process_status,
-                "opencode_may_still_be_running": opencode_may_still_be_running,
-            }
-
-        await asyncio.sleep(min(poll_seconds, max(0.001, recovery_deadline - loop.time())))
-
-
-def _looks_progress_only_text(text: str) -> bool:
-    t = (text or "").strip().lower()
-    return t.startswith(("i am ", "i'm ", "working", "reading", "let me"))
-
-
-def _should_auto_continue(state: str, probe: dict[str, Any], assistant_text: str, settings) -> tuple[bool, str]:
-    reason = str(probe.get("reason") or "").lower()
-    diagnostics = probe.get("diagnostics") if isinstance(probe.get("diagnostics"), dict) else {}
-    if reason == "opencode_transport_disconnected" and bool(diagnostics.get("opencode_may_still_be_running")):
-        return False, "opencode_transport_disconnected_still_running"
-    if not settings.chat_auto_continue_enabled:
-        return False, "auto_continue_disabled"
-    if state in {"blocked", "error", "completed", "success", "empty_final"}:
-        return False, "terminal_state"
-    if reason == "submit_timeout_recovery_exhausted" and bool(diagnostics.get("opencode_may_still_be_running")):
-        if not bool(getattr(settings, "chat_auto_continue_after_running_timeout", False)):
-            return False, "submit_timeout_recovery_exhausted_still_running"
-        return True, "submit_timeout_recovery_exhausted_still_running"
-    disallow_reasons = {"pending_permission", "tool_error", "provider_error", "auth_error", "cancelled", "user_cancelled", "before_snapshot_unreliable"}
-    if reason in disallow_reasons:
-        return False, f"disallowed_reason:{reason}"
-    if reason in {"final_assistant_message_timeout", "length", "continue", "tool_use", "tool_calls", "assistant_in_progress", "incomplete"}:
-        return True, f"reason:{reason}"
-    if state == "incomplete":
-        return True, "state_incomplete"
-    if not (assistant_text or "").strip():
-        return False, "empty_assistant_text"
-    if state == "incomplete" and _looks_progress_only_text(assistant_text):
-        return True, "state_incomplete_progress_text"
-    if _looks_progress_only_text(assistant_text):
-        return True, "progress_only_text"
-    return False, "not_eligible"
 
 
 async def _ensure_record_for_chat(*, client, store, portal_session_id: str, title: str, agent: str | None, model: str | None) -> tuple[SessionRecord, bool]:
@@ -1291,10 +199,292 @@ async def _ensure_record_for_chat(*, client, store, portal_session_id: str, titl
     return recovered, True
 
 
+def extract_assistant_text(payload: Any) -> str:
+    return extract_last_assistant_visible_text(payload)
+
+
+def _redact_attachment_payloads_for_debug(value: Any) -> Any:
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key == "url" and isinstance(item, str) and item.startswith("data:"):
+                out[key] = "data:<redacted>"
+            else:
+                out[key] = _redact_attachment_payloads_for_debug(item)
+        return out
+    if isinstance(value, list):
+        return [_redact_attachment_payloads_for_debug(item) for item in value]
+    if isinstance(value, str):
+        return DATA_URL_RE.sub("data:<redacted>;base64,<redacted>", value)
+    return value
+
+
+async def _send_message(
+    client: Any,
+    session_id: str,
+    *,
+    parts: list[dict[str, Any]],
+    model: str | None,
+    agent: str | None,
+    system: str | None,
+    message_id: str,
+) -> Any:
+    if hasattr(client, "message"):
+        body: dict[str, Any] = {"parts": parts, "messageID": message_id}
+        if model:
+            body["model"] = model
+        if agent:
+            body["agent"] = agent
+        if system:
+            body["system"] = system
+        return await client.message(session_id, body)
+    return await client.send_message(session_id, parts=parts, model=model, agent=agent, system=system, message_id=message_id)
+
+
+def _event_payload(
+    event_type: str,
+    *,
+    session_id: str,
+    request_id: str,
+    opencode_session_id: str,
+    state: str,
+    summary: str,
+    data: dict[str, Any] | None = None,
+    trace_context: dict[str, str],
+) -> dict[str, Any]:
+    event = {
+        "type": event_type,
+        "event_type": event_type,
+        "engine": "opencode",
+        "session_id": session_id,
+        "request_id": request_id,
+        "opencode_session_id": opencode_session_id,
+        "state": state,
+        "summary": safe_preview(summary, 500),
+        "data": safe_preview(data or {}, 1000),
+        "created_at": utc_now_iso(),
+        "ts": time.time(),
+    }
+    return add_trace_context(event, trace_context)
+
+
+async def _publish_event(bus, runtime_events: list[dict[str, Any]], event: dict[str, Any]) -> None:
+    runtime_events.append(event)
+    await bus.publish(event)
+
+
+def _context_state(message: str, state: str, response: str = "") -> dict[str, Any]:
+    return {
+        "objective": message[:300],
+        "summary": (response or message)[:500],
+        "current_state": state,
+        "next_step": "",
+        "constraints": [],
+        "decisions": [],
+        "open_loops": [],
+        "budget": {"usage_percent": 0},
+    }
+
+
+async def _build_chat_parts(app: web.Application, *, portal_session_id: str, message: str, attachments: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    parts: list[dict[str, Any]] = [{"type": "text", "text": message}]
+    attachment_debug: list[dict[str, Any]] = []
+    if not attachments:
+        return parts, attachment_debug
+    try:
+        attachment_parts, attachment_debug = build_opencode_attachment_parts(
+            app.get(ATTACHMENT_SERVICE_KEY),
+            portal_session_id,
+            attachments,
+            max_text_chars=30000,
+            max_inline_bytes=10 * 1024 * 1024,
+        )
+        parts.extend(attachment_parts)
+    except Exception as exc:
+        safe_error = safe_preview(str(exc), 300)
+        attachment_debug.append({"status": "error", "error": safe_error})
+        parts.append(
+            {
+                "type": "text",
+                "text": f"Attachment processing failed: {safe_error}",
+                "synthetic": True,
+                "metadata": {"efp_internal": "attachment_context"},
+            }
+        )
+    return parts, attachment_debug
+
+
+async def _maybe_apply_skill_invocation(
+    *,
+    app: web.Application,
+    client: Any,
+    record: SessionRecord,
+    message: str,
+    parts: list[dict[str, Any]],
+    model: str | None,
+    agent: str | None,
+    system: str | None,
+    message_id: str,
+    runtime_events: list[dict[str, Any]],
+    trace_context: dict[str, str],
+    portal_session_id: str,
+    request_id: str,
+) -> tuple[bool, Any, str | None, dict[str, Any] | None]:
+    invocation = parse_slash_invocation(message)
+    if invocation is None:
+        return False, None, None, None
+
+    bus = app[EVENT_BUS_KEY]
+    settings = app[SETTINGS_KEY]
+    skill_decision = evaluate_skill_invocation(settings, invocation)
+    skill_debug: dict[str, Any] = {
+        "kind": "skill",
+        "raw_name": invocation.raw_name,
+        "skill_name": invocation.skill_name,
+        "arguments": invocation.arguments,
+        "reason": skill_decision.reason,
+        "permission_state": skill_decision.permission_state,
+        "used_command_api": False,
+        "used_skill_prompt": False,
+        "blocked": False,
+    }
+    await _publish_event(
+        bus,
+        runtime_events,
+        _event_payload(
+            "skill.detected",
+            session_id=portal_session_id,
+            request_id=request_id,
+            opencode_session_id=record.opencode_session_id,
+            state="running",
+            summary="Skill invocation detected.",
+            data={"skill_name": invocation.skill_name, "raw_name": invocation.raw_name},
+            trace_context=trace_context,
+        ),
+    )
+
+    if skill_decision.reason == "unknown_skill" and hasattr(client, "list_commands"):
+        try:
+            available_commands = await client.list_commands()
+            command_names = {str(c.get("name") or "") for c in available_commands if isinstance(c, dict)}
+        except Exception as exc:
+            command_names = set()
+            skill_debug["command_lookup_error"] = safe_preview(str(exc), 300)
+        if invocation.skill_name in command_names and not parts[1:]:
+            response_payload = await client.execute_command(
+                record.opencode_session_id,
+                command=invocation.skill_name,
+                arguments=invocation.arguments,
+                model=model,
+                agent=agent or "efp-main",
+                message_id=message_id,
+            )
+            skill_debug.update({"kind": "command", "used_command_api": True, "native_command": True, "reason": "allowed"})
+            return True, response_payload, None, skill_debug
+
+    repository_context = None
+    repo_request = None
+    if skill_decision.allowed and invocation.skill_name == "create-pull-request":
+        repo_request = parse_create_pr_repo_request(invocation.arguments)
+        if repo_request is not None:
+            checkout_result = ensure_repo_checkout(settings, repo_request)
+            skill_debug["repository_preflight"] = {
+                "attempted": True,
+                "success": checkout_result.success,
+                "path": checkout_result.path,
+                "owner": checkout_result.owner,
+                "repo": checkout_result.repo,
+                "head_branch": checkout_result.head_branch,
+                "base_branch": checkout_result.base_branch,
+                "error": checkout_result.error,
+            }
+            if checkout_result.success:
+                repository_context = checkout_result
+            else:
+                skill_decision = type(skill_decision)(
+                    skill=skill_decision.skill,
+                    allowed=False,
+                    reason="repository_checkout_failed",
+                    permission_state=skill_decision.permission_state,
+                )
+                skill_debug["reason"] = "repository_checkout_failed"
+
+    if not skill_decision.allowed:
+        if skill_decision.reason == "missing_required_writeback_tools":
+            assistant_text = "Skill create-pull-request cannot run because required writeback tool github_create_pull_request / efp_github_create_pull_request is unavailable."
+        elif skill_decision.reason == "repository_checkout_failed" and repo_request is not None:
+            preflight = skill_debug.get("repository_preflight", {})
+            assistant_text = (
+                f"Repository checkout failed for {repo_request.repo_url} to {preflight.get('path', '')} "
+                f"(head: {repo_request.head_branch}, base: {repo_request.base_branch}, failure: {preflight.get('error')})."
+            )
+        else:
+            assistant_text = f"Skill `{invocation.skill_name}` cannot run in OpenCode runtime: {skill_decision.reason}."
+        skill_debug["blocked"] = True
+        await _publish_event(
+            bus,
+            runtime_events,
+            _event_payload(
+                "skill.blocked",
+                session_id=portal_session_id,
+                request_id=request_id,
+                opencode_session_id=record.opencode_session_id,
+                state="failed",
+                summary=assistant_text,
+                data={"skill_name": invocation.skill_name, "reason": skill_decision.reason},
+                trace_context=trace_context,
+            ),
+        )
+        return True, None, assistant_text, skill_debug
+
+    prompt = build_skill_prompt(skill_decision.skill or {}, invocation)
+    if repository_context is not None:
+        prompt += (
+            f"\n\nRepository has been prepared at: {repository_context.path}\n"
+            "All local git inspection commands must run from that directory\n"
+            f"Use base branch: {repository_context.base_branch}\n"
+            f"Use head branch: {repository_context.head_branch}\n"
+            "Do not run git inspection from /workspace unless /workspace/.git exists"
+        )
+    parts[0] = {
+        **parts[0],
+        "type": "text",
+        "text": prompt,
+        "synthetic": True,
+        "metadata": {"efp_internal": "skill_prompt", "portal_request_id": request_id, "original_user_message_hidden": True},
+    }
+    skill_debug["used_skill_prompt"] = True
+    await _publish_event(
+        bus,
+        runtime_events,
+        _event_payload(
+            "skill.prompt_applied",
+            session_id=portal_session_id,
+            request_id=request_id,
+            opencode_session_id=record.opencode_session_id,
+            state="running",
+            summary="Skill prompt sent to OpenCode.",
+            data={"skill_name": invocation.skill_name},
+            trace_context=trace_context,
+        ),
+    )
+    response_payload = await _send_message(
+        client,
+        record.opencode_session_id,
+        parts=parts,
+        model=model,
+        agent=agent,
+        system=system,
+        message_id=message_id,
+    )
+    return True, response_payload, None, skill_debug
+
+
 async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, Any]) -> dict[str, Any]:
     message = payload.get("message")
     if not isinstance(message, str) or not message.strip():
         raise _bad_request("message_required")
+    message = message.strip()
 
     metadata = _metadata_from_payload(payload)
     runtime_profile = _runtime_profile_from_metadata(metadata)
@@ -1304,178 +494,96 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
     model = _model_from_chat_payload(payload, metadata, runtime_profile)
     agent = _optional_str(payload.get("agent")) or _optional_str(metadata.get("agent"))
     system = _optional_str(payload.get("system")) or _optional_str(metadata.get("system"))
-    if system:
-        system = f"{system}{FINAL_RESPONSE_CONTRACT_SUFFIX}"
-    else:
-        system = FINAL_RESPONSE_CONTRACT_SUFFIX.strip()
+    system = f"{system}{FINAL_RESPONSE_CONTRACT_SUFFIX}" if system else FINAL_RESPONSE_CONTRACT_SUFFIX.strip()
     attachments = payload.get("attachments")
+    initial_user_message_id = _requested_message_id(payload)
 
     store = app[SESSION_STORE_KEY]
     bus = app[EVENT_BUS_KEY]
     client = app[OPENCODE_CLIENT_KEY]
     chatlog_store = app[CHATLOG_STORE_KEY]
-    chat_run_store = app.get(CHAT_RUN_STORE_KEY)
     usage_tracker = app[USAGE_TRACKER_KEY]
     portal_metadata_client = app[PORTAL_METADATA_CLIENT_KEY]
     settings = app[SETTINGS_KEY]
-    binding_store = app.get(REQUEST_BINDING_STORE_KEY)
-    opencode_process_manager = app.get(OPENCODE_PROCESS_MANAGER_KEY)
-
     runtime_events: list[dict[str, Any]] = []
-    wall_started_at = asyncio.get_running_loop().time()
-    wall_deadline = wall_started_at + max(0.001, float(settings.chat_total_wall_timeout_seconds))
-    context_state = {"objective": message[:300], "summary": "OpenCode request accepted", "current_state": "running", "next_step": "Waiting for OpenCode assistant response", "constraints": [], "decisions": [], "open_loops": [], "budget": {"usage_percent": 0}}
-
-    if chat_run_store is not None and not _is_chat_mutation_path(metadata):
-        active_run = chat_run_store.active_for_session(portal_session_id)
-        if active_run is not None and active_run.request_id != request_id:
-            active_public = await validate_chat_run_against_opencode(
-                store=chat_run_store,
-                client=client,
-                record=active_run,
-                event_bus=bus,
-            )
-        else:
-            active_public = None
-        if active_public is not None and active_public.get("opencode_active") is True and active_run is not None and active_run.request_id != request_id:
-            raise web.HTTPConflict(
-                text=json.dumps(_chat_run_already_active_payload(session_id=portal_session_id, request_id=request_id, active_run=active_public)),
-                content_type="application/json",
-            )
-
-    existing_record = store.get(portal_session_id)
-    opencode_session_id = existing_record.opencode_session_id if existing_record else ""
+    opencode_session_id = ""
     provider_for_trace_raw = _optional_str(runtime_profile.get("provider")) or _optional_str(metadata.get("provider"))
     provider_for_trace = normalize_opencode_provider_id(provider_for_trace_raw)
     profile_version, runtime_profile_id = profile_version_from_metadata(metadata, runtime_profile)
     trace_context: dict[str, str] = {}
+    context_state = _context_state(message, "running")
+
     try:
-        record, partial_recovery = await _ensure_record_for_chat(client=client, store=store, portal_session_id=portal_session_id, title=title, agent=agent, model=model)
+        record, partial_recovery = await _ensure_record_for_chat(
+            client=client,
+            store=store,
+            portal_session_id=portal_session_id,
+            title=title,
+            agent=agent,
+            model=model,
+        )
         opencode_session_id = record.opencode_session_id
-        trace_context = build_trace_context(settings, request_id=request_id, session_id=portal_session_id, opencode_session_id=record.opencode_session_id, profile_version=profile_version, runtime_profile_id=runtime_profile_id, model=model or "", provider=provider_for_trace or "")
+        trace_context = build_trace_context(
+            settings,
+            request_id=request_id,
+            session_id=portal_session_id,
+            opencode_session_id=record.opencode_session_id,
+            profile_version=profile_version,
+            runtime_profile_id=runtime_profile_id,
+            model=model or "",
+            provider=provider_for_trace or "",
+        )
 
-        if chat_run_store is not None:
-            existing_run = chat_run_store.get(request_id)
-            stream_attached = bool(existing_run is not None and getattr(existing_run, "stream_state", "") == "attached")
-            stream_detached = bool(existing_run is not None and getattr(existing_run, "stream_state", "") == "detached")
-            chat_run_store.start_run(
-                request_id=request_id,
-                portal_session_id=portal_session_id,
-                opencode_session_id=record.opencode_session_id,
-                status="stream_attached" if stream_attached else ("stream_detached" if stream_detached else "running"),
-                stream_state="attached" if stream_attached else ("detached" if stream_detached else "none"),
-                completion_state="running",
-                metadata={
-                    "model": model or "",
-                    "provider": provider_for_trace or "",
-                    "agent": agent or "",
-                    "runtime_profile_id": runtime_profile_id or "",
-                    "profile_version": profile_version or "",
-                },
-            )
-            await _publish_run_lifecycle_event(
-                chat_run_store=chat_run_store,
-                runtime_events=runtime_events,
-                bus=bus,
-                trace_context=trace_context,
-                event_type="chat.run.started",
-                session_id=portal_session_id,
-                request_id=request_id,
-                opencode_session_id=record.opencode_session_id,
-                state="running",
-                data={"status": "running", "stream_state": "attached" if stream_attached else "none"},
-                summary="Chat run started.",
-            )
-
-        if binding_store is not None:
-            binding_store.bind_active(record.opencode_session_id, portal_session_id, request_id, kind="chat")
-        start = add_trace_context(chat_started_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id), trace_context)
-        runtime_events.append(start)
-        await bus.publish(start)
-
-        chatlog_store.start_entry(portal_session_id, request_id=request_id, message=message, runtime_events=runtime_events, context_state=context_state, llm_debug={"engine": "opencode", "opencode_session_id": record.opencode_session_id, "trace_context": trace_context})
-
-        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.started", latest_event_state="running", request_id=request_id, summary="Chat started", runtime_events=runtime_events, metadata={"opencode_session_id": record.opencode_session_id, "trace_context": trace_context})
-
-        think = add_trace_context(llm_thinking_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id), trace_context)
-        runtime_events.append(think)
-        await bus.publish(think)
-        if chat_run_store is not None:
-            await _publish_assistant_message_event(
-                chat_run_store=chat_run_store,
-                runtime_events=runtime_events,
-                bus=bus,
-                trace_context=trace_context,
-                event_type="assistant.message.started",
-                session_id=portal_session_id,
-                request_id=request_id,
-                opencode_session_id=record.opencode_session_id,
-                state="running",
-            )
+        started = _event_payload(
+            "chat.started",
+            session_id=portal_session_id,
+            request_id=request_id,
+            opencode_session_id=record.opencode_session_id,
+            state="running",
+            summary="Chat started.",
+            data={"session_id": portal_session_id, "request_id": request_id},
+            trace_context=trace_context,
+        )
+        await _publish_event(bus, runtime_events, started)
+        chatlog_store.start_entry(
+            portal_session_id,
+            request_id=request_id,
+            message=message,
+            runtime_events=runtime_events,
+            context_state=context_state,
+            llm_debug={"engine": "opencode", "opencode_session_id": record.opencode_session_id, "trace_context": trace_context},
+        )
+        await portal_metadata_client.publish_session_metadata(
+            session_id=portal_session_id,
+            latest_event_type="chat.started",
+            latest_event_state="running",
+            request_id=request_id,
+            summary="Chat started",
+            runtime_events=runtime_events,
+            metadata={"opencode_session_id": record.opencode_session_id, "trace_context": trace_context},
+        )
+        thinking = _event_payload(
+            "llm_thinking",
+            session_id=portal_session_id,
+            request_id=request_id,
+            opencode_session_id=record.opencode_session_id,
+            state="running",
+            summary="OpenCode is thinking.",
+            data={"message": "OpenCode is thinking"},
+            trace_context=trace_context,
+        )
+        await _publish_event(bus, runtime_events, thinking)
 
         before_messages: list[dict[str, Any]] = []
-        after_messages: list[dict[str, Any]] = []
-        before_assistant_message_ids: set[str] = set()
-        message_id_detection_error_before = ""
-        message_id_detection_error_after = ""
-        before_snapshot_unreliable = False
         try:
             before_messages = await client.list_messages(record.opencode_session_id)
-            before_assistant_message_ids = set(extract_assistant_message_ids(before_messages))
-        except Exception as exc:
-            message_id_detection_error_before = safe_preview(str(exc), 500)
-            before_snapshot_unreliable = True
-        parts = [{"type": "text", "text": message}]
-        attachment_debug = []
-        attachment_service = app.get(ATTACHMENT_SERVICE_KEY)
-        if attachments:
-            try:
-                attachment_parts, attachment_debug = build_opencode_attachment_parts(
-                    attachment_service,
-                    portal_session_id,
-                    attachments,
-                    max_text_chars=30000,
-                    max_inline_bytes=10 * 1024 * 1024,
-                )
-                parts.extend(attachment_parts)
-            except Exception as exc:
-                safe_error = safe_preview(str(exc), 300)
-                attachment_debug.append({"status": "error", "error": safe_error})
-                parts.append({"type": "text", "text": f"Attachment processing failed: {safe_error}", "synthetic": True, "metadata": {"efp_internal": "attachment_context"}})
+        except Exception:
+            before_messages = []
 
-        invocation = parse_slash_invocation(message)
-        skill_debug = None
-        requested_message_id = payload.get("message_id") or payload.get("opencode_message_id")
-        if is_opencode_message_id(requested_message_id):
-            initial_user_message_id = str(requested_message_id)
-        else:
-            initial_user_message_id = new_opencode_message_id()
-        if chat_run_store is not None:
-            current_run = chat_run_store.get(request_id)
-            current_stream_state = getattr(current_run, "stream_state", "none") if current_run is not None else "none"
-            chat_run_store.start_run(
-                request_id=request_id,
-                portal_session_id=portal_session_id,
-                opencode_session_id=record.opencode_session_id,
-                user_message_id=initial_user_message_id,
-                status="stream_attached" if current_stream_state == "attached" else ("stream_detached" if current_stream_state == "detached" else "running"),
-                stream_state=current_stream_state,
-                completion_state="running",
-            )
-        if binding_store is not None:
-            binding_store.bind_message(record.opencode_session_id, initial_user_message_id, portal_session_id, request_id, kind="chat")
+        parts, attachment_debug = await _build_chat_parts(app, portal_session_id=portal_session_id, message=message, attachments=attachments)
         display_store = app.get(USER_DISPLAY_STORE_KEY)
         if display_store is not None:
             try:
-                slash_metadata = None
-                if invocation is not None:
-                    slash_metadata = {
-                        "type": "skill",
-                        "raw": message,
-                        "raw_name": invocation.raw_name,
-                        "skill_name": invocation.skill_name,
-                        "arguments": invocation.arguments,
-                    }
                 display_store.put_user_message(
                     portal_session_id=portal_session_id,
                     opencode_session_id=record.opencode_session_id,
@@ -1485,975 +593,237 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                     metadata={
                         "source": "portal_original_user_message",
                         "request_id": request_id,
-                        "slash_command": slash_metadata,
                         "internal_model_content_hidden": True,
                     },
                 )
             except Exception:
                 logger.warning("failed to save user display message", exc_info=True)
-        submit_timeout_recovery: dict[str, Any] = {}
-        submit_transport_recovery: dict[str, Any] = {}
-        completion_probe: dict[str, Any] | None = None
-        waited_messages: list[dict[str, Any]] = []
-        if invocation:
-            skill_decision = evaluate_skill_invocation(settings, invocation)
-            executed_native_command = False
-            skill_detected = add_trace_context({"type": "skill.detected", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"raw_name": invocation.raw_name, "skill_name": invocation.skill_name, "arguments": invocation.arguments}}, trace_context)
-            runtime_events.append(skill_detected)
-            await bus.publish(skill_detected)
-            skill_debug = {"kind": "skill", "raw_name": invocation.raw_name, "skill_name": invocation.skill_name, "arguments": invocation.arguments, "reason": skill_decision.reason, "permission_state": skill_decision.permission_state, "used_command_api": False, "used_skill_prompt": False, "blocked": False}
-            if skill_decision.reason == "unknown_skill":
-                try:
-                    available_commands = await client.list_commands()
-                except Exception as exc:
-                    skill_decision = type(skill_decision)(skill=None, allowed=False, reason="command_lookup_failed", permission_state="unknown")
-                    skill_debug["reason"] = "command_lookup_failed"
-                    skill_debug["command_lookup_error"] = safe_preview(str(exc), 300)
-                else:
-                    command_names = {str(c.get("name") or "") for c in available_commands if isinstance(c, dict)}
-                    if invocation.skill_name in command_names:
-                        if attachments:
-                            skill_decision = type(skill_decision)(
-                                skill={"name": invocation.skill_name, "opencode_name": invocation.skill_name},
-                                allowed=True,
-                                reason="allowed_native_command_with_attachments_prompt_fallback",
-                                permission_state="allow",
-                            )
-                            skill_debug.update({
-                                "kind": "skill",
-                                "used_command_api": False,
-                                "used_skill_prompt": True,
-                                "native_command": True,
-                                "command_api_fallback": True,
-                                "reason": "allowed_native_command_with_attachments_prompt_fallback",
-                            })
-                            executed_native_command = False
-                        else:
-                            try:
-                                response_payload = await client.execute_command(record.opencode_session_id, command=invocation.skill_name, arguments=invocation.arguments, model=model, agent=agent or "efp-main", message_id=initial_user_message_id)
-                                skill_debug.update({"kind": "command", "used_command_api": True, "native_command": True, "reason": "allowed"})
-                                executed_native_command = True
-                                command_evt = add_trace_context({"type": "skill.command.executed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"command": invocation.skill_name, "native_command": True}}, trace_context)
-                                runtime_events.append(command_evt)
-                                await bus.publish(command_evt)
-                            except OpenCodeClientError as exc:
-                                skill_decision = type(skill_decision)(skill=None, allowed=False, reason="command_execution_failed", permission_state="unknown")
-                                skill_debug["reason"] = "command_execution_failed"
-                                skill_debug["command_execution_error"] = safe_preview(str(exc), 300)
-                    else:
-                        skill_decision = type(skill_decision)(skill=None, allowed=False, reason="unknown_skill_or_command", permission_state="unknown")
-                        skill_debug["reason"] = "unknown_skill_or_command"
-            elif not skill_decision.allowed:
-                pass
 
-            repository_context = None
-            repo_request = None
-            if skill_decision.allowed and invocation.skill_name == "create-pull-request":
-                repo_request = parse_create_pr_repo_request(invocation.arguments)
-                if repo_request is not None:
-                    checkout_result = ensure_repo_checkout(settings, repo_request)
-                    skill_debug["repository_preflight"] = {
-                        "attempted": True,
-                        "success": checkout_result.success,
-                        "path": checkout_result.path,
-                        "owner": checkout_result.owner,
-                        "repo": checkout_result.repo,
-                        "head_branch": checkout_result.head_branch,
-                        "base_branch": checkout_result.base_branch,
-                        "error": checkout_result.error,
-                    }
-                    evt_type = "skill.repository_checkout.completed" if checkout_result.success else "skill.repository_checkout.failed"
-                    repo_evt = add_trace_context({"type": evt_type, "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"path": checkout_result.path, "owner": checkout_result.owner, "repo": checkout_result.repo, "head_branch": checkout_result.head_branch, "base_branch": checkout_result.base_branch, "error": checkout_result.error}}, trace_context)
-                    runtime_events.append(repo_evt)
-                    await bus.publish(repo_evt)
-                    if checkout_result.success:
-                        repository_context = checkout_result
-                    else:
-                        skill_decision = type(skill_decision)(skill=skill_decision.skill, allowed=False, reason="repository_checkout_failed", permission_state=skill_decision.permission_state)
-                        skill_debug["reason"] = "repository_checkout_failed"
-
-            if (not skill_decision.allowed) and (not executed_native_command):
-                assistant_text = f"Skill `{invocation.skill_name}` cannot run in OpenCode runtime: {skill_decision.reason}."
-                if skill_decision.reason == "missing_required_writeback_tools":
-                    assistant_text = "Skill create-pull-request cannot run because required writeback tool github_create_pull_request / efp_github_create_pull_request is unavailable."
-                elif skill_decision.reason == "repository_checkout_failed" and repo_request is not None:
-                    preflight = skill_debug.get("repository_preflight", {})
-                    assistant_text = (
-                        f"Repository checkout failed for {repo_request.repo_url} to {preflight.get('path', '')} "
-                        f"(head: {repo_request.head_branch}, base: {repo_request.base_branch}, failure: {preflight.get('error')})."
-                    )
-                skill_debug["blocked"] = True
-                skill_debug["kind"] = "command" if skill_decision.reason in {"unknown_skill_or_command", "command_lookup_failed", "command_execution_failed"} else "skill"
-                blocked_evt = add_trace_context({"type": "skill.blocked", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"reason": skill_decision.reason, "permission_state": skill_decision.permission_state}}, trace_context)
-                runtime_events.append(blocked_evt)
-                await bus.publish(blocked_evt)
-                blocked_chat_evt = add_trace_context({"type": "chat.blocked", "event_type": "chat.blocked", "state": "blocked", "ok": False, "completion_state": "blocked", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"reason": skill_decision.reason, "permission_state": skill_decision.permission_state}}, trace_context)
-                for event in [blocked_chat_evt]:
-                    runtime_events.append(event)
-                    await bus.publish(event)
-                final_context = {**context_state, "summary": assistant_text[:500], "current_state": "blocked", "next_step": ""}
-                updated = store.update_after_chat(portal_session_id, message, assistant_text, model, agent)
-                usage_record = usage_tracker.record_chat(session_id=portal_session_id, request_id=request_id, model=model, provider=provider_for_trace, response_payload={}, input_text=message, output_text=assistant_text)
-                usage_record["request_id"] = trace_context.get("request_id", usage_record.get("request_id", ""))
-                completion_probe = {"completion_state": "blocked", "reason": "skill_blocked", "diagnostics": {"skill_name": invocation.skill_name, "permission_state": skill_decision.permission_state, "reason": skill_decision.reason}}
-                llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "trace_context": trace_context, "attachments": attachment_debug, "skill_invocation": skill_debug, "completion_probe": completion_probe}
-                chatlog_store.finish_entry(portal_session_id, request_id=request_id, status="blocked", response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
-                if not updated.deleted:
-                    await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state="blocked", request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "context_state": final_context, "usage": usage_record, "trace_context": trace_context, "skill_invocation": skill_debug})
-                blocked_payload = {"ok": False, "completion_state": "blocked", "incomplete_reason": skill_decision.reason or "skill_blocked", "session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": "", "assistant_message_id": "", "assistant_message_ids": [], "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "context_state": final_context, "_llm_debug": llm_debug}
-                if chat_run_store is not None:
-                    chat_run_store.mark_incomplete(request_id, skill_decision.reason or "skill_blocked", blocked_payload)
-                    await _publish_run_lifecycle_event(
-                        chat_run_store=chat_run_store,
-                        runtime_events=runtime_events,
-                        bus=bus,
-                        trace_context=trace_context,
-                        event_type="chat.run.incomplete",
-                        session_id=portal_session_id,
-                        request_id=request_id,
-                        opencode_session_id=updated.opencode_session_id,
-                        state="incomplete",
-                        data={"status": "incomplete", "completion_state": "blocked", "reason": skill_decision.reason or "skill_blocked"},
-                        summary="Chat run blocked before a final assistant response.",
-                    )
-                if binding_store is not None:
-                    binding_store.complete(request_id)
-                return blocked_payload
-
-            if not executed_native_command:
-                command_names: set[str] = set()
-                if not attachments:
-                    try:
-                        available_commands = await client.list_commands()
-                        command_names = {str(c.get("name") or "") for c in available_commands if isinstance(c, dict)}
-                    except Exception as exc:
-                        skill_debug["command_lookup_error"] = safe_preview(str(exc), 300)
-                if (not attachments) and str(skill_decision.skill.get("opencode_name") or "") in command_names:
-                    try:
-                        response_payload = await client.execute_command(record.opencode_session_id, command=str(skill_decision.skill["opencode_name"]), arguments=invocation.arguments, model=model, agent=agent or "efp-main", message_id=initial_user_message_id)
-                        skill_debug["used_command_api"] = True
-                        skill_debug["kind"] = "skill"
-                        command_evt = add_trace_context({"type": "skill.command.executed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"command": skill_decision.skill["opencode_name"]}}, trace_context)
-                        runtime_events.append(command_evt)
-                        await bus.publish(command_evt)
-                    except OpenCodeClientError as exc:
-                        error_preview = safe_preview(str(exc), 300)
-                        skill_debug["command_execution_error"] = error_preview
-                        skill_debug["used_command_api"] = False
-                        skill_debug["command_api_fallback"] = True
-                        command_failed_evt = add_trace_context({"type": "skill.command.failed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"command": skill_decision.skill["opencode_name"], "error": error_preview, "fallback": "skill_prompt"}}, trace_context)
-                        runtime_events.append(command_failed_evt)
-                        await bus.publish(command_failed_evt)
-                        response_payload = await _send_skill_prompt(
-                            client=client,
-                            record=record,
-                            parts=parts,
-                            skill_decision=skill_decision,
-                            invocation=invocation,
-                            model=model,
-                            agent=agent,
-                            system=system,
-                            skill_debug=skill_debug,
-                            runtime_events=runtime_events,
-                            bus=bus,
-                            trace_context=trace_context,
-                            portal_session_id=portal_session_id,
-                            request_id=request_id,
-                            command_error=error_preview,
-                            repository_context=repository_context,
-                            user_message_id=initial_user_message_id,
-                        )
-                else:
-                    response_payload = await _send_skill_prompt(
-                        client=client,
-                        record=record,
-                        parts=parts,
-                        skill_decision=skill_decision,
-                        invocation=invocation,
-                        model=model,
-                        agent=agent,
-                        system=system,
-                        skill_debug=skill_debug,
-                        runtime_events=runtime_events,
-                        bus=bus,
-                        trace_context=trace_context,
-                        portal_session_id=portal_session_id,
-                        request_id=request_id,
-                        repository_context=repository_context,
-                        user_message_id=initial_user_message_id,
-                    )
-        else:
-            try:
-                response_payload = await _send_message(client, record.opencode_session_id, parts=parts, model=model, agent=agent, system=system, message_id=initial_user_message_id)
-            except OpenCodeTransportTimeout as exc:
-                if not settings.chat_timeout_recovery_enabled:
-                    raise
-                completion_probe, waited_messages, submit_timeout_recovery = await _recover_after_submit_timeout(
-                    client=client,
-                    opencode_session_id=record.opencode_session_id,
-                    portal_session_id=portal_session_id,
-                    request_id=request_id,
-                    timeout_exc=exc,
-                    settings=settings,
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    chat_run_store=chat_run_store,
-                    before_assistant_message_ids=before_assistant_message_ids,
-                    before_snapshot_unreliable=before_snapshot_unreliable,
-                    wall_deadline=wall_deadline,
-                )
-                response_payload = {"messages": waited_messages, "timeout_recovery": submit_timeout_recovery}
-            except OpenCodeTransportDisconnected as exc:
-                if not settings.chat_timeout_recovery_enabled:
-                    raise
-                completion_probe, waited_messages, submit_transport_recovery = await _recover_after_submit_transport_error(
-                    client=client,
-                    opencode_session_id=record.opencode_session_id,
-                    portal_session_id=portal_session_id,
-                    request_id=request_id,
-                    transport_exc=exc,
-                    settings=settings,
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    chat_run_store=chat_run_store,
-                    before_assistant_message_ids=before_assistant_message_ids,
-                    before_snapshot_unreliable=before_snapshot_unreliable,
-                    wall_deadline=wall_deadline,
-                    opencode_process_manager=opencode_process_manager,
-                )
-                response_payload = {"messages": waited_messages, "transport_recovery": submit_transport_recovery}
-        if completion_probe is None:
-            wait_timeout = min(float(settings.chat_completion_timeout_seconds), _remaining_seconds(wall_deadline))
-            completion_probe, waited_messages = await _wait_for_assistant_completion(
-                client=client,
-                opencode_session_id=record.opencode_session_id,
-                response_payload=response_payload,
-                before_messages=before_messages,
-                timeout_seconds=wait_timeout,
-                poll_seconds=settings.chat_completion_poll_seconds,
-                before_snapshot_unreliable=before_snapshot_unreliable,
+        skill_handled, response_payload, synthetic_response, skill_debug = await _maybe_apply_skill_invocation(
+            app=app,
+            client=client,
+            record=record,
+            message=message,
+            parts=parts,
+            model=model,
+            agent=agent,
+            system=system,
+            message_id=initial_user_message_id,
+            runtime_events=runtime_events,
+            trace_context=trace_context,
+            portal_session_id=portal_session_id,
+            request_id=request_id,
+        )
+        if not skill_handled:
+            response_payload = await _send_message(
+                client,
+                record.opencode_session_id,
+                parts=parts,
+                model=model,
+                agent=agent,
+                system=system,
+                message_id=initial_user_message_id,
             )
-            if _deadline_expired(wall_deadline) and completion_probe.get("completion_state") not in {"completed", "success", "blocked", "error", "empty_final"}:
-                diagnostics = completion_probe.get("diagnostics") if isinstance(completion_probe.get("diagnostics"), dict) else {}
-                completion_probe = {
-                    **completion_probe,
-                    "completion_state": "incomplete",
-                    "reason": "wall_timeout",
-                    "diagnostics": {**diagnostics, "wall_timeout_seconds": settings.chat_total_wall_timeout_seconds},
-                }
-        latest_response_payload = response_payload
-        latest_waited_messages = waited_messages
-        continuation_count = 0
-        continuation_debug: list[dict[str, Any]] = []
-        completion_state = str(completion_probe.get("completion_state") or "incomplete")
-        assistant_text = str(completion_probe.get("text") or extract_assistant_text(response_payload) or "")
-        incomplete_reason = str(completion_probe.get("reason") or "")
-        last_sig = _completion_progress_signature(completion_probe, assistant_text, waited_messages)
-        loop = asyncio.get_running_loop()
-        progress_state: dict[str, Any] = {"last_progress_at": loop.time(), "last_event_type": "initial_probe", "count": 0}
-        auto_continue_suppressed_reason = ""
-        allow_continue, continue_reason = _should_auto_continue(completion_state, completion_probe, assistant_text, settings)
-        recovery_still_running_reasons = {"submit_timeout_recovery_exhausted_still_running", "opencode_transport_disconnected_still_running"}
-        if not allow_continue and continue_reason in recovery_still_running_reasons:
-            auto_continue_suppressed_reason = continue_reason
-            await _publish_continuation_event(
-                runtime_events=runtime_events,
-                bus=bus,
-                trace_context=trace_context,
-                chatlog_store=chatlog_store,
-                chat_run_store=chat_run_store,
-                event_type="continuation.suppressed",
-                session_id=portal_session_id,
-                request_id=request_id,
-                chatlog_id=request_id,
-                opencode_session_id=record.opencode_session_id,
-                turn_index=continuation_count + 1,
-                reason=continue_reason,
-                state="incomplete",
-                summary="Auto-continuation suppressed because OpenCode may still be running after submit recovery.",
-                metadata={
-                    "opencode_may_still_be_running": True,
-                    "submit_timeout_recovery_exhausted": continue_reason == "submit_timeout_recovery_exhausted_still_running",
-                    "opencode_transport_disconnected": continue_reason == "opencode_transport_disconnected_still_running",
-                    "auto_continue_after_running_timeout": bool(settings.chat_auto_continue_after_running_timeout),
-                },
-            )
-        progress_sub = bus.subscribe({"session_id": portal_session_id})
-        try:
-            while allow_continue:
-                _drain_progress_events(progress_sub, session_id=portal_session_id, request_id=request_id, progress_state=progress_state, binding_store=binding_store, opencode_session_id=record.opencode_session_id)
-                if completion_state in {"completed", "success", "blocked", "error", "empty_final"}:
-                    break
-                if _deadline_expired(wall_deadline):
-                    completion_state = "incomplete"
-                    incomplete_reason = "wall_timeout"
-                    await _publish_continuation_event(
-                        runtime_events=runtime_events,
-                        bus=bus,
-                        trace_context=trace_context,
-                        chatlog_store=chatlog_store,
-                chat_run_store=chat_run_store,
-                        event_type="continuation.wall_timeout",
-                        session_id=portal_session_id,
-                        request_id=request_id,
-                        chatlog_id=request_id,
-                        opencode_session_id=record.opencode_session_id,
-                        turn_index=continuation_count + 1,
-                        reason=continue_reason,
-                        state="incomplete",
-                        summary="Auto-continuation stopped because the chat wall timeout was reached.",
-                        metadata={
-                            "wall_timeout_seconds": settings.chat_total_wall_timeout_seconds,
-                            "last_progress_at": progress_state["last_progress_at"],
-                            "last_progress_event_type": progress_state.get("last_event_type", ""),
-                            "signature_before": _signature_hash(last_sig),
-                        },
-                        progress_state=progress_state,
-                    )
-                    break
-                if continuation_count >= settings.chat_auto_continue_max_turns:
-                    completion_state = "incomplete"
-                    incomplete_reason = "auto_continue_max_turns_reached"
-                    await _publish_continuation_event(
-                        runtime_events=runtime_events,
-                        bus=bus,
-                        trace_context=trace_context,
-                        chatlog_store=chatlog_store,
-                chat_run_store=chat_run_store,
-                        event_type="continuation.max_turns_reached",
-                        session_id=portal_session_id,
-                        request_id=request_id,
-                        chatlog_id=request_id,
-                        opencode_session_id=record.opencode_session_id,
-                        turn_index=continuation_count + 1,
-                        reason=continue_reason,
-                        state="incomplete",
-                        summary="Auto-continuation reached the configured turn limit.",
-                        metadata={
-                            "max_turns": settings.chat_auto_continue_max_turns,
-                            "turns_attempted": continuation_count,
-                            "last_progress_at": progress_state["last_progress_at"],
-                            "last_progress_event_type": progress_state.get("last_event_type", ""),
-                            "signature_before": _signature_hash(last_sig),
-                        },
-                        progress_state=progress_state,
-                    )
-                    break
-                last_progress_at = float(progress_state["last_progress_at"])
-                if settings.chat_auto_continue_no_progress_stop and (loop.time() - last_progress_at) >= float(settings.chat_no_progress_timeout_seconds):
-                    completion_state = "incomplete"
-                    incomplete_reason = "no_progress_timeout"
-                    await _publish_continuation_event(
-                        runtime_events=runtime_events,
-                        bus=bus,
-                        trace_context=trace_context,
-                        chatlog_store=chatlog_store,
-                chat_run_store=chat_run_store,
-                        event_type="continuation.no_progress",
-                        session_id=portal_session_id,
-                        request_id=request_id,
-                        chatlog_id=request_id,
-                        opencode_session_id=record.opencode_session_id,
-                        turn_index=continuation_count + 1,
-                        reason=continue_reason,
-                        state="incomplete",
-                        summary="Auto-continuation stopped because no assistant/tool progress was observed.",
-                        metadata={
-                            "last_progress_at": last_progress_at,
-                            "last_progress_event_type": progress_state.get("last_event_type", ""),
-                            "no_progress_timeout_seconds": settings.chat_no_progress_timeout_seconds,
-                            "signature_before": _signature_hash(last_sig),
-                            "signature_after": _signature_hash(last_sig),
-                        },
-                        progress_state=progress_state,
-                    )
-                    break
 
-                continuation_count += 1
-                cont_id = new_opencode_message_id()
-                if binding_store is not None:
-                    binding_store.bind_message(record.opencode_session_id, cont_id, portal_session_id, request_id, kind="continuation")
-                turn_started_at = utc_now_iso()
-                turn_started_loop = loop.time()
-                signature_before = last_sig
-                await _publish_continuation_event(
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    chatlog_store=chatlog_store,
-                chat_run_store=chat_run_store,
-                    event_type="continuation.started",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    chatlog_id=request_id,
-                    opencode_session_id=record.opencode_session_id,
-                    turn_index=continuation_count,
-                    message_id=cont_id,
-                    reason=continue_reason,
-                    state="running",
-                    summary="Auto-continuation turn started.",
-                    metadata={
-                        "started_at": turn_started_at,
-                        "trigger_reason": continue_reason,
-                        "previous_completion_state": completion_state,
-                        "previous_incomplete_reason": incomplete_reason,
-                        "signature_before": _signature_hash(signature_before),
-                        "overlap_risk_acknowledged": continue_reason == "submit_timeout_recovery_exhausted_still_running",
-                    },
-                    progress_state=progress_state,
-                )
-                timeout_recovery_debug = {"attempted": False, "state": "not_needed", "reason": ""}
-                transport_recovery_debug = {"attempted": False, "state": "not_needed", "reason": ""}
-                try:
-                    before_messages = await client.list_messages(record.opencode_session_id)
-                    continuation_prompt = settings.chat_auto_continue_checkpoint_prompt if settings.chat_auto_continue_checkpoint_enabled else settings.chat_auto_continue_prompt
-                    continuation_parts = [{"type": "text", "text": continuation_prompt, "metadata": {"efp_internal": "auto_continue", "portal_request_id": request_id, "continuation_index": continuation_count}}]
-                    await _publish_continuation_event(
-                        runtime_events=runtime_events,
-                        bus=bus,
-                        trace_context=trace_context,
-                        chatlog_store=chatlog_store,
-                chat_run_store=chat_run_store,
-                        event_type="continuation.prompt_sent",
-                        session_id=portal_session_id,
-                        request_id=request_id,
-                        chatlog_id=request_id,
-                        opencode_session_id=record.opencode_session_id,
-                        turn_index=continuation_count,
-                        message_id=cont_id,
-                        reason=continue_reason,
-                        state="running",
-                        summary="Auto-continuation prompt sent.",
-                        metadata={
-                            "prompt_preview": safe_preview(continuation_prompt, 500),
-                            "prompt_length": len(continuation_prompt),
-                            "checkpoint_enabled": bool(settings.chat_auto_continue_checkpoint_enabled),
-                            "is_original_user_prompt": False,
-                        },
-                        progress_state=progress_state,
-                    )
-                    continuation_response_payload = await _send_message(client, record.opencode_session_id, parts=continuation_parts, model=model, agent=agent, system=system, message_id=cont_id)
-                    _drain_progress_events(progress_sub, session_id=portal_session_id, request_id=request_id, progress_state=progress_state, binding_store=binding_store, opencode_session_id=record.opencode_session_id)
-                    continuation_wait_timeout = min(float(settings.chat_completion_timeout_seconds), _remaining_seconds(wall_deadline))
-                    completion_probe, after_messages = await _wait_for_assistant_completion(client=client, opencode_session_id=record.opencode_session_id, response_payload=continuation_response_payload, before_messages=before_messages, timeout_seconds=continuation_wait_timeout, poll_seconds=settings.chat_completion_poll_seconds)
-                    _drain_progress_events(progress_sub, session_id=portal_session_id, request_id=request_id, progress_state=progress_state, binding_store=binding_store, opencode_session_id=record.opencode_session_id)
-                    if _deadline_expired(wall_deadline) and completion_probe.get("completion_state") not in {"completed", "success", "blocked", "error", "empty_final"}:
-                        diagnostics = completion_probe.get("diagnostics") if isinstance(completion_probe.get("diagnostics"), dict) else {}
-                        completion_probe = {**completion_probe, "completion_state": "incomplete", "reason": "wall_timeout", "diagnostics": {**diagnostics, "wall_timeout_seconds": settings.chat_total_wall_timeout_seconds}}
-                    latest_response_payload = continuation_response_payload
-                    latest_waited_messages = after_messages
-                except OpenCodeTransportTimeout as exc:
-                    if not settings.chat_timeout_recovery_enabled:
-                        raise
-                    completion_probe, after_messages, submit_timeout_recovery = await _recover_after_submit_timeout(
-                        client=client,
-                        opencode_session_id=record.opencode_session_id,
-                        portal_session_id=portal_session_id,
-                        request_id=request_id,
-                        timeout_exc=exc,
-                        settings=settings,
-                        runtime_events=runtime_events,
-                        bus=bus,
-                        trace_context=trace_context,
-                        chat_run_store=chat_run_store,
-                        before_assistant_message_ids=set(extract_assistant_message_ids(before_messages)),
-                        before_snapshot_unreliable=False,
-                        wall_deadline=wall_deadline,
-                    )
-                    _drain_progress_events(progress_sub, session_id=portal_session_id, request_id=request_id, progress_state=progress_state, binding_store=binding_store, opencode_session_id=record.opencode_session_id)
-                    timeout_recovery_debug = {
-                        "attempted": True,
-                        "state": "recovered" if submit_timeout_recovery.get("recovered") else "exhausted",
-                        "reason": submit_timeout_recovery.get("reason", ""),
-                        "polls": submit_timeout_recovery.get("polls", 0),
-                    }
-                    continuation_response_payload = {"messages": after_messages, "timeout_recovery": submit_timeout_recovery}
-                    latest_response_payload = continuation_response_payload
-                    latest_waited_messages = after_messages
-                except OpenCodeTransportDisconnected as exc:
-                    if not settings.chat_timeout_recovery_enabled:
-                        raise
-                    completion_probe, after_messages, submit_transport_recovery = await _recover_after_submit_transport_error(
-                        client=client,
-                        opencode_session_id=record.opencode_session_id,
-                        portal_session_id=portal_session_id,
-                        request_id=request_id,
-                        transport_exc=exc,
-                        settings=settings,
-                        runtime_events=runtime_events,
-                        bus=bus,
-                        trace_context=trace_context,
-                        chat_run_store=chat_run_store,
-                        before_assistant_message_ids=set(extract_assistant_message_ids(before_messages)),
-                        before_snapshot_unreliable=False,
-                        wall_deadline=wall_deadline,
-                        opencode_process_manager=opencode_process_manager,
-                    )
-                    _drain_progress_events(progress_sub, session_id=portal_session_id, request_id=request_id, progress_state=progress_state, binding_store=binding_store, opencode_session_id=record.opencode_session_id)
-                    transport_recovery_debug = {
-                        "attempted": True,
-                        "state": "recovered" if submit_transport_recovery.get("recovered") else "exhausted",
-                        "reason": submit_transport_recovery.get("reason", ""),
-                        "polls": submit_transport_recovery.get("polls", 0),
-                    }
-                    continuation_response_payload = {"messages": after_messages, "transport_recovery": submit_transport_recovery}
-                    latest_response_payload = continuation_response_payload
-                    latest_waited_messages = after_messages
-                except Exception as exc:
-                    completed_at = utc_now_iso()
-                    failed_debug = {
-                        "turn_index": continuation_count,
-                        "index": continuation_count,
-                        "completion_state": "incomplete",
-                        "reason": "auto_continue_failed",
-                        "message_id": cont_id,
-                        "started_at": turn_started_at,
-                        "completed_at": completed_at,
-                        "state": "failed",
-                        "last_progress_at": progress_state["last_progress_at"],
-                        "last_progress_event_type": progress_state.get("last_event_type", ""),
-                        "duration_seconds": round(max(0.0, loop.time() - turn_started_loop), 3),
-                        "signature_before": _signature_hash(signature_before),
-                        "signature_after": _signature_hash(last_sig),
-                        "changed_signature": False,
-                        "changed_signature_hash": _signature_hash(last_sig),
-                        "timeout_recovery": timeout_recovery_debug,
-                        "transport_recovery": transport_recovery_debug,
-                        "error_type": type(exc).__name__,
-                        "error_summary": safe_preview(str(exc), 300),
-                    }
-                    continuation_debug.append(failed_debug)
-                    await _publish_continuation_event(
-                        runtime_events=runtime_events,
-                        bus=bus,
-                        trace_context=trace_context,
-                        chatlog_store=chatlog_store,
-                chat_run_store=chat_run_store,
-                        event_type="continuation.failed",
-                        session_id=portal_session_id,
-                        request_id=request_id,
-                        chatlog_id=request_id,
-                        opencode_session_id=record.opencode_session_id,
-                        turn_index=continuation_count,
-                        message_id=cont_id,
-                        reason=continue_reason,
-                        state="failed",
-                        summary="Auto-continuation failed.",
-                        metadata={k: v for k, v in failed_debug.items() if k != "text_preview"},
-                        progress_state=progress_state,
-                    )
-                    completion_state = "incomplete"
-                    incomplete_reason = "auto_continue_failed"
-                    break
-
-                assistant_text = str(completion_probe.get("text") or extract_assistant_text(continuation_response_payload) or assistant_text)
-                completion_state = str(completion_probe.get("completion_state") or completion_state)
-                new_sig = _completion_progress_signature(completion_probe, assistant_text, after_messages)
-                changed_signature = new_sig != last_sig
-                if changed_signature:
-                    progress_state["last_progress_at"] = loop.time()
-                    progress_state["last_event_type"] = "assistant_signature_changed"
-                    progress_state["count"] = int(progress_state.get("count") or 0) + 1
-                completed_at = utc_now_iso()
-                debug_entry = {
-                    "turn_index": continuation_count,
-                    "index": continuation_count,
-                    "completion_state": completion_state,
-                    "reason": completion_probe.get("reason"),
-                    "message_id": cont_id,
-                    "started_at": turn_started_at,
-                    "completed_at": completed_at,
-                    "state": "completed" if completion_state in {"completed", "success"} else completion_state,
-                    "last_progress_at": progress_state["last_progress_at"],
-                    "last_progress_event_type": progress_state.get("last_event_type", ""),
-                    "duration_seconds": round(max(0.0, loop.time() - turn_started_loop), 3),
-                    "signature_before": _signature_hash(signature_before),
-                    "signature_after": _signature_hash(new_sig),
-                    "changed_signature": changed_signature,
-                    "changed_signature_hash": _signature_hash(new_sig),
-                    "timeout_recovery": timeout_recovery_debug,
-                    "transport_recovery": transport_recovery_debug,
-                    "text_preview": safe_preview(assistant_text, 200),
-                }
-                continuation_debug.append(debug_entry)
-                await _publish_continuation_event(
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    chatlog_store=chatlog_store,
-                chat_run_store=chat_run_store,
-                    event_type="continuation.completed",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    chatlog_id=request_id,
-                    opencode_session_id=record.opencode_session_id,
-                    turn_index=continuation_count,
-                    message_id=cont_id,
-                    reason=str(completion_probe.get("reason") or continue_reason or ""),
-                    state="success" if completion_state in {"completed", "success"} else completion_state,
-                    summary="Auto-continuation turn completed.",
-                    metadata={k: v for k, v in debug_entry.items() if k != "text_preview"},
-                    progress_state=progress_state,
-                )
-                if completion_state in {"completed", "success"}:
-                    incomplete_reason = ""
-                    break
-                if str(completion_probe.get("reason") or "") == "wall_timeout":
-                    completion_state = "incomplete"
-                    incomplete_reason = "wall_timeout"
-                    await _publish_continuation_event(
-                        runtime_events=runtime_events,
-                        bus=bus,
-                        trace_context=trace_context,
-                        chatlog_store=chatlog_store,
-                chat_run_store=chat_run_store,
-                        event_type="continuation.wall_timeout",
-                        session_id=portal_session_id,
-                        request_id=request_id,
-                        chatlog_id=request_id,
-                        opencode_session_id=record.opencode_session_id,
-                        turn_index=continuation_count,
-                        message_id=cont_id,
-                        reason="wall_timeout",
-                        state="incomplete",
-                        summary="Auto-continuation stopped because the chat wall timeout was reached.",
-                        metadata={
-                            "wall_timeout_seconds": settings.chat_total_wall_timeout_seconds,
-                            "last_progress_at": progress_state["last_progress_at"],
-                            "last_progress_event_type": progress_state.get("last_event_type", ""),
-                            "signature_before": _signature_hash(signature_before),
-                            "signature_after": _signature_hash(new_sig),
-                        },
-                        progress_state=progress_state,
-                    )
-                    break
-                last_sig = new_sig
-                allow_continue, continue_reason = _should_auto_continue(completion_state, completion_probe, assistant_text, settings)
-                if completion_state not in {"completed", "success"}:
-                    incomplete_reason = str(completion_probe.get("reason") or continue_reason or "")
-        finally:
-            bus.unsubscribe(progress_sub)
-        if completion_state in {"completed", "success"}:
+        after_messages = await client.list_messages(record.opencode_session_id)
+        response_text = synthetic_response or extract_assistant_text(response_payload) or extract_assistant_text(after_messages)
+        if response_text.strip():
+            assistant_text = response_text.strip()
+            completion_state = "completed"
             incomplete_reason = ""
-        if completion_state != "completed" and not incomplete_reason:
-            incomplete_reason = str(completion_probe.get("reason") or "assistant_completion_not_final")
-        payload_message = response_payload.get("message") if isinstance(response_payload, dict) else None
-        if isinstance(payload_message, dict):
-            reasoning_texts = extract_reasoning_texts_from_parts(payload_message.get("parts"))
-            for item in reasoning_texts:
-                think_event = add_trace_context({"type": "llm_thinking", "engine": "opencode", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "message": safe_preview(item, 300), "data": {"message": safe_preview(item, 300)}, "created_at": utc_now_iso()}, trace_context)
-                runtime_events.append(think_event)
-                await bus.publish(think_event)
-        user_message_id = initial_user_message_id
-        assistant_message_id = ""
-        assistant_message_ids: list[str] = []
-        if not before_snapshot_unreliable:
-            try:
-                final_messages_for_ids = latest_waited_messages
-                if not final_messages_for_ids:
-                    final_messages_for_ids = await client.list_messages(record.opencode_session_id)
-                user_message_id, assistant_message_id = _detect_new_message_ids(before_messages, final_messages_for_ids)
-                _append_unique_message_ids(
-                    assistant_message_ids,
-                    extract_assistant_message_ids(final_messages_for_ids, exclude_message_ids=before_assistant_message_ids),
-                )
-            except Exception as exc:
-                message_id_detection_error_after = safe_preview(str(exc), 500)
-        if completion_state == "completed" and not assistant_text.strip():
+            ok = synthetic_response is None
+        else:
+            assistant_text = "OpenCode completed without a visible assistant response."
             completion_state = "empty_final"
             incomplete_reason = "empty_final_assistant_text"
-            assistant_text = "OpenCode completed without a visible assistant response. The request may have produced tool output only; no empty success message was recorded."
-        if not assistant_message_id and isinstance(latest_response_payload, dict):
-            candidate = latest_response_payload.get("info", {}).get("id") if isinstance(latest_response_payload.get("info"), dict) else ""
-            if not candidate and isinstance(latest_response_payload.get("message"), dict):
-                candidate = adapter_message_id(latest_response_payload["message"])
-            assistant_message_id = str(candidate or "")
-        _append_unique_message_ids(
-            assistant_message_ids,
-            extract_assistant_message_ids(latest_response_payload, exclude_message_ids=before_assistant_message_ids),
-        )
-        probe_message_id = str(completion_probe.get("message_id") or "")
-        _append_unique_message_ids(assistant_message_ids, [probe_message_id, assistant_message_id])
-        if assistant_message_ids:
-            assistant_message_id = assistant_message_ids[-1]
-        elif assistant_message_id:
-            assistant_message_ids = [assistant_message_id]
-        if binding_store is not None:
-            for _aid in [assistant_message_id, *assistant_message_ids]:
-                if _aid:
-                    binding_store.bind_message(record.opencode_session_id, _aid, portal_session_id, request_id, kind="assistant")
-        if chat_run_store is not None:
-            current_run = chat_run_store.get(request_id)
-            current_stream_state = getattr(current_run, "stream_state", "none") if current_run is not None else "none"
-            current_status = getattr(current_run, "status", "running") if current_run is not None else "running"
-            chat_run_store.start_run(
-                request_id=request_id,
-                portal_session_id=portal_session_id,
-                opencode_session_id=record.opencode_session_id,
-                user_message_id=user_message_id or initial_user_message_id,
-                assistant_message_id=assistant_message_id,
-                assistant_message_ids=assistant_message_ids,
-                status=current_status if current_status in {"accepted", "running", "stream_attached", "stream_detached"} else "running",
-                stream_state=current_stream_state,
-                completion_state=completion_state,
-            )
-        if skill_debug and not skill_debug.get("blocked"):
-            completed_evt = add_trace_context({"type": "skill.completed", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": {"skill": skill_debug.get("skill_name"), "kind": skill_debug.get("kind", "skill"), "used_command_api": bool(skill_debug.get("used_command_api")), "used_skill_prompt": bool(skill_debug.get("used_skill_prompt"))}}, trace_context)
-            runtime_events.append(completed_evt)
-            await bus.publish(completed_evt)
+            ok = False
 
-        assistant_projection_text = assistant_text
-        if completion_state == "completed":
-            await _publish_assistant_message_event(
-                chat_run_store=chat_run_store,
-                runtime_events=runtime_events,
-                bus=bus,
-                trace_context=trace_context,
-                event_type="assistant.message.completed",
-                session_id=portal_session_id,
-                request_id=request_id,
-                opencode_session_id=record.opencode_session_id,
-                assistant_message_id=assistant_message_id,
-                assistant_message_ids=assistant_message_ids,
-                text=assistant_text,
-                display_blocks=[],
-                state="completed",
-            )
-            out_events = [
-                assistant_delta_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
-                chat_complete_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
-                chat_completed_compat_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, text=assistant_text),
-            ]
-            if out_events and isinstance(out_events[0], dict):
-                out_events[0]["synthetic_final_delta"] = True
-                if not isinstance(out_events[0].get("data"), dict):
-                    out_events[0]["data"] = {}
-                out_events[0]["data"]["synthetic_final_delta"] = True
-            status = "success"; latest_state = "success"; ok = True
-            final_context = {**context_state, "summary": assistant_text[:500], "current_state": "completed", "next_step": ""}
-        elif completion_state == "blocked":
-            assistant_text = "OpenCode is blocked waiting for a permission/tool decision before producing a final answer."
-            out_events = [{"type": "chat.blocked", "event_type": "chat.blocked", "state": "blocked", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": completion_probe.get("diagnostics", {})}]
-            status = "blocked"; latest_state = "blocked"; ok = False
-            final_context = {**context_state, "summary": assistant_text[:500], "current_state": "blocked", "next_step": ""}
-        elif completion_state == "empty_final":
-            out_events = [{"type": "chat.empty_final", "event_type": "chat.empty_final", "state": "empty_final", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": completion_probe.get("diagnostics", {})}]
-            status = "empty_final"; latest_state = "empty_final"; ok = False
-            final_context = {**context_state, "summary": assistant_text[:500], "current_state": "empty_final", "next_step": ""}
-        elif completion_state == "error":
-            reason = completion_probe.get("diagnostics", {}).get("error_summary") if isinstance(completion_probe.get("diagnostics"), dict) else ""
-            assistant_text = f"OpenCode tool execution failed before a final answer was produced: {reason or 'unknown tool error'}."
-            out_events = [chat_failed_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=record.opencode_session_id, error=assistant_text)]
-            status = "error"; latest_state = "error"; ok = False
-            final_context = {**context_state, "summary": assistant_text[:500], "current_state": "error", "next_step": ""}
-        else:
-            completion_state = "incomplete"
-            if assistant_projection_text.strip():
-                await _publish_assistant_message_event(
-                    chat_run_store=chat_run_store,
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    event_type="assistant.message.updated",
+        payload_message = response_payload.get("message") if isinstance(response_payload, dict) else None
+        if isinstance(payload_message, dict):
+            for item in extract_reasoning_texts_from_parts(payload_message.get("parts")):
+                reasoning = _event_payload(
+                    "llm_thinking",
                     session_id=portal_session_id,
                     request_id=request_id,
                     opencode_session_id=record.opencode_session_id,
-                    assistant_message_id=assistant_message_id,
-                    assistant_message_ids=assistant_message_ids,
-                    text=assistant_projection_text,
-                    display_blocks=[],
-                    state="incomplete",
+                    state="running",
+                    summary=safe_preview(item, 300),
+                    data={"message": safe_preview(item, 300)},
+                    trace_context=trace_context,
                 )
-            assistant_text = "OpenCode stream ended before a final assistant response was available. The last visible text was only an intermediate progress update."
-            out_events = [{"type": "chat.incomplete", "event_type": "chat.incomplete", "state": "incomplete", "session_id": portal_session_id, "request_id": request_id, "opencode_session_id": record.opencode_session_id, "data": completion_probe.get("diagnostics", {})}]
-            status = "incomplete"; latest_state = "incomplete"; ok = False
-            final_context = {**context_state, "summary": assistant_text[:500], "current_state": "incomplete", "next_step": ""}
-        for event in [add_trace_context(x, trace_context) for x in out_events]:
-            runtime_events.append(event)
-            await bus.publish(event)
-            if chat_run_store is not None and hasattr(chat_run_store, "update_from_runtime_event"):
-                try:
-                    chat_run_store.update_from_runtime_event(request_id, event)
-                except Exception:
-                    logger.warning("failed to update chat run from final event", exc_info=True)
+                await _publish_event(bus, runtime_events, reasoning)
+
+        user_message_id, assistant_message_id = _detect_new_message_ids(before_messages, after_messages)
+        user_message_id = user_message_id or initial_user_message_id
+        assistant_message_ids: list[str] = []
+        before_assistant_ids = set(extract_assistant_message_ids(before_messages))
+        _append_unique_message_ids(assistant_message_ids, extract_assistant_message_ids(after_messages, exclude_message_ids=before_assistant_ids))
+        _append_unique_message_ids(assistant_message_ids, extract_assistant_message_ids(response_payload, exclude_message_ids=before_assistant_ids))
+        if not assistant_message_id and isinstance(response_payload, dict):
+            candidate = response_payload.get("info", {}).get("id") if isinstance(response_payload.get("info"), dict) else ""
+            if not candidate and isinstance(response_payload.get("message"), dict):
+                candidate = adapter_message_id(response_payload["message"])
+            assistant_message_id = str(candidate or "")
+        _append_unique_message_ids(assistant_message_ids, [assistant_message_id])
+        if assistant_message_ids:
+            assistant_message_id = assistant_message_ids[-1]
+
+        terminal_type = "chat.completed" if completion_state == "completed" else "chat.failed"
+        terminal_state = "success" if completion_state == "completed" else completion_state
+        terminal = _event_payload(
+            terminal_type,
+            session_id=portal_session_id,
+            request_id=request_id,
+            opencode_session_id=record.opencode_session_id,
+            state=terminal_state,
+            summary=assistant_text,
+            data={"message": assistant_text, "completion_state": completion_state},
+            trace_context=trace_context,
+        )
+        await _publish_event(bus, runtime_events, terminal)
 
         updated = store.update_after_chat(portal_session_id, message, assistant_text, model, agent)
-        provider = provider_for_trace
-        usage_record = usage_tracker.record_chat(session_id=portal_session_id, request_id=request_id, model=model, provider=provider, response_payload=response_payload, input_text=message, output_text=assistant_text)
+        usage_record = usage_tracker.record_chat(
+            session_id=portal_session_id,
+            request_id=request_id,
+            model=model,
+            provider=provider_for_trace,
+            response_payload=response_payload,
+            input_text=message,
+            output_text=assistant_text,
+        )
         usage_record["request_id"] = trace_context.get("request_id", usage_record.get("request_id", ""))
-        continuation_metadata = {
-            "enabled": bool(settings.chat_auto_continue_enabled),
-            "turns_attempted": continuation_count,
-            "max_turns": int(settings.chat_auto_continue_max_turns),
-            "debug": continuation_debug,
+        final_context = _context_state(message, "completed" if completion_state == "completed" else completion_state, assistant_text)
+        llm_debug: dict[str, Any] = {
+            "engine": "opencode",
+            "opencode_session_id": updated.opencode_session_id,
+            "usage": usage_record,
+            "response_payload_preview": safe_preview(_redact_attachment_payloads_for_debug(response_payload), 2000),
+            "trace_context": trace_context,
+            "message_ids": {
+                "user_message_id": user_message_id,
+                "assistant_message_id": assistant_message_id,
+                "assistant_message_ids": assistant_message_ids,
+            },
+            "attachments": attachment_debug,
         }
-        if auto_continue_suppressed_reason:
-            continuation_metadata["auto_continue_suppressed_reason"] = auto_continue_suppressed_reason
-
-        llm_debug = {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "response_payload_preview": safe_preview(_redact_attachment_payloads_for_debug(response_payload), 2000), "trace_context": trace_context, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids}, "attachments": attachment_debug, "continuation": continuation_metadata, "continuations": continuation_debug}
-        if submit_timeout_recovery:
-            llm_debug["timeout_recovery"] = submit_timeout_recovery
-        if submit_transport_recovery:
-            llm_debug["transport_recovery"] = submit_transport_recovery
         if skill_debug:
             llm_debug["skill_invocation"] = skill_debug
-        if message_id_detection_error_before:
-            llm_debug["message_id_detection_error_before"] = message_id_detection_error_before
-        if message_id_detection_error_after:
-            llm_debug["message_id_detection_error_after"] = message_id_detection_error_after
-        chatlog_store.finish_entry(portal_session_id, request_id=request_id, status=status, response=assistant_text, runtime_events=runtime_events, events=runtime_events, context_state=final_context, llm_debug=llm_debug)
-
-        metadata_model = usage_record.get("model") or model or "unknown"
-        metadata_provider = usage_record.get("provider") or provider or "unknown"
-        if not updated.deleted:
-            await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.completed", latest_event_state=latest_state, request_id=request_id, summary=assistant_text[:300], runtime_events=runtime_events, metadata={"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "model": metadata_model, "provider": metadata_provider, "context_state": final_context, "usage": usage_record, "trace_context": trace_context})
-
+        if partial_recovery or getattr(updated, "partial_recovery", False):
+            llm_debug["partial_recovery"] = True
+        chatlog_store.finish_entry(
+            portal_session_id,
+            request_id=request_id,
+            status="success" if completion_state == "completed" else completion_state,
+            response=assistant_text,
+            runtime_events=runtime_events,
+            events=runtime_events,
+            context_state=final_context,
+            llm_debug=llm_debug,
+        )
+        await portal_metadata_client.publish_session_metadata(
+            session_id=portal_session_id,
+            latest_event_type=terminal_type,
+            latest_event_state=terminal_state,
+            request_id=request_id,
+            summary=assistant_text[:300],
+            runtime_events=runtime_events,
+            metadata={
+                "engine": "opencode",
+                "opencode_session_id": updated.opencode_session_id,
+                "model": usage_record.get("model") or model or "unknown",
+                "provider": usage_record.get("provider") or provider_for_trace or "unknown",
+                "context_state": final_context,
+                "usage": usage_record,
+                "trace_context": trace_context,
+            },
+        )
+        return {
+            "ok": ok,
+            "completion_state": completion_state,
+            "incomplete_reason": incomplete_reason,
+            "session_id": portal_session_id,
+            "request_id": trace_context.get("request_id", request_id),
+            "response": assistant_text,
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+            "assistant_message_ids": assistant_message_ids,
+            "events": runtime_events,
+            "runtime_events": runtime_events,
+            "usage": usage_record,
+            "metadata": {},
+            "context_state": final_context,
+            "_llm_debug": llm_debug,
+        }
     except SessionDeletedError:
         raise web.HTTPGone(text=json.dumps({"error": "session_deleted", "session_id": portal_session_id, "detail": "Session was deleted"}), content_type="application/json")
     except OpenCodeClientError as exc:
         if not trace_context:
-            trace_context = build_trace_context(settings, request_id=request_id, session_id=portal_session_id, opencode_session_id=opencode_session_id, profile_version=profile_version, runtime_profile_id=runtime_profile_id, model=model or "", provider=provider_for_trace or "")
-        failed = add_trace_context(chat_failed_event(session_id=portal_session_id, request_id=request_id, opencode_session_id=opencode_session_id, error=str(exc)), trace_context)
-        runtime_events.append(failed)
-        await bus.publish(failed)
-        if chat_run_store is not None:
-            try:
-                failure_payload = {"ok": False, "completion_state": "error", "incomplete_reason": str(exc), "session_id": portal_session_id, "request_id": request_id, "response": str(exc), "runtime_events": runtime_events, "events": runtime_events}
-                if chat_run_store.get(request_id) is None:
-                    chat_run_store.start_run(request_id=request_id, portal_session_id=portal_session_id, opencode_session_id=opencode_session_id, status="running", completion_state="running")
-                chat_run_store.mark_failed(request_id, str(exc), failure_payload)
-                await _publish_run_lifecycle_event(
-                    chat_run_store=chat_run_store,
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    event_type="chat.run.failed",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=opencode_session_id,
-                    state="failed",
-                    data={"status": "failed", "completion_state": "error", "reason": str(exc)},
-                    summary="Chat run failed.",
-                )
-            except Exception:
-                logger.warning("failed to mark chat run failed", exc_info=True)
-        chatlog_store.fail_entry(portal_session_id, request_id=request_id, error=str(exc), runtime_events=runtime_events, context_state=context_state, llm_debug={"engine": "opencode", "opencode_session_id": opencode_session_id, "trace_context": trace_context})
-        await portal_metadata_client.publish_session_metadata(session_id=portal_session_id, latest_event_type="chat.failed", latest_event_state="error", request_id=request_id, summary=str(exc), runtime_events=runtime_events, metadata={"engine": "opencode", "trace_context": trace_context})
+            trace_context = build_trace_context(
+                settings,
+                request_id=request_id,
+                session_id=portal_session_id,
+                opencode_session_id=opencode_session_id,
+                profile_version=profile_version,
+                runtime_profile_id=runtime_profile_id,
+                model=model or "",
+                provider=provider_for_trace or "",
+            )
+        failed = _event_payload(
+            "chat.failed",
+            session_id=portal_session_id,
+            request_id=request_id,
+            opencode_session_id=opencode_session_id,
+            state="failed",
+            summary=str(exc),
+            data={"error": str(exc)},
+            trace_context=trace_context,
+        )
+        await _publish_event(bus, runtime_events, failed)
+        chatlog_store.fail_entry(
+            portal_session_id,
+            request_id=request_id,
+            error=str(exc),
+            runtime_events=runtime_events,
+            context_state=_context_state(message, "failed", str(exc)),
+            llm_debug={"engine": "opencode", "opencode_session_id": opencode_session_id, "trace_context": trace_context},
+        )
+        await portal_metadata_client.publish_session_metadata(
+            session_id=portal_session_id,
+            latest_event_type="chat.failed",
+            latest_event_state="failed",
+            request_id=request_id,
+            summary=str(exc),
+            runtime_events=runtime_events,
+            metadata={"engine": "opencode", "trace_context": trace_context},
+        )
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
-
-    response_metadata = {"continuation": continuation_metadata}
-    completion_diagnostics = completion_probe.get("diagnostics") if isinstance(completion_probe.get("diagnostics"), dict) else {}
-    if completion_diagnostics:
-        response_metadata["diagnostics"] = safe_preview(completion_diagnostics, 1000)
-    if auto_continue_suppressed_reason:
-        response_metadata["auto_continue_suppressed_reason"] = auto_continue_suppressed_reason
-    out = {"ok": ok, "completion_state": completion_state, "incomplete_reason": incomplete_reason, "session_id": portal_session_id, "request_id": trace_context.get("request_id", request_id), "response": assistant_text, "user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids, "events": runtime_events, "runtime_events": runtime_events, "usage": usage_record, "continuation_count": continuation_count, "auto_continue_enabled": settings.chat_auto_continue_enabled, "metadata": response_metadata, "context_state": final_context, "_llm_debug": {"engine": "opencode", "opencode_session_id": updated.opencode_session_id, "usage": usage_record, "thinking_events": runtime_events, "trace_context": trace_context, "attachments": attachment_debug, "completion_probe": completion_probe, "message_ids": {"user_message_id": user_message_id or "", "assistant_message_id": assistant_message_id or "", "assistant_message_ids": assistant_message_ids}, "continuation": continuation_metadata, "continuations": continuation_debug}}
-    if submit_timeout_recovery:
-        out["_llm_debug"]["timeout_recovery"] = submit_timeout_recovery
-    if submit_transport_recovery:
-        out["_llm_debug"]["transport_recovery"] = submit_transport_recovery
-    if message_id_detection_error_before:
-        out["_llm_debug"]["message_id_detection_error_before"] = message_id_detection_error_before
-    if message_id_detection_error_after:
-        out["_llm_debug"]["message_id_detection_error_after"] = message_id_detection_error_after
-    if 'skill_debug' in locals() and skill_debug:
-        out["_llm_debug"]["skill_invocation"] = skill_debug
-    if partial_recovery or getattr(updated, "partial_recovery", False):
-        out["_llm_debug"]["partial_recovery"] = True
-    run_kept_active = False
-    if chat_run_store is not None:
-        try:
-            current_run = chat_run_store.get(request_id)
-            stream_detached = bool(current_run is not None and getattr(current_run, "stream_state", "") == "detached")
-            if auto_continue_suppressed_reason in {"submit_timeout_recovery_exhausted_still_running", "opencode_transport_disconnected_still_running"}:
-                response_metadata["opencode_may_still_be_running"] = True
-                if auto_continue_suppressed_reason == "opencode_transport_disconnected_still_running" and hasattr(chat_run_store, "mark_recovering"):
-                    transport_diagnostics = completion_diagnostics if isinstance(completion_diagnostics, dict) else {}
-                    chat_run_store.mark_recovering(
-                        request_id,
-                        "opencode_transport_disconnected",
-                        {
-                            **transport_diagnostics,
-                            "recovery_state": "recovering",
-                            "opencode_may_still_be_running": True,
-                            "restart_attempted": bool(transport_diagnostics.get("restart_attempted", False)),
-                            "restart_status": transport_diagnostics.get("restart_status"),
-                        },
-                    )
-                else:
-                    chat_run_store.keep_running(
-                        request_id,
-                        reason=auto_continue_suppressed_reason,
-                        payload={**out, "metadata": {**response_metadata, "opencode_may_still_be_running": True}},
-                        stream_detached=stream_detached,
-                    )
-                run_kept_active = True
-                await _publish_run_lifecycle_event(
-                    chat_run_store=chat_run_store,
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    event_type="chat.run.incomplete",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=updated.opencode_session_id,
-                    state="running",
-                    data={"status": "recovering" if auto_continue_suppressed_reason == "opencode_transport_disconnected_still_running" else ("stream_detached" if stream_detached else "running"), "completion_state": completion_state, "reason": auto_continue_suppressed_reason, "opencode_may_still_be_running": True},
-                    summary="Chat run is still running after submit recovery was exhausted.",
-                )
-            elif completion_state == "completed":
-                chat_run_store.complete_run(request_id, out)
-                await _publish_run_lifecycle_event(
-                    chat_run_store=chat_run_store,
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    event_type="chat.run.completed",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=updated.opencode_session_id,
-                    state="completed",
-                    data={"status": "completed", "completion_state": completion_state},
-                    summary="Chat run completed.",
-                )
-            elif completion_state == "error":
-                chat_run_store.mark_failed(request_id, incomplete_reason or "chat_failed", out)
-                await _publish_run_lifecycle_event(
-                    chat_run_store=chat_run_store,
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    event_type="chat.run.failed",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=updated.opencode_session_id,
-                    state="failed",
-                    data={"status": "failed", "completion_state": completion_state, "reason": incomplete_reason},
-                    summary="Chat run failed.",
-                )
-            else:
-                chat_run_store.mark_incomplete(request_id, incomplete_reason or completion_state, out)
-                await _publish_run_lifecycle_event(
-                    chat_run_store=chat_run_store,
-                    runtime_events=runtime_events,
-                    bus=bus,
-                    trace_context=trace_context,
-                    event_type="chat.run.incomplete",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=updated.opencode_session_id,
-                    state="incomplete",
-                    data={"status": "incomplete", "completion_state": completion_state, "reason": incomplete_reason},
-                    summary="Chat run ended before a completed assistant response.",
-                )
-        except Exception:
-            logger.warning("failed to finalize chat run", exc_info=True)
-    if binding_store is not None:
-        if not run_kept_active:
-            binding_store.complete(request_id)
-    return out
+    except web.HTTPException:
+        raise
+    except Exception as exc:
+        detail = safe_preview(str(exc) or exc.__class__.__name__, 1000)
+        if not trace_context:
+            trace_context = build_trace_context(settings, request_id=request_id, session_id=portal_session_id, opencode_session_id=opencode_session_id)
+        failed = _event_payload(
+            "chat.failed",
+            session_id=portal_session_id,
+            request_id=request_id,
+            opencode_session_id=opencode_session_id,
+            state="failed",
+            summary=str(detail),
+            data={"error": detail},
+            trace_context=trace_context,
+        )
+        await _publish_event(bus, runtime_events, failed)
+        chatlog_store.fail_entry(
+            portal_session_id,
+            request_id=request_id,
+            error=str(detail),
+            runtime_events=runtime_events,
+            context_state=_context_state(message, "failed", str(detail)),
+            llm_debug={"engine": "opencode", "opencode_session_id": opencode_session_id, "trace_context": trace_context},
+        )
+        raise web.HTTPInternalServerError(text=json.dumps({"error": "chat_failed", "detail": detail}), content_type="application/json")
 
 
 async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2467,406 +837,72 @@ async def chat_handler(request: web.Request) -> web.Response:
         raise _bad_request("invalid_json")
     if not isinstance(payload, dict):
         raise _bad_request("invalid_json")
-    return web.json_response(await handle_chat_payload(request, payload))
+    result = await handle_chat_payload_for_app(request.app, payload)
+    return web.json_response(result)
 
 
-STREAM_HEARTBEAT_SECONDS = 15.0
-BRIDGE_EVENT_TYPES = {"tool.started", "tool.completed", "tool.failed", "permission_request", "permission_resolved", "assistant_delta", "message.delta", "llm_thinking", "opencode.reasoning", "provider.retry", "provider.status", "execution.started", "execution.completed", "execution.failed", "complete", "final", "error", "event_bridge.connected", "event_bridge.disconnected", "event_bridge.reconnected", "skill.detected", "skill.blocked", "skill.command.executed", "skill.command.failed", "skill.prompt_applied", "skill.completed", "skill.repository_checkout.completed", "skill.repository_checkout.failed"}
-REQUEST_SCOPED_STREAM_EVENT_TYPES = {
-    "assistant.message.started",
-    "assistant.message.updated",
-    "assistant.message.completed",
-    "chat.stream_attached",
-    "chat.stream_detached",
-    "chat.run.started",
-    "chat.run.completed",
-    "chat.run.incomplete",
-    "chat.run.failed",
-    "message.delta",
-    "llm_thinking",
-    "permission_request",
-    "permission_resolved",
-    "provider.retry",
-    "provider.status",
-    "continuation.started",
-    "continuation.prompt_sent",
-    "continuation.completed",
-    "continuation.failed",
-    "continuation.suppressed",
-    "continuation.max_turns_reached",
-    "continuation.wall_timeout",
-    "continuation.no_progress",
-    "chat.timeout_recovery.started",
-    "chat.timeout_recovery.poll",
-    "chat.timeout_recovery.recovered",
-    "chat.timeout_recovery.exhausted",
-    "chat.transport_recovery.started",
-    "chat.transport_recovery.poll",
-    "chat.transport_recovery.recovered",
-    "chat.transport_recovery.exhausted",
-    "chat.incomplete",
-    "chat.blocked",
-    "chat.empty_final",
-    "chat.failed",
-}
-
-
-class SSEClientDisconnected(Exception):
+class SSEClientDisconnected(ConnectionError):
     pass
 
 
-def _track_stream_detach_task(app: web.Application, task: asyncio.Task) -> None:
-    task_set = app.get(TASK_BACKGROUND_TASKS_KEY)
-    if isinstance(task_set, set):
-        task_set.add(task)
-        task.add_done_callback(task_set.discard)
-    task.add_done_callback(_consume_stream_detach_task)
-
-
-def _consume_stream_detach_task(task: asyncio.Task) -> None:
+async def _write_sse(resp: web.StreamResponse, event: str, data: dict[str, Any]) -> None:
     try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        logger.exception("failed to mark chat stream detached in background")
-
-
-def _consume_background_chat_task(task: asyncio.Task, *, request_id: str, session_id: str) -> None:
-    try:
-        task.result()
-        logger.info(
-            "Background chat task completed after stream disconnect",
-            extra={"request_id": request_id, "session_id": session_id},
-        )
-    except asyncio.CancelledError:
-        logger.info(
-            "Background chat task cancelled after stream disconnect",
-            extra={"request_id": request_id, "session_id": session_id},
-        )
-    except Exception:
-        logger.exception(
-            "Background chat task failed after stream disconnect",
-            extra={"request_id": request_id, "session_id": session_id},
-        )
-
-
-def _is_closed_transport_runtime_error(exc: RuntimeError) -> bool:
-    lowered = str(exc).lower()
-    return "closing transport" in lowered or "closed" in lowered
-
-
-def _sse_encode(event_name: str, payload: dict[str, Any]) -> bytes:
-    return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
-
-
-async def _write_sse(resp: web.StreamResponse, event_name: str, payload: dict[str, Any]) -> None:
-    try:
-        await resp.write(_sse_encode(event_name, payload))
-    except (ConnectionResetError, BrokenPipeError) as exc:
-        raise SSEClientDisconnected() from exc
-    except RuntimeError as exc:
-        if _is_closed_transport_runtime_error(exc):
-            raise SSEClientDisconnected() from exc
-        raise
+        await resp.write(f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8"))
+    except (ConnectionResetError, RuntimeError) as exc:
+        raise SSEClientDisconnected(str(exc)) from exc
 
 
 async def _safe_write_eof(resp: web.StreamResponse) -> None:
     try:
         await resp.write_eof()
-    except (ConnectionResetError, BrokenPipeError):
-        return
-    except RuntimeError as exc:
-        if _is_closed_transport_runtime_error(exc):
-            return
-        raise
+    except (ConnectionResetError, RuntimeError):
+        pass
 
 
-async def _mark_chat_stream_detached(
-    *,
-    request: web.Request,
-    request_id: str,
-    session_id: str,
-    opencode_session_id: str | None,
-    reason: str,
-    run_task: asyncio.Task | None = None,
-    transport_cancelled: bool = False,
-) -> None:
-    chat_run_store = request.app.get(CHAT_RUN_STORE_KEY)
-    bus = request.app.get(EVENT_BUS_KEY)
-    if bus is None:
-        return
-
-    run_task_done = bool(run_task.done()) if run_task is not None else False
-    metadata = {
-        "transport_cancelled": bool(transport_cancelled),
-        "run_task_done": run_task_done,
-        "background_continues": True,
-    }
-    run_record = chat_run_store.get(request_id) if chat_run_store is not None and hasattr(chat_run_store, "get") else None
-    if run_record is not None and getattr(run_record, "status", "") in {"completed", "incomplete", "failed", "cancelled"}:
-        return
-
-    resolved_opencode_session_id = opencode_session_id or ""
-    if not resolved_opencode_session_id and run_record is not None:
-        resolved_opencode_session_id = str(getattr(run_record, "opencode_session_id", "") or "")
-    if not resolved_opencode_session_id:
-        session_record = request.app[SESSION_STORE_KEY].get(session_id)
-        resolved_opencode_session_id = session_record.opencode_session_id if session_record is not None else ""
-
-    if chat_run_store is not None and hasattr(chat_run_store, "detach_stream"):
-        chat_run_store.detach_stream(request_id, reason=reason, metadata=metadata)
-
-    trace_context = build_trace_context(
-        request.app[SETTINGS_KEY],
-        request_id=request_id,
-        session_id=session_id,
-        opencode_session_id=resolved_opencode_session_id,
-    )
-    event = add_trace_context(
-        {
-            "type": "chat.stream_detached",
-            "event_type": "chat.stream_detached",
-            "engine": "opencode",
-            "session_id": session_id,
-            "request_id": request_id,
-            "opencode_session_id": resolved_opencode_session_id,
-            "state": "running",
-            "reason": reason,
-            "summary": "Chat SSE transport detached while the run remained active.",
-            "metadata": metadata,
-            "data": {
-                "event_type": "chat.stream_detached",
-                "request_id": request_id,
-                "session_id": session_id,
-                "state": "running",
-                "reason": reason,
-                "metadata": metadata,
-            },
-            "created_at": utc_now_iso(),
-            "ts": time.time(),
-        },
-        trace_context,
-    )
-    await bus.publish(event)
-    if chat_run_store is not None and hasattr(chat_run_store, "update_from_runtime_event"):
-        chat_run_store.update_from_runtime_event(request_id, event)
-
-    chatlog_store = request.app.get(CHATLOG_STORE_KEY)
-    if chatlog_store is not None and hasattr(chatlog_store, "append_event"):
-        try:
-            chatlog_store.append_event(session_id, request_id=request_id, event=event, runtime=True)
-        except Exception:
-            logger.warning("failed to append stream detached event to chatlog", exc_info=True)
-
-
-async def _wait_for_event_or_completion(sub_queue: asyncio.Queue, run_task: asyncio.Task, timeout: float) -> tuple[str, dict[str, Any] | None]:
-    queue_task = asyncio.create_task(sub_queue.get())
-    try:
-        done, _ = await asyncio.wait({run_task, queue_task}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
-        if queue_task in done:
-            return "event", queue_task.result()
-        if run_task in done:
-            if queue_task.done():
-                return "event", queue_task.result()
-            await asyncio.sleep(0)
-            if queue_task.done():
-                return "event", queue_task.result()
-            try:
-                return "event", sub_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-            return "completed", None
-        return "timeout", None
-    finally:
-        if not queue_task.done():
-            queue_task.cancel()
-            await asyncio.gather(queue_task, return_exceptions=True)
-
-
-def _event_dedupe_key(event: dict[str, Any]) -> tuple:
-    data = event.get("data") if isinstance(event.get("data"), dict) else {}
-    raw_preview = json.dumps(data.get("raw_event_preview", {}), sort_keys=True, ensure_ascii=False)
-    raw_hash = hashlib.sha256(raw_preview.encode("utf-8")).hexdigest()[:12] if raw_preview else ""
-    return (event.get("type"), event.get("session_id"), event.get("request_id"), event.get("task_id"), event.get("tool"), event.get("permission_id"), event.get("raw_type"), data.get("status"), data.get("delta"), raw_hash)
-
-
-STREAM_SESSION_LEVEL_EVENT_TYPES = {
-    "event_bridge.connected",
-    "event_bridge.disconnected",
-    "event_bridge.reconnected",
-    "stream.started",
-}
-
-
-def _is_stream_relevant_event(
-    event: dict[str, Any],
-    *,
-    session_id: str,
-    request_id: str,
-    binding_store: Any | None = None,
-    opencode_session_id: str = "",
-) -> bool:
-    data = event.get("data") if isinstance(event.get("data"), dict) else {}
-    event_type = str(event.get("type") or event.get("event_type") or "")
-    if event_type in {"opencode.sync", "opencode.message.updated", "session.updated", "session.status", "session.idle", "session.diff"}:
-        return False
-
-    request_scoped = (
-        event_type in BRIDGE_EVENT_TYPES
-        or event_type in REQUEST_SCOPED_STREAM_EVENT_TYPES
-        or event_type.startswith("tool.")
-        or event_type.startswith("permission_")
-        or event_type.startswith("provider.")
-        or event_type.startswith("continuation.")
-        or event_type.startswith("chat.")
-        or event_type.startswith("assistant.message.")
-    )
-    event_session_id = event.get("session_id") or event.get("portal_session_id") or data.get("session_id")
-    event_portal_request_id = event.get("portal_request_id") or data.get("portal_request_id")
-    event_request_id = event.get("request_id") or data.get("request_id")
-
-    if event_session_id:
-        if str(event_session_id) != session_id:
-            return False
-    elif request_scoped and event_type != "stream.started":
-        return False
-
-    if event_type == "stream.started":
-        return True
-
-    if event_portal_request_id:
-        if str(event_portal_request_id) != request_id:
-            return False
-    elif event_request_id:
-        if str(event_request_id) != request_id and not _binding_matches_request(
-            event,
-            data,
-            request_id=request_id,
-            binding_store=binding_store,
-            opencode_session_id=opencode_session_id or str(event.get("opencode_session_id") or data.get("opencode_session_id") or ""),
-            request_id_candidate=str(event_request_id),
-            include_completed_binding=True,
-        ):
-            return False
-    elif request_scoped:
-        return event_type in STREAM_SESSION_LEVEL_EVENT_TYPES
-
-    if request_scoped:
-        if event_type in {"assistant_delta", "message.delta"}:
-            return bool(_event_delta_text(event))
-        return True
-    return False
-
-
-def _event_delta_text(event: dict[str, Any]) -> str:
-    for k in ("delta", "message", "text", "content"):
-        v = event.get(k)
-        if isinstance(v, str) and v:
-            return safe_preview(v, 300)
-    data = event.get("data")
-    if isinstance(data, dict):
-        for k in ("delta", "message", "text", "content"):
-            v = data.get(k)
-            if isinstance(v, str) and v:
-                return safe_preview(v, 300)
-    return ""
-
-
-def _stream_delta_payload(event: dict[str, Any], delta: str, session_id: str, req_id: str) -> dict[str, Any]:
-    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+def _stream_error_final_payload(*, error_payload: dict[str, Any], session_id: str, request_id: str, runtime_events: list[dict[str, Any]] | None = None, settings: Any = None) -> dict[str, Any]:
     return {
-        "delta": delta,
-        "session_id": session_id,
-        "request_id": req_id,
-        "raw_type": event.get("raw_type") or data.get("raw_type") or "",
-        "message_role": data.get("message_role") or data.get("role") or event.get("message_role") or "",
-        "part_type": data.get("part_type") or "",
-        "message_id": data.get("message_id") or "",
-        "part_id": data.get("part_id") or "",
-    }
-
-
-def _stream_error_final_payload(
-    *,
-    error_payload: dict[str, Any],
-    session_id: str,
-    request_id: str,
-    runtime_events: list[dict[str, Any]] | None = None,
-    settings: Any | None = None,
-) -> dict[str, Any]:
-    events = runtime_events or []
-    incomplete_reason = (
-        _optional_str(error_payload.get("incomplete_reason"))
-        or _optional_str(error_payload.get("error"))
-        or "chat_failed"
-    )
-    response = (
-        _optional_str(error_payload.get("user_message"))
-        or _optional_str(error_payload.get("response"))
-        or _optional_str(error_payload.get("detail"))
-        or _optional_str(error_payload.get("error"))
-        or "Chat stream failed before a final assistant response was produced."
-    )
-    response = safe_preview(response.strip() if isinstance(response, str) else "", 500) or "Chat stream failed before a final assistant response was produced."
-    auto_continue_enabled = False
-    if settings is not None:
-        auto_continue_enabled = bool(getattr(settings, "chat_auto_continue_enabled", getattr(settings, "auto_continue_enabled", False)))
-    debug_error = {
-        "error": safe_preview(str(error_payload.get("error") or ""), 200),
-        "detail": safe_preview(str(error_payload.get("detail") or ""), 500),
-        "incomplete_reason": safe_preview(str(error_payload.get("incomplete_reason") or ""), 200),
-    }
-    state = "blocked" if error_payload.get("error") == "chat_run_already_active" else "error"
-    out = {
         "ok": False,
-        "completion_state": state,
-        "incomplete_reason": incomplete_reason,
-        "response": response,
+        "completion_state": "error",
+        "incomplete_reason": str(error_payload.get("error") or "chat_failed"),
         "session_id": session_id,
         "request_id": request_id,
-        "runtime_events": events,
-        "events": events,
-        "continuation_count": 0,
-        "auto_continue_enabled": auto_continue_enabled,
-        "context_state": {
-            "summary": safe_preview(response, 200),
-            "current_state": state,
-            "next_step": "Reconnect to the active run or stop it before sending another message" if state == "blocked" else "Inspect runtime error detail and retry after fixing the upstream issue",
-        },
-        "_llm_debug": {"stream_error": debug_error},
+        "response": str(error_payload.get("detail") or error_payload.get("error") or "chat_failed"),
+        "events": runtime_events or [],
+        "runtime_events": runtime_events or [],
+        "usage": {},
+        "metadata": {},
+        "context_state": _context_state(str(error_payload.get("detail") or ""), "failed", str(error_payload.get("error") or "chat_failed")),
+        "_llm_debug": {"engine": "opencode"},
     }
-    for key in ("engine", "error", "detail", "active_run", "action_hint", "can_abort", "user_message"):
-        if key in error_payload:
-            out[key] = error_payload[key]
-    return out
 
 
 async def _stream_error_response(request: web.Request, error: str, detail: str | None = None, *, session_id: str = "", request_id: str = "") -> web.StreamResponse:
-    resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "keep-alive"})
+    resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "close"})
     await resp.prepare(request)
-    client_disconnected = False
-    error_payload = {
-        "error": error or "chat_failed",
-        "detail": detail or error or "Chat stream failed before a final assistant response was produced.",
-    }
-    final_payload = _stream_error_final_payload(
-        error_payload=error_payload,
-        session_id=session_id,
-        request_id=request_id,
-        runtime_events=[],
-        settings=request.app.get(SETTINGS_KEY),
-    )
+    error_payload = {"error": error, "detail": detail or error, "session_id": session_id, "request_id": request_id}
+    final_payload = _stream_error_final_payload(error_payload=error_payload, session_id=session_id, request_id=request_id, runtime_events=[], settings=request.app.get(SETTINGS_KEY))
     try:
         await _write_sse(resp, "error", error_payload)
         await _write_sse(resp, "final", final_payload)
         await _write_sse(resp, "done", {"ok": True})
     except SSEClientDisconnected:
-        client_disconnected = True
+        pass
     finally:
-        if not client_disconnected:
-            await _safe_write_eof(resp)
+        await _safe_write_eof(resp)
     return resp
+
+
+def _http_error_payload(exc: web.HTTPException, *, session_id: str, request_id: str) -> dict[str, Any]:
+    detail = exc.text or exc.reason or "chat_failed"
+    error = "chat_failed"
+    try:
+        parsed = json.loads(detail)
+        if isinstance(parsed, dict):
+            error = str(parsed.get("error") or error)
+            detail = str(parsed.get("detail") or parsed.get("error") or detail)
+    except Exception:
+        pass
+    return {"error": error, "detail": detail, "session_id": session_id, "request_id": request_id}
 
 
 async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
@@ -2879,262 +915,37 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
 
     try:
         session_id = _portal_session_id_from_payload(payload)
-        req_id = _request_id_from_payload(payload)
+        request_id = _request_id_from_payload(payload)
     except web.HTTPException as exc:
         return await _stream_error_response(request, "chat_failed", exc.text, session_id=str(payload.get("session_id") or ""), request_id=str(payload.get("request_id") or ""))
 
-    payload = {**payload, "session_id": session_id, "request_id": req_id}
-    resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "keep-alive"})
+    payload = {**payload, "session_id": session_id, "request_id": request_id}
+    resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "close"})
     await resp.prepare(request)
-
-    bus = request.app[EVENT_BUS_KEY]
-    settings = request.app[SETTINGS_KEY]
-    chat_run_store = request.app.get(CHAT_RUN_STORE_KEY)
-    stream_trace = build_trace_context(settings, request_id=req_id, session_id=session_id)
-    if chat_run_store is not None:
-        active_run = chat_run_store.active_for_session(session_id)
-        if active_run is not None and active_run.request_id != req_id:
-            active_public = await validate_chat_run_against_opencode(
-                store=chat_run_store,
-                client=request.app[OPENCODE_CLIENT_KEY],
-                record=active_run,
-                event_bus=bus,
-            )
-        else:
-            active_public = None
-        if active_public is not None and active_public.get("opencode_active") is True and active_run is not None and active_run.request_id != req_id:
-            error_payload = _chat_run_already_active_payload(session_id=session_id, request_id=req_id, active_run=active_public)
-            final_payload = _stream_error_final_payload(
-                error_payload=error_payload,
-                session_id=session_id,
-                request_id=req_id,
-                runtime_events=[],
-                settings=settings,
-            )
-            try:
-                await _write_sse(resp, "error", error_payload)
-                await _write_sse(resp, "final", final_payload)
-                await _write_sse(resp, "done", {"ok": True})
-            except SSEClientDisconnected:
-                pass
-            await _safe_write_eof(resp)
-            return resp
-        chat_run_store.start_run(
-            request_id=req_id,
-            portal_session_id=session_id,
-            status="stream_attached",
-            stream_state="attached",
-            completion_state="running",
-            metadata={"source": "chat_stream"},
-        )
-        chat_run_store.attach_stream(req_id)
-    sub = bus.subscribe({"session_id": session_id})
-    run_task = asyncio.create_task(handle_chat_payload(request, payload))
-    seen: set[tuple] = set()
-    binding_store = request.app.get(REQUEST_BINDING_STORE_KEY)
-    client_disconnected = False
-    stream_cancelled = False
-    stream_detached = False
-    sent_real_model_delta = False
-    stream_started_at = time.time()
-    last_event_at: str | float | None = None
-    stream_runtime_events: list[dict[str, Any]] = []
-
-    def _heartbeat_payload() -> dict[str, Any]:
-        return {
-            "ok": True,
-            "elapsed_seconds": max(0.0, round(time.time() - stream_started_at, 3)),
-            "last_event_at": last_event_at,
-            "completion_state": "running",
-            "session_id": session_id,
-            "request_id": req_id,
-        }
-
-    async def _forward(event: dict[str, Any]) -> None:
-        record = request.app[SESSION_STORE_KEY].get(session_id)
-        current_opencode_session_id = record.opencode_session_id if record is not None else ""
-        if not _is_stream_relevant_event(
-            event,
-            session_id=session_id,
-            request_id=req_id,
-            binding_store=binding_store,
-            opencode_session_id=current_opencode_session_id,
-        ):
-            return
-        key = _event_dedupe_key(event)
-        if key in seen:
-            return
-        seen.add(key)
-        nonlocal last_event_at
-        last_event_at = event.get("created_at") or event.get("ts") or time.time()
-        await _write_sse(resp, "runtime_event", event)
-        nonlocal sent_real_model_delta
-        if event.get("type") in {"assistant_delta", "message.delta"}:
-            delta = _event_delta_text(event)
-            if not delta:
-                return
-            raw_type = str(event.get("raw_type") or "").lower()
-            data = event.get("data") if isinstance(event.get("data"), dict) else {}
-            role = str(data.get("message_role") or data.get("role") or data.get("source_role") or event.get("role") or "").lower()
-            is_real = (
-                event.get("type") == "message.delta"
-                and raw_type == "message.part.delta"
-                and (role == "assistant" or bool(data.get("metadata_incomplete")))
-            )
-            is_synth = event.get("type") == "assistant_delta" and bool(event.get("synthetic_final_delta") or (event.get("data") or {}).get("synthetic_final_delta"))
-            if is_real:
-                sent_real_model_delta = True
-                if chat_run_store is not None:
-                    run_record = chat_run_store.update_assistant_projection(req_id, text=delta, append_text=True, assistant_message_id=str(data.get("message_id") or ""))
-                    await _publish_assistant_message_event(
-                        chat_run_store=chat_run_store,
-                        runtime_events=stream_runtime_events,
-                        bus=bus,
-                        trace_context=stream_trace,
-                        event_type="assistant.message.updated",
-                        session_id=session_id,
-                        request_id=req_id,
-                        opencode_session_id=current_opencode_session_id,
-                        assistant_message_id=str(data.get("message_id") or ""),
-                        text=getattr(run_record, "last_response_text", delta) if run_record is not None else delta,
-                        delta=delta,
-                        display_blocks=[],
-                        state="running",
-                    )
-                await _write_sse(resp, "delta", _stream_delta_payload(event, delta, session_id, req_id))
-            elif is_synth:
-                if not sent_real_model_delta:
-                    await _write_sse(resp, "delta", _stream_delta_payload(event, delta, session_id, req_id))
-            else:
-                if event.get("type") != "message.delta":
-                    await _write_sse(resp, "delta", _stream_delta_payload(event, delta, session_id, req_id))
-
     try:
-        stream_started_event = add_trace_context({"type": "stream.started", "engine": "opencode", "session_id": session_id, "request_id": req_id, "chatlog_id": req_id, "created_at": utc_now_iso()}, stream_trace)
-        stream_attached_event = add_trace_context(
-            {
-                "type": "chat.stream_attached",
-                "event_type": "chat.stream_attached",
-                "engine": "opencode",
-                "session_id": session_id,
-                "request_id": req_id,
-                "state": "running",
-                "data": {"event_type": "chat.stream_attached", "request_id": req_id, "session_id": session_id, "state": "running"},
-                "created_at": utc_now_iso(),
-                "ts": time.time(),
-            },
-            stream_trace,
-        )
-        seen.add(_event_dedupe_key(stream_attached_event))
-        await bus.publish(stream_attached_event)
-        if chat_run_store is not None:
-            chat_run_store.update_from_runtime_event(req_id, stream_attached_event)
-        last_event_at = stream_started_event.get("created_at")
-        await _write_sse(resp, "chat.started", {"session_id": session_id, "request_id": req_id, "chatlog_id": req_id, "completion_state": "running"})
-        await _write_sse(resp, "chat.stream_attached", stream_attached_event["data"])
-        await _write_sse(resp, "heartbeat", _heartbeat_payload())
-        await _write_sse(resp, "runtime_event", stream_started_event)
-        while not run_task.done():
-            kind, event = await _wait_for_event_or_completion(sub.queue, run_task, STREAM_HEARTBEAT_SECONDS)
-            if kind == "event" and event is not None:
-                await _forward(event)
-                continue
-            if kind == "completed":
-                break
-            await _write_sse(resp, "heartbeat", _heartbeat_payload())
-
-        error_payload = None
-        final_result = None
+        await _write_sse(resp, "chat.started", {"session_id": session_id, "request_id": request_id, "chatlog_id": request_id, "completion_state": "running"})
+        final_payload = await handle_chat_payload_for_app(request.app, payload)
+        await _write_sse(resp, "final", final_payload)
+        await _write_sse(resp, "done", {"ok": True})
+    except SSEClientDisconnected:
+        return resp
+    except web.HTTPException as exc:
+        error_payload = _http_error_payload(exc, session_id=session_id, request_id=request_id)
+        final_payload = _stream_error_final_payload(error_payload=error_payload, session_id=session_id, request_id=request_id, runtime_events=[], settings=request.app.get(SETTINGS_KEY))
         try:
-            final_result = run_task.result()
-        except web.HTTPException as exc:
-            error_payload = {"error": "chat_failed", "detail": exc.text, "session_id": session_id, "request_id": req_id}
-        except Exception as exc:
-            error_payload = {"error": "chat_failed", "detail": safe_preview(str(exc), 500), "session_id": session_id, "request_id": req_id}
-
-        deadline = asyncio.get_running_loop().time() + 0.1
-        drained = 0
-        while asyncio.get_running_loop().time() < deadline and drained < 100:
-            try:
-                event = sub.queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            await _forward(event); drained += 1
-
-        if error_payload:
-            final_error_payload = _stream_error_final_payload(
-                error_payload=error_payload,
-                session_id=session_id,
-                request_id=req_id,
-                runtime_events=[],
-                settings=settings,
-            )
-            if chat_run_store is not None:
-                chat_run_store.mark_failed(req_id, str(error_payload.get("detail") or error_payload.get("error") or "chat_failed"), final_error_payload)
             await _write_sse(resp, "error", error_payload)
-            await _write_sse(resp, "final", final_error_payload)
-            await _write_sse(resp, "done", {"ok": True})
-        else:
-            final_payload = final_result
-            if not isinstance(final_payload, dict) or not final_payload:
-                final_payload = _stream_error_final_payload(
-                    error_payload={"error": "missing_final_result", "detail": "Chat stream completed without a terminal final payload."},
-                    session_id=session_id,
-                    request_id=req_id,
-                    runtime_events=[],
-                    settings=settings,
-                )
-            if chat_run_store is not None and isinstance(final_payload, dict):
-                run_record = chat_run_store.get(req_id)
-                completion_state = str(final_payload.get("completion_state") or "")
-                metadata_payload = final_payload.get("metadata") if isinstance(final_payload.get("metadata"), dict) else {}
-                still_running = bool(metadata_payload.get("opencode_may_still_be_running") or final_payload.get("opencode_may_still_be_running"))
-                if completion_state == "completed":
-                    chat_run_store.complete_run(req_id, final_payload)
-                elif completion_state == "error":
-                    chat_run_store.mark_failed(req_id, str(final_payload.get("incomplete_reason") or final_payload.get("error") or "chat_failed"), final_payload)
-                elif still_running and run_record is not None and getattr(run_record, "status", "") in {"accepted", "running", "recovering", "stream_attached", "stream_detached"}:
-                    chat_run_store.keep_running(req_id, reason=str(final_payload.get("incomplete_reason") or "opencode_may_still_be_running"), payload=final_payload, stream_detached=getattr(run_record, "stream_state", "") == "detached")
-                else:
-                    chat_run_store.mark_incomplete(req_id, str(final_payload.get("incomplete_reason") or completion_state or "incomplete"), final_payload)
             await _write_sse(resp, "final", final_payload)
             await _write_sse(resp, "done", {"ok": True})
-    except SSEClientDisconnected:
-        client_disconnected = True
-    except asyncio.CancelledError:
-        client_disconnected = True
-        stream_cancelled = True
-        raise
-    finally:
-        bus.unsubscribe(sub)
-        if (client_disconnected or stream_cancelled) and not stream_detached:
-            detach_reason = "handler_cancelled" if stream_cancelled else "client_disconnected"
-            detach_task = asyncio.create_task(
-                _mark_chat_stream_detached(
-                    request=request,
-                    request_id=req_id,
-                    session_id=session_id,
-                    opencode_session_id=None,
-                    reason=detach_reason,
-                    run_task=run_task,
-                    transport_cancelled=stream_cancelled,
-                )
-            )
-            try:
-                await asyncio.shield(detach_task)
-                stream_detached = True
-            except asyncio.CancelledError:
-                _track_stream_detach_task(request.app, detach_task)
-            except Exception:
-                logger.warning("failed to detach chat stream", exc_info=True)
-        if not run_task.done():
-            if client_disconnected or stream_cancelled:
-                run_task.add_done_callback(lambda task: _consume_background_chat_task(task, request_id=req_id, session_id=session_id))
-            else:
-                run_task.cancel()
-                await asyncio.gather(run_task, return_exceptions=True)
-        else:
-            _consume_background_chat_task(run_task, request_id=req_id, session_id=session_id)
-        if not client_disconnected and not stream_cancelled:
-            await _safe_write_eof(resp)
+        except SSEClientDisconnected:
+            return resp
+    except Exception as exc:
+        error_payload = {"error": "chat_failed", "detail": safe_preview(str(exc), 500), "session_id": session_id, "request_id": request_id}
+        final_payload = _stream_error_final_payload(error_payload=error_payload, session_id=session_id, request_id=request_id, runtime_events=[], settings=request.app.get(SETTINGS_KEY))
+        try:
+            await _write_sse(resp, "error", error_payload)
+            await _write_sse(resp, "final", final_payload)
+            await _write_sse(resp, "done", {"ok": True})
+        except SSEClientDisconnected:
+            return resp
+    await _safe_write_eof(resp)
     return resp

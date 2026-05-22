@@ -13,7 +13,6 @@ from .app_keys import (
     SESSION_STORE_KEY,
     TASK_STORE_KEY,
     CHATLOG_STORE_KEY,
-    CHAT_RUN_STORE_KEY,
     USER_DISPLAY_STORE_KEY,
     USAGE_TRACKER_KEY,
     EVENT_BUS_KEY,
@@ -31,14 +30,10 @@ from .app_keys import (
 
 from .capabilities import build_capability_catalog
 from .chat_api import chat_handler, chat_stream_handler
-from .chat_run_validation import validate_chat_run_against_opencode
 from .chatlog_store import ChatLogStore
-from .chat_run_store import ChatRunStore
-from .active_run_payload import active_run_public_from_store, run_state_diagnostics, synthetic_active_run_from_resolved
-from .opencode_client import is_session_missing_error
 from .opencode_binding_store import OpenCodeBindingStore
 from .opencode_thin_api import register_opencode_thin_routes
-from .opencode_run_state import ResolvedOpenCodeRunState, resolve_opencode_run_state
+from .opencode_status_adapter import build_conversation_status, find_status_entry, unreachable_status
 from .compat_api import (
     git_info_handler,
     queue_status_handler,
@@ -116,21 +111,6 @@ def _runtime_env_for_status(settings: Settings, overlay) -> dict[str, str]:
     return build_runtime_env_from_config(settings, {}).env
 
 
-def _active_chat_runs(app: web.Application) -> list:
-    store = app.get(CHAT_RUN_STORE_KEY)
-    if store is None:
-        return []
-    if hasattr(store, "list_active"):
-        try:
-            return list(store.list_active())
-        except Exception:
-            return []
-    runs = getattr(store, "_runs", {})
-    if isinstance(runs, dict):
-        return [record for record in runs.values() if getattr(record, "status", "") in {"accepted", "running", "recovering", "stream_attached", "stream_detached"}]
-    return []
-
-
 def _is_atlassian_only_profile_change(runtime_config: dict, updated_sections: list[str]) -> bool:
     if not isinstance(runtime_config, dict) or not runtime_config:
         return False
@@ -138,27 +118,6 @@ def _is_atlassian_only_profile_change(runtime_config: dict, updated_sections: li
     if not meaningful_keys or not meaningful_keys.issubset({"jira", "confluence", "atlassian"}):
         return False
     return "atlassian" in set(updated_sections)
-
-
-async def _publish_restart_deferred(app: web.Application, *, active_runs: list, reason: str) -> None:
-    bus = app.get(EVENT_BUS_KEY)
-    if bus is None:
-        return
-    event = {
-        "type": "opencode.restart_deferred",
-        "event_type": "opencode.restart_deferred",
-        "engine": "opencode",
-        "state": "pending_restart",
-        "summary": "Managed OpenCode restart deferred while chat runs are active.",
-        "data": {
-            "reason": reason,
-            "active_run_count": len(active_runs),
-            "active_request_ids": [str(getattr(run, "request_id", "")) for run in active_runs if getattr(run, "request_id", "")],
-        },
-        "created_at": utc_now_iso(),
-        "ts": time.time(),
-    }
-    await bus.publish(event)
 
 
 async def health_handler(request: web.Request) -> web.Response:
@@ -285,17 +244,10 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     health_ok = None
     opencode_pid = None
     restart_meta = {}
-    restart_deferred_reason = None
     if manager:
-        active_runs = _active_chat_runs(request.app)
         if _is_atlassian_only_profile_change(runtime_config, combined_updated_sections):
             status, applied = "applied", True
             pending_restart = False
-        elif active_runs:
-            restart_deferred_reason = "active_chat_run"
-            pending_restart = True
-            status, applied = "pending_restart", False
-            await _publish_restart_deferred(request.app, active_runs=active_runs, reason=restart_deferred_reason)
         else:
             # Empty env_result.env should not clear the cached managed env. Use None to preserve
             # the last successful startup/runtime-profile env for OpenCode recovery/watchdog restarts.
@@ -324,8 +276,6 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     overlay = ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status=status, pending_restart=pending_restart, warnings=warnings, updated_sections=combined_updated_sections, last_apply_error=last_error, applied=applied, env_hash=env_result.env_hash, env_path=str(env_path), restart_performed=restart_performed, opencode_pid=opencode_pid, last_restart_at=restart_meta.get("last_restart_at") if restart_meta else None, last_restart_reason=restart_meta.get("last_restart_reason") if restart_meta else None, health_ok=health_ok, git_auth_configured=bool(git_auth_result.get("configured")), gh_host=git_auth_result.get("host"), gh_config_dir=git_auth_result.get("gh_config_dir"), git_askpass_path=git_auth_result.get("askpass_path"), gitconfig_path=git_auth_result.get("gitconfig_path"), atlassian_cli_configured=atlassian_result.configured, atlassian_config_path=atlassian_result.path, atlassian_jira_instances=atlassian_result.jira_instances, atlassian_confluence_instances=atlassian_result.confluence_instances)
     ProfileOverlayStore(settings).save(overlay)
     response = {"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "env_written": True, "env_hash": env_result.env_hash, "env_path": str(env_path), "updated_sections": combined_updated_sections, "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "auth_update_status": auth_update_status, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "restart_performed": restart_performed, "opencode_pid": opencode_pid, "health_ok": health_ok, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host"), "gh_config_dir": git_auth_result.get("gh_config_dir"), "git_askpass_path": git_auth_result.get("askpass_path"), "gitconfig_path": git_auth_result.get("gitconfig_path"), "atlassian_cli_configured": atlassian_result.configured, "atlassian_config_path": atlassian_result.path, "atlassian_jira_instances": atlassian_result.jira_instances, "atlassian_confluence_instances": atlassian_result.confluence_instances, "atlassian_status": atlassian_result.redacted_status, "status_endpoint": "/api/internal/runtime-profile/status"}
-    if restart_deferred_reason:
-        response["restart_deferred_reason"] = restart_deferred_reason
     if auth_build.warning:
         response["auth_warning"] = auth_build.warning
     return web.json_response(response, status=500 if manager and pending_restart and last_error == "opencode_restart_failed" else 200)
@@ -427,244 +377,42 @@ async def capabilities_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "capabilities unavailable", "engine": "opencode"}, status=500)
 
 
-async def get_chat_run_handler(request: web.Request) -> web.Response:
-    store = request.app[CHAT_RUN_STORE_KEY]
-    client = request.app[OPENCODE_CLIENT_KEY]
-    request_id = request.match_info["request_id"]
-    record = store.get(request_id)
-    if record is None:
-        return web.json_response({"success": False, "engine": "opencode", "error": "chat_run_not_found"}, status=404)
-    validate = str(request.query.get("validate", "")).lower()
-    active = str(request.query.get("active", "")).lower() in {"1", "true", "yes", "on"}
-    if validate == "opencode" or active:
-        public = await validate_chat_run_against_opencode(store=store, client=client, record=record, event_bus=request.app.get(EVENT_BUS_KEY))
-    else:
-        public = store.to_public_dict(record)
-    return web.json_response({"success": True, "engine": "opencode", "run": public})
-
-
-async def list_chat_runs_handler(request: web.Request) -> web.Response:
-    store = request.app[CHAT_RUN_STORE_KEY]
-    client = request.app[OPENCODE_CLIENT_KEY]
-    session_id = request.query.get("session_id", "")
-    if not session_id:
-        return web.json_response({"success": False, "engine": "opencode", "error": "session_id_required"}, status=400)
-    active = str(request.query.get("active", "")).lower() in {"1", "true", "yes", "on"}
-    if active:
-        run = store.active_for_session(session_id)
-        public = await validate_chat_run_against_opencode(store=store, client=client, record=run, event_bus=request.app.get(EVENT_BUS_KEY))
-        runs = [public] if public is not None and public.get("opencode_active") is True else []
-    else:
-        try:
-            limit = int(request.query.get("limit", "20"))
-        except ValueError:
-            limit = 20
-        runs = [store.to_public_dict(record) for record in store.list_for_session(session_id, limit=limit)]
-    return web.json_response({"success": True, "engine": "opencode", "runs": [run for run in runs if run is not None]})
-
-
-def _inactive_resolved_state(
-    *,
-    opencode_session_id: str = "",
-    status: str = "unknown",
-    reason: str = "missing_session_binding",
-    exists: bool = False,
-    diagnostics: dict[str, Any] | None = None,
-) -> ResolvedOpenCodeRunState:
-    return ResolvedOpenCodeRunState(
-        opencode_session_id=opencode_session_id,
-        exists=exists,
-        active=False,
-        status=status,
-        source="opencode",
-        has_final_assistant=False,
-        reason=reason,
-        diagnostics=diagnostics or {reason: True},
-    )
-
-
-async def _resolve_portal_session_opencode_state(
-    request: web.Request,
-    portal_session_id: str,
-) -> dict[str, Any]:
-    session_store = request.app.get(SESSION_STORE_KEY)
-    session_record = session_store.get(portal_session_id) if session_store is not None and hasattr(session_store, "get") else None
+async def _status_for_portal_session(request: web.Request, portal_session_id: str) -> dict[str, Any]:
+    session_store = request.app[SESSION_STORE_KEY]
+    session_record = session_store.get(portal_session_id)
     if session_record is None or getattr(session_record, "deleted", False):
-        resolved = _inactive_resolved_state(reason="missing_session_binding")
         return {
             "session_record": session_record,
             "opencode_session_id": "",
-            "resolved": resolved,
+            "raw_status": {},
+            "status": {"status": {"type": "missing", "active": False, "can_send": True, "can_abort": False, "action_hint": "safe_to_send"}, "children": {"active_count": 0, "active_session_ids": [], "non_blocking": True}, "status_entry": None},
             "exists": False,
-            "active": False,
-            "status_type": resolved.status or "unknown",
         }
 
     opencode_session_id = str(getattr(session_record, "opencode_session_id", "") or "")
     if not opencode_session_id:
-        resolved = _inactive_resolved_state(
-            opencode_session_id="",
-            status="missing",
-            reason="missing_opencode_session_id",
-            diagnostics={"missing_opencode_session_id": True},
-        )
-    else:
-        resolved = await resolve_opencode_run_state(request.app[OPENCODE_CLIENT_KEY], opencode_session_id)
+        return {
+            "session_record": session_record,
+            "opencode_session_id": "",
+            "raw_status": {},
+            "status": {"status": {"type": "missing", "active": False, "can_send": True, "can_abort": False, "action_hint": "safe_to_send"}, "children": {"active_count": 0, "active_session_ids": [], "non_blocking": True}, "status_entry": None},
+            "exists": False,
+        }
+
+    client = request.app[OPENCODE_CLIENT_KEY]
+    try:
+        raw_status = await client.get_session_status()
+        status = build_conversation_status(raw_status, opencode_session_id, children=[])
+    except Exception:
+        raw_status = {}
+        status = unreachable_status()
     return {
         "session_record": session_record,
         "opencode_session_id": opencode_session_id,
-        "resolved": resolved,
-        "exists": bool(resolved.exists),
-        "active": bool(resolved.active),
-        "status_type": resolved.status or "unknown",
+        "raw_status": raw_status if isinstance(raw_status, dict) else {"data": raw_status},
+        "status": status,
+        "exists": find_status_entry(raw_status, opencode_session_id) is not None if raw_status else False,
     }
-
-
-async def _wait_until_opencode_inactive(
-    client,
-    opencode_session_id: str,
-    *,
-    timeout_seconds: float = 5.0,
-    interval_seconds: float = 0.25,
-) -> ResolvedOpenCodeRunState:
-    session_id = str(opencode_session_id or "")
-    if not session_id:
-        return _inactive_resolved_state(status="missing", reason="missing_opencode_session_id")
-
-    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
-    last_resolved: ResolvedOpenCodeRunState | None = None
-    while True:
-        try:
-            last_resolved = await resolve_opencode_run_state(client, session_id)
-        except Exception as exc:
-            if is_session_missing_error(exc):
-                return _inactive_resolved_state(
-                    opencode_session_id=session_id,
-                    status="missing",
-                    reason="opencode_session_missing",
-                    diagnostics={"opencode_status": getattr(exc, "status", None), "status_error": safe_preview(str(exc), 1000)},
-                )
-            raise
-        if not last_resolved.active:
-            return last_resolved
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return last_resolved
-        await asyncio.sleep(min(max(0.0, float(interval_seconds)), remaining))
-
-
-def _safe_public_run(store, record) -> dict[str, Any] | None:
-    if store is None or record is None or not hasattr(store, "to_public_dict"):
-        return None
-    try:
-        return store.to_public_dict(record)
-    except Exception:
-        return None
-
-
-def _chat_run_state_diagnostics(
-    store,
-    resolved: ResolvedOpenCodeRunState,
-    *,
-    active_record=None,
-    latest_record=None,
-    active_public: dict[str, Any] | None = None,
-    stale_runs: list | None = None,
-) -> dict[str, Any]:
-    diagnostics = run_state_diagnostics(resolved)
-    if active_record is not None:
-        diagnostics["chat_run_store_active"] = active_public or _safe_public_run(store, active_record)
-    if latest_record is not None:
-        diagnostics["chat_run_store_latest"] = _safe_public_run(store, latest_record)
-    if stale_runs is not None:
-        stale_count = len(stale_runs)
-        if stale_count == 0 and latest_record is not None and getattr(latest_record, "status", "") == "stale":
-            stale_count = 1
-        diagnostics["chat_run_store_stale_count"] = stale_count
-        if stale_runs:
-            diagnostics["chat_run_store_stale_because_opencode_idle"] = not resolved.active
-            diagnostics["chat_run_store_stale_request_ids"] = [
-                str(getattr(record, "request_id", ""))
-                for record in stale_runs
-                if getattr(record, "request_id", "")
-            ]
-    return safe_preview(diagnostics, 8000)
-
-
-def _mark_session_runs_stale_from_opencode(
-    store,
-    portal_session_id: str,
-    reason: str,
-    *,
-    resolved: ResolvedOpenCodeRunState,
-    metadata: dict[str, Any] | None = None,
-) -> list:
-    if store is None or not hasattr(store, "mark_stale_for_session"):
-        return []
-    return store.mark_stale_for_session(
-        portal_session_id,
-        reason,
-        metadata={
-            "source_of_truth": "opencode",
-            "validation_reason": resolved.reason,
-            "opencode_active": bool(resolved.active),
-            "opencode_status": resolved.status,
-            "opencode_exists": bool(resolved.exists),
-            "diagnostics": run_state_diagnostics(resolved),
-            **(metadata or {}),
-        },
-    )
-
-
-def _mark_session_runs_aborted_or_stale(
-    store,
-    portal_session_id: str,
-    reason: str,
-    *,
-    abort_result: dict[str, Any],
-    resolved: ResolvedOpenCodeRunState,
-    aborted: bool,
-) -> list:
-    if store is None or not hasattr(store, "list_for_session"):
-        return []
-    terminal = {"completed", "incomplete", "failed", "cancelled", "aborted", "stale"}
-    updated = []
-    for record in list(store.list_for_session(portal_session_id, limit=1000)):
-        if getattr(record, "status", "") in terminal:
-            continue
-        metadata = {
-            "abort_result": safe_preview(abort_result, 2000),
-            "source_of_truth": "opencode",
-            "opencode_active": bool(resolved.active),
-            "opencode_status": resolved.status,
-            "opencode_exists": bool(resolved.exists),
-            "diagnostics": run_state_diagnostics(resolved),
-        }
-        if aborted and hasattr(store, "mark_aborted"):
-            current = store.mark_aborted(record.request_id, reason=reason, metadata=metadata)
-        elif hasattr(store, "mark_stale"):
-            current = store.mark_stale(record.request_id, reason=reason, metadata=metadata)
-        else:
-            current = None
-        if current is not None:
-            updated.append(current)
-    return updated
-
-
-def _extract_created_opencode_session_id(value: Any) -> str:
-    if not isinstance(value, dict):
-        return ""
-    for key in ("id", "session_id", "sessionID", "uuid"):
-        item = value.get(key)
-        if item:
-            return str(item)
-    for key in ("session", "data", "info"):
-        nested = value.get(key)
-        if isinstance(nested, dict):
-            nested_id = _extract_created_opencode_session_id(nested)
-            if nested_id:
-                return nested_id
-    return ""
 
 
 async def _publish_session_event(
@@ -672,7 +420,6 @@ async def _publish_session_event(
     event_type: str,
     *,
     portal_session_id: str,
-    old_opencode_session_id: str = "",
     opencode_session_id: str = "",
     state: str = "completed",
     summary: str = "",
@@ -689,7 +436,6 @@ async def _publish_session_event(
             "session_id": portal_session_id,
             "request_id": "",
             "opencode_session_id": opencode_session_id,
-            "old_opencode_session_id": old_opencode_session_id,
             "state": state,
             "summary": summary or event_type,
             "data": safe_preview(data or {}, 2000),
@@ -699,211 +445,23 @@ async def _publish_session_event(
     )
 
 
-async def _hard_reset_portal_session_binding(
-    request: web.Request,
-    *,
-    portal_session_id: str,
-    old_opencode_session_id: str,
-    abort_result: dict[str, Any] | None = None,
-    old_resolved: ResolvedOpenCodeRunState | None = None,
-    reason: str = "opencode_abort_still_active_detached",
-) -> dict[str, Any]:
-    session_store = request.app.get(SESSION_STORE_KEY)
-    store = request.app.get(CHAT_RUN_STORE_KEY)
-    client = request.app[OPENCODE_CLIENT_KEY]
-    session_record = session_store.get(portal_session_id) if session_store is not None and hasattr(session_store, "get") else None
-    if session_store is None or session_record is None or getattr(session_record, "deleted", False):
-        raise RuntimeError("missing_session_binding")
-    new_session = await client.create_session(title=getattr(session_record, "title", "") or "Chat")
-    new_opencode_session_id = _extract_created_opencode_session_id(new_session)
-    if not new_opencode_session_id:
-        raise RuntimeError("opencode_create_session_missing_id")
-    session_store.replace_opencode_session_after_mutation(
-        portal_session_id,
-        new_opencode_session_id,
-        message_count=0,
-        last_message="",
-    )
-    stale_runs = []
-    if store is not None and hasattr(store, "mark_stale_for_session"):
-        stale_runs = store.mark_stale_for_session(
-            portal_session_id,
-            reason,
-            metadata={
-                "source_of_truth": "opencode",
-                "old_opencode_session_id": old_opencode_session_id,
-                "new_opencode_session_id": new_opencode_session_id,
-                "abort_result": safe_preview(abort_result or {}, 2000),
-                "old_resolved": run_state_diagnostics(old_resolved) if old_resolved is not None else {},
-            },
-        )
-    await _publish_session_event(
-        request,
-        "opencode.session.detached_after_abort",
-        portal_session_id=portal_session_id,
-        old_opencode_session_id=old_opencode_session_id,
-        opencode_session_id=new_opencode_session_id,
-        state="detached",
-        summary="Portal session rebound to a fresh OpenCode session.",
-        data={
-            "reason": reason,
-            "abort_result": safe_preview(abort_result or {}, 2000),
-            "stale_count": len(stale_runs),
-        },
-    )
-    return {
-        "new_opencode_session_id": new_opencode_session_id,
-        "new_session": safe_preview(new_session, 2000),
-        "stale_runs": stale_runs,
-    }
-
-
-async def active_chat_run_for_session_handler(request: web.Request) -> web.Response:
-    store = request.app[CHAT_RUN_STORE_KEY]
-    session_id = request.match_info["session_id"]
-    state = await _resolve_portal_session_opencode_state(request, session_id)
-    opencode_session_id = state["opencode_session_id"]
-    resolved = state["resolved"]
-
-    active_record = store.active_for_session(session_id)
-    latest_record = store.latest_for_session(session_id) if hasattr(store, "latest_for_session") else None
-    if not resolved.active:
-        stale_runs = _mark_session_runs_stale_from_opencode(
-            store,
-            session_id,
-            "chat_run_store_stale_because_opencode_idle",
-            resolved=resolved,
-        )
-        return web.json_response(
-            {
-                "success": True,
-                "engine": "opencode",
-                "source_of_truth": "opencode",
-                "session_id": session_id,
-                "opencode_session_id": opencode_session_id,
-                "active": False,
-                "active_run": None,
-                "run": None,
-                "reason": resolved.reason,
-                "action_hint": "safe_to_send",
-                "active_child_sessions": list(resolved.active_child_sessions),
-                "diagnostics": _chat_run_state_diagnostics(
-                    store,
-                    resolved,
-                    active_record=active_record,
-                    latest_record=latest_record,
-                    stale_runs=stale_runs,
-                ),
-            }
-        )
-
-    active_public = None
-    if active_record is not None:
-        active_public = await validate_chat_run_against_opencode(
-            store=store,
-            client=request.app[OPENCODE_CLIENT_KEY],
-            record=active_record,
-            event_bus=request.app.get(EVENT_BUS_KEY),
-            resolved=resolved,
-        )
-
-    if active_public is not None and active_public.get("opencode_active") is True:
-        active_run = active_run_public_from_store(
-            active_public,
-            portal_session_id=session_id,
-            opencode_session_id=opencode_session_id,
-            resolved=resolved,
-        )
-    else:
-        active_run = synthetic_active_run_from_resolved(portal_session_id=session_id, opencode_session_id=opencode_session_id, resolved=resolved)
-    return web.json_response(
-        {
-            "success": True,
-            "engine": "opencode",
-            "source_of_truth": "opencode",
-            "session_id": session_id,
-            "opencode_session_id": opencode_session_id,
-            "active": True,
-            "active_run": active_run,
-            "run": active_run,
-            "reason": "opencode_status_active",
-            "action_hint": "wait_reconnect_or_stop",
-            "active_child_sessions": list(resolved.active_child_sessions),
-            "diagnostics": _chat_run_state_diagnostics(
-                store,
-                resolved,
-                active_record=active_record,
-                latest_record=latest_record,
-                active_public=active_public,
-            ),
-        }
-    )
-
-
 async def session_status_handler(request: web.Request) -> web.Response:
-    chat_run_store = request.app.get(CHAT_RUN_STORE_KEY)
     session_id = request.match_info["session_id"]
-    state = await _resolve_portal_session_opencode_state(request, session_id)
-    opencode_session_id = state["opencode_session_id"]
-    resolved = state["resolved"]
-    status_type = resolved.status or "unknown"
-    active_run = None
-    active_record = None
-    active_public = None
-    if chat_run_store is not None and hasattr(chat_run_store, "active_for_session"):
-        active_record = chat_run_store.active_for_session(session_id)
-    latest_record = chat_run_store.latest_for_session(session_id) if chat_run_store is not None and hasattr(chat_run_store, "latest_for_session") else None
-    stale_runs = []
-    if resolved.active and active_record is not None:
-        active_public = await validate_chat_run_against_opencode(
-            store=chat_run_store,
-            client=request.app[OPENCODE_CLIENT_KEY],
-            record=active_record,
-            event_bus=request.app.get(EVENT_BUS_KEY),
-            resolved=resolved,
-        )
-    elif not resolved.active and chat_run_store is not None:
-        stale_runs = _mark_session_runs_stale_from_opencode(
-            chat_run_store,
-            session_id,
-            "chat_run_store_stale_because_opencode_idle",
-            resolved=resolved,
-        )
-    if resolved.active:
-        if active_public is not None and active_public.get("opencode_active") is True:
-            active_run = active_run_public_from_store(
-                active_public,
-                portal_session_id=session_id,
-                opencode_session_id=opencode_session_id,
-                resolved=resolved,
-            )
-        else:
-            active_run = synthetic_active_run_from_resolved(portal_session_id=session_id, opencode_session_id=opencode_session_id, resolved=resolved)
-
+    state = await _status_for_portal_session(request, session_id)
+    status = state["status"]["status"]
     return web.json_response(
         {
             "success": True,
             "engine": "opencode",
             "source_of_truth": "opencode",
             "session_id": session_id,
-            "opencode_session_id": opencode_session_id,
-            "exists": bool(resolved.exists),
-            "status": {"type": status_type},
-            "status_type": status_type,
-            "active": bool(resolved.active),
-            "can_abort": bool(resolved.active and resolved.exists),
-            "reason": resolved.reason,
-            "action_hint": "wait_reconnect_or_stop" if resolved.active else "safe_to_send",
-            "active_run": active_run,
-            "active_child_sessions": list(resolved.active_child_sessions),
-            "diagnostics": _chat_run_state_diagnostics(
-                chat_run_store,
-                resolved,
-                active_record=active_record,
-                latest_record=latest_record,
-                active_public=active_public,
-                stale_runs=stale_runs,
-            ),
+            "opencode_session_id": state["opencode_session_id"],
+            "exists": bool(state["exists"]),
+            "status": {"type": status["type"], **status},
+            "status_type": status["type"],
+            "active": bool(status["active"]),
+            "can_abort": bool(status["can_abort"]),
+            "action_hint": status["action_hint"],
         }
     )
 
@@ -946,206 +504,13 @@ async def _abort_opencode_session(client, opencode_session_id: str) -> dict[str,
     return {"success": False, "supported": False, "error": "opencode_abort_unsupported"}
 
 
-def _abort_result_missing_current_session(abort_result: dict[str, Any], opencode_session_id: str) -> bool:
-    if not isinstance(abort_result, dict):
-        return False
-    errors = abort_result.get("errors")
-    if errors:
-        return False
-    missing = abort_result.get("missing_session_ids")
-    if not isinstance(missing, list) or not missing:
-        return False
-    missing_ids = {str(item) for item in missing if item}
-    if opencode_session_id and opencode_session_id in missing_ids:
-        return True
-    aborted = abort_result.get("aborted_session_ids")
-    return not aborted
-
-
-async def _publish_abort_event(request: web.Request, event_type: str, *, record, abort_result: dict[str, Any], state: str = "aborted", summary: str | None = None) -> None:
-    bus = request.app.get(EVENT_BUS_KEY)
-    if bus is None or not hasattr(bus, "publish"):
-        return
-    event = {
-        "type": event_type,
-        "event_type": event_type,
-        "engine": "opencode",
-        "session_id": getattr(record, "portal_session_id", ""),
-        "request_id": getattr(record, "request_id", ""),
-        "opencode_session_id": getattr(record, "opencode_session_id", ""),
-        "state": state,
-        "summary": summary or event_type,
-        "data": safe_preview({"abort_result": abort_result}, 2000),
-        "created_at": utc_now_iso(),
-        "ts": time.time(),
-    }
-    await bus.publish(event)
-
-
-async def _handle_abort_failure(request: web.Request, *, store, client, record, abort_result: dict[str, Any]) -> web.Response:
-    current = store.record_abort_failure(record.request_id, abort_result) or record
-    await _publish_abort_event(request, "chat.run.abort_failed", record=current, abort_result=abort_result, state="failed", summary="OpenCode abort failed.")
-    await _publish_abort_event(request, "opencode.session.abort_failed", record=current, abort_result=abort_result, state="failed", summary="OpenCode abort failed.")
-    public = store.to_public_dict(current)
-    try:
-        validated = await validate_chat_run_against_opencode(store=store, client=client, record=current, event_bus=request.app.get(EVENT_BUS_KEY))
-        if validated is not None:
-            public = validated
-        else:
-            refreshed = store.get(record.request_id)
-            public = store.to_public_dict(refreshed) if refreshed is not None else public
-    except Exception:
-        pass
-    return web.json_response(
-        {
-            "success": False,
-            "engine": "opencode",
-            "source_of_truth": "opencode",
-            "error": "opencode_abort_failed",
-            "active": True,
-            "action_hint": "wait_reconnect_or_stop",
-            "run": public,
-            "abort_result": safe_preview(abort_result, 2000),
-        },
-        status=409,
-    )
-
-
-async def _handle_abort_missing(request: web.Request, *, store, record, abort_result: dict[str, Any]) -> web.Response:
-    stale = store.mark_stale(record.request_id, reason="opencode_session_missing_after_abort", metadata={"abort_result": abort_result}) or record
-    await _publish_abort_event(request, "chat.run.stale", record=stale, abort_result=abort_result, state="stale", summary="OpenCode session missing after abort.")
-    await _publish_abort_event(request, "opencode.session.missing", record=stale, abort_result=abort_result, state="stale", summary="OpenCode session missing after abort.")
-    return web.json_response(
-        {
-            "success": True,
-            "engine": "opencode",
-            "source_of_truth": "opencode",
-            "stale": True,
-            "active": False,
-            "action_hint": "safe_to_send",
-            "status": {"type": "missing"},
-            "reason": "opencode_session_missing_after_abort",
-            "run": store.to_public_dict(stale),
-            "abort_result": safe_preview(abort_result, 2000),
-        }
-    )
-
-
-def _still_active_abort_payload(
-    *,
-    portal_session_id: str,
-    opencode_session_id: str,
-    resolved: ResolvedOpenCodeRunState,
-    abort_result: dict[str, Any],
-    can_hard_reset: bool,
-) -> dict[str, Any]:
-    return {
-        "success": False,
-        "engine": "opencode",
-        "source_of_truth": "opencode",
-        "error": "opencode_abort_still_active",
-        "active": True,
-        "active_run": synthetic_active_run_from_resolved(
-            portal_session_id=portal_session_id,
-            opencode_session_id=opencode_session_id,
-            resolved=resolved,
-        ),
-        "action_hint": "hard_reset_or_new_session",
-        "can_hard_reset": bool(can_hard_reset),
-        "status": {"type": resolved.status or "unknown"},
-        "status_type": resolved.status or "unknown",
-        "abort_result": safe_preview(abort_result, 2000),
-        "diagnostics": run_state_diagnostics(resolved),
-    }
-
-
-async def abort_chat_run_handler(request: web.Request) -> web.Response:
-    store = request.app[CHAT_RUN_STORE_KEY]
-    client = request.app[OPENCODE_CLIENT_KEY]
-    request_id = request.match_info["request_id"]
-    record = store.get(request_id)
-    if record is None:
-        return web.json_response({"success": False, "engine": "opencode", "error": "chat_run_not_found"}, status=404)
-    abort_result = await _abort_opencode_session(client, record.opencode_session_id)
-    if _abort_result_failed(abort_result):
-        return await _handle_abort_failure(request, store=store, client=client, record=record, abort_result=abort_result)
-    resolved = await _wait_until_opencode_inactive(client, record.opencode_session_id)
-    if not resolved.active:
-        if not resolved.exists or _abort_result_missing_current_session(abort_result, record.opencode_session_id):
-            return await _handle_abort_missing(request, store=store, record=record, abort_result=abort_result)
-        updated = store.mark_aborted(
-            request_id,
-            reason="user_aborted",
-            metadata={
-                "abort_result": safe_preview(abort_result, 2000),
-                "source_of_truth": "opencode",
-                "opencode_active": False,
-                "opencode_status": resolved.status,
-                "diagnostics": run_state_diagnostics(resolved),
-            },
-        ) or record
-        await _publish_abort_event(request, "chat.run.aborted", record=updated, abort_result=abort_result)
-        await _publish_abort_event(request, "opencode.session.aborted", record=updated, abort_result=abort_result)
-        return web.json_response(
-            {
-                "success": True,
-                "engine": "opencode",
-                "source_of_truth": "opencode",
-                "active": False,
-                "action_hint": "safe_to_send",
-                "status": {"type": resolved.status or "idle"},
-                "status_type": resolved.status or "idle",
-                "run": store.to_public_dict(updated),
-                "abort_result": safe_preview(abort_result, 2000),
-                "diagnostics": run_state_diagnostics(resolved),
-            }
-        )
-
-    current = store.record_abort_failure(record.request_id, abort_result, reason="opencode_abort_still_active") or record
-    await _publish_abort_event(
-        request,
-        "opencode.session.abort_still_active",
-        record=current,
-        abort_result=abort_result,
-        state="active",
-        summary="OpenCode abort returned but the session is still active.",
-    )
-    return web.json_response(
-        _still_active_abort_payload(
-            portal_session_id=record.portal_session_id,
-            opencode_session_id=record.opencode_session_id,
-            resolved=resolved,
-            abort_result=abort_result,
-            can_hard_reset=True,
-        ),
-        status=409,
-    )
-
-
 async def abort_session_handler(request: web.Request) -> web.Response:
-    store = request.app[CHAT_RUN_STORE_KEY]
     client = request.app[OPENCODE_CLIENT_KEY]
     portal_session_id = request.match_info["session_id"]
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    body = body if isinstance(body, dict) else {}
-    force_detach = body.get("force_detach")
-    if force_detach is None:
-        force_detach = body.get("force_detach_on_still_active")
-    force_detach = force_detach is not False
-
-    state = await _resolve_portal_session_opencode_state(request, portal_session_id)
+    state = await _status_for_portal_session(request, portal_session_id)
     session_record = state["session_record"]
     opencode_session_id = state["opencode_session_id"]
     if not opencode_session_id:
-        stale_runs = _mark_session_runs_stale_from_opencode(
-            store,
-            portal_session_id,
-            "missing_opencode_session_id",
-            resolved=state["resolved"],
-        )
         return web.json_response(
             {
                 "success": True,
@@ -1159,47 +524,15 @@ async def abort_session_handler(request: web.Request) -> web.Response:
                 "status_type": "missing",
                 "reason": "missing_opencode_session_id",
                 "action_hint": "safe_to_send",
-                "run": None,
-                "diagnostics": {
-                    "missing_opencode_session_id": True,
-                    "chat_run_store_stale_count": len(stale_runs),
-                },
+                "abort_result": {"success": True, "skipped": True, "reason": "missing_opencode_session_id"},
             }
         )
 
     abort_result = await _abort_opencode_session(client, opencode_session_id)
-    try:
-        resolved = await _wait_until_opencode_inactive(client, opencode_session_id)
-    except Exception as exc:
-        if _abort_result_failed(abort_result):
-            return web.json_response(
-                {
-                    "success": False,
-                    "engine": "opencode",
-                    "source_of_truth": "opencode",
-                    "error": "opencode_abort_failed",
-                    "session_id": portal_session_id,
-                    "opencode_session_id": opencode_session_id,
-                    "active": True,
-                    "action_hint": "hard_reset_or_new_session" if force_detach else "wait_reconnect_or_stop",
-                    "can_hard_reset": bool(force_detach),
-                    "abort_result": safe_preview(abort_result, 2000),
-                    "diagnostics": {"post_abort_status_error": safe_preview(str(exc), 1000)},
-                },
-                status=409,
-            )
-        raise
-
+    post_state = await _status_for_portal_session(request, portal_session_id)
+    status = post_state["status"]["status"]
     aborted = _abort_result_aborted(abort_result, opencode_session_id)
-    if not resolved.active:
-        updated_runs = _mark_session_runs_aborted_or_stale(
-            store,
-            portal_session_id,
-            "user_aborted" if aborted else "opencode_session_missing_after_abort" if not resolved.exists else "opencode_not_active_after_abort",
-            abort_result=abort_result,
-            resolved=resolved,
-            aborted=aborted,
-        )
+    if not status["active"]:
         await _publish_session_event(
             request,
             "opencode.session.aborted" if aborted else "opencode.session.inactive_after_abort",
@@ -1207,7 +540,7 @@ async def abort_session_handler(request: web.Request) -> web.Response:
             opencode_session_id=opencode_session_id,
             state="aborted" if aborted else "inactive",
             summary="OpenCode session is inactive after abort.",
-            data={"abort_result": safe_preview(abort_result, 2000), "updated_run_count": len(updated_runs)},
+            data={"abort_result": safe_preview(abort_result, 2000)},
         )
         return web.json_response(
             {
@@ -1218,201 +551,29 @@ async def abort_session_handler(request: web.Request) -> web.Response:
                 "opencode_session_id": opencode_session_id,
                 "active": False,
                 "aborted": aborted,
-                "status": {"type": resolved.status or "idle"},
-                "status_type": resolved.status or "idle",
-                "reason": resolved.reason,
+                "status": {"type": status["type"], **status},
+                "status_type": status["type"],
                 "action_hint": "safe_to_send",
-                "run": store.to_public_dict(updated_runs[0]) if updated_runs else None,
                 "abort_result": safe_preview(abort_result, 2000),
-                "diagnostics": {
-                    **run_state_diagnostics(resolved),
-                    "chat_run_store_updated_count": len(updated_runs),
-                    "abort_result_succeeded": _abort_result_succeeded(abort_result),
-                },
             }
         )
 
-    if not force_detach:
-        if _abort_result_failed(abort_result):
-            error = "opencode_abort_failed"
-            payload = {
-                "success": False,
-                "engine": "opencode",
-                "source_of_truth": "opencode",
-                "error": error,
-                "session_id": portal_session_id,
-                "opencode_session_id": opencode_session_id,
-                "active": True,
-                "action_hint": "hard_reset_or_new_session",
-                "can_hard_reset": True,
-                "abort_result": safe_preview(abort_result, 2000),
-                "diagnostics": run_state_diagnostics(resolved),
-            }
-        else:
-            payload = _still_active_abort_payload(
-                portal_session_id=portal_session_id,
-                opencode_session_id=opencode_session_id,
-                resolved=resolved,
-                abort_result=abort_result,
-                can_hard_reset=True,
-            )
-            payload["session_id"] = portal_session_id
-            payload["opencode_session_id"] = opencode_session_id
-        return web.json_response(payload, status=409)
-
-    try:
-        reset = await _hard_reset_portal_session_binding(
-            request,
-            portal_session_id=portal_session_id,
-            old_opencode_session_id=opencode_session_id,
-            abort_result=abort_result,
-            old_resolved=resolved,
-            reason="opencode_abort_still_active_detached",
-        )
-    except Exception as exc:
-        payload = _still_active_abort_payload(
-            portal_session_id=portal_session_id,
-            opencode_session_id=opencode_session_id,
-            resolved=resolved,
-            abort_result=abort_result,
-            can_hard_reset=True,
-        )
-        payload["session_id"] = portal_session_id
-        payload["opencode_session_id"] = opencode_session_id
-        payload["diagnostics"] = {
-            **payload.get("diagnostics", {}),
-            "hard_reset_error": safe_preview(str(exc), 1000),
-            "abort_result_succeeded": _abort_result_succeeded(abort_result),
-        }
-        if _abort_result_failed(abort_result):
-            payload["error"] = "opencode_abort_failed"
-        return web.json_response(payload, status=409)
-
-    aborted = _abort_result_aborted(abort_result, opencode_session_id)
     return web.json_response(
         {
-            "success": True,
+            "success": False,
             "engine": "opencode",
             "source_of_truth": "opencode",
+            "error": "opencode_abort_still_active",
             "session_id": portal_session_id,
-            "opencode_session_id": reset["new_opencode_session_id"],
-            "old_opencode_session_id": opencode_session_id,
-            "detached_old_session": True,
-            "active": False,
-            "aborted": False,
-            "status": {"type": "idle"},
-            "status_type": "idle",
-            "action_hint": "safe_to_send",
-            "message": "OpenCode abort did not make the previous session idle, so the portal session was rebound to a fresh OpenCode session.",
-            "run": None,
+            "opencode_session_id": opencode_session_id,
+            "active": True,
+            "status": {"type": status["type"], **status},
+            "status_type": status["type"],
+            "action_hint": "wait_or_stop",
             "abort_result": safe_preview(abort_result, 2000),
-            "diagnostics": {
-                "old_resolved": run_state_diagnostics(resolved),
-                "new_opencode_session_id": reset["new_opencode_session_id"],
-                "chat_run_store_stale_count": len(reset["stale_runs"]),
-                "abort_result_succeeded": _abort_result_succeeded(abort_result),
-            },
-        }
+        },
+        status=409,
     )
-
-
-async def hard_reset_session_handler(request: web.Request) -> web.Response:
-    client = request.app[OPENCODE_CLIENT_KEY]
-    portal_session_id = request.match_info["session_id"]
-    state = await _resolve_portal_session_opencode_state(request, portal_session_id)
-    session_record = state["session_record"]
-    old_opencode_session_id = state["opencode_session_id"]
-    if session_record is None or getattr(session_record, "deleted", False):
-        return web.json_response(
-            {
-                "success": False,
-                "engine": "opencode",
-                "source_of_truth": "opencode",
-                "error": "missing_session_binding",
-                "session_id": portal_session_id,
-                "active": False,
-                "action_hint": "new_session_required",
-            },
-            status=404,
-        )
-
-    abort_result: dict[str, Any] = {"success": True, "skipped": True, "reason": "missing_opencode_session_id"}
-    if old_opencode_session_id:
-        try:
-            abort_result = await _abort_opencode_session(client, old_opencode_session_id)
-        except Exception as exc:
-            abort_result = {
-                "success": False,
-                "error": "opencode_abort_failed",
-                "detail": safe_preview(str(exc), 1000),
-            }
-
-    reset = await _hard_reset_portal_session_binding(
-        request,
-        portal_session_id=portal_session_id,
-        old_opencode_session_id=old_opencode_session_id,
-        abort_result=abort_result,
-        old_resolved=state["resolved"],
-        reason="explicit_hard_reset",
-    )
-    return web.json_response(
-        {
-            "success": True,
-            "engine": "opencode",
-            "source_of_truth": "opencode",
-            "session_id": portal_session_id,
-            "detached_old_session": True,
-            "old_opencode_session_id": old_opencode_session_id,
-            "opencode_session_id": reset["new_opencode_session_id"],
-            "active": False,
-            "aborted": False,
-            "status": {"type": "idle"},
-            "status_type": "idle",
-            "action_hint": "safe_to_send",
-            "abort_result": safe_preview(abort_result, 2000),
-            "diagnostics": {
-                "old_resolved": run_state_diagnostics(state["resolved"]),
-                "new_opencode_session_id": reset["new_opencode_session_id"],
-                "chat_run_store_stale_count": len(reset["stale_runs"]),
-            },
-        }
-    )
-
-
-async def reconcile_chat_runs_on_startup(app: web.Application) -> dict[str, int]:
-    store = app.get(CHAT_RUN_STORE_KEY)
-    client = app.get(OPENCODE_CLIENT_KEY)
-    if store is None or client is None or not hasattr(store, "list_active"):
-        return {"chat_runs_validated": 0, "chat_runs_stale_marked": 0, "chat_runs_still_active": 0}
-    records = list(store.list_active(include_detached_candidates=True))
-    summary = {"chat_runs_validated": 0, "chat_runs_stale_marked": 0, "chat_runs_still_active": 0}
-    for record in records:
-        before_status = getattr(record, "status", "")
-        try:
-            public = await validate_chat_run_against_opencode(store=store, client=client, record=record, event_bus=app.get(EVENT_BUS_KEY))
-        except Exception:
-            continue
-        summary["chat_runs_validated"] += 1
-        refreshed = store.get(getattr(record, "request_id", "")) if hasattr(store, "get") else None
-        if public is not None and public.get("opencode_active") is True:
-            summary["chat_runs_still_active"] += 1
-        if before_status != "stale" and getattr(refreshed, "status", "") == "stale":
-            summary["chat_runs_stale_marked"] += 1
-    bus = app.get(EVENT_BUS_KEY)
-    if bus is not None and hasattr(bus, "publish"):
-        await bus.publish(
-            {
-                "type": "chat.runs.reconciled",
-                "event_type": "chat.runs.reconciled",
-                "engine": "opencode",
-                "state": "completed",
-                "summary": "Chat run startup reconciliation completed.",
-                "data": dict(summary),
-                "created_at": utc_now_iso(),
-                "ts": time.time(),
-            }
-        )
-    return summary
 
 
 async def internal_opencode_status_handler(request: web.Request) -> web.Response:
@@ -1456,25 +617,6 @@ async def internal_opencode_log_tail_handler(request: web.Request) -> web.Respon
     return web.json_response({"success": True, "engine": "opencode", "lines": lines, "log_tail": safe_preview(text, 20000)})
 
 
-async def internal_chat_run_diagnostics_handler(request: web.Request) -> web.Response:
-    store = request.app[CHAT_RUN_STORE_KEY]
-    request_id = request.match_info["request_id"]
-    record = store.get(request_id)
-    if record is None:
-        return web.json_response({"success": False, "engine": "opencode", "error": "chat_run_not_found"}, status=404)
-    public = store.to_public_dict(record, include_final_payload=False)
-    diagnostics = public.get("diagnostics") if isinstance(public, dict) else {}
-    return web.json_response(
-        {
-            "success": True,
-            "engine": "opencode",
-            "request_id": request_id,
-            "status": getattr(record, "status", ""),
-            "diagnostics": safe_preview(diagnostics or {}, 4000),
-        }
-    )
-
-
 def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None, *, start_event_bridge: bool | None = None, opencode_process_manager: OpenCodeProcessManager | None = None) -> web.Application:
     app = web.Application()
     app[SETTINGS_KEY] = settings
@@ -1483,7 +625,6 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app[SESSION_STORE_KEY] = SessionStore(state_paths.sessions_dir)
     app[TASK_STORE_KEY] = TaskStore(state_paths.tasks_dir)
     app[CHATLOG_STORE_KEY] = ChatLogStore(state_paths.chatlogs_dir)
-    app[CHAT_RUN_STORE_KEY] = ChatRunStore(state_paths.chat_runs_file)
     app[OPENCODE_BINDING_STORE_KEY] = OpenCodeBindingStore(state_paths.root / "opencode_conversation_bindings.json")
     app[USER_DISPLAY_STORE_KEY] = UserDisplayStore(state_paths.sessions_dir / "user_display_messages.json")
     app[USAGE_TRACKER_KEY] = UsageTracker(state_paths.usage_file)
@@ -1511,7 +652,6 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/api/internal/runtime-profile/status", runtime_profile_status_handler)
     app.router.add_get("/api/internal/opencode/status", internal_opencode_status_handler)
     app.router.add_get("/api/internal/opencode/log-tail", internal_opencode_log_tail_handler)
-    app.router.add_get("/api/internal/chat/runs/{request_id}/diagnostics", internal_chat_run_diagnostics_handler)
     app.router.add_get("/api/internal/opencode-effective-config", effective_config_handler)
     app.router.add_get("/api/capabilities", capabilities_handler)
     app.router.add_get("/api/queue/status", queue_status_handler)
@@ -1524,9 +664,6 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_put("/api/agent/system-prompt/{name}", system_prompt_put_handler)
     app.router.add_post("/api/chat", chat_handler)
     app.router.add_post("/api/chat/stream", chat_stream_handler)
-    app.router.add_get("/api/chat/runs", list_chat_runs_handler)
-    app.router.add_get("/api/chat/runs/{request_id}", get_chat_run_handler)
-    app.router.add_post("/api/chat/runs/{request_id}/abort", abort_chat_run_handler)
     app.router.add_post("/api/tasks/execute", execute_task_handler)
     app.router.add_get("/api/tasks/{task_id}", get_task_handler)
     app.router.add_post("/api/tasks/{task_id}/cancel", cancel_task_handler)
@@ -1536,10 +673,8 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     register_opencode_thin_routes(app)
     app.router.add_get("/api/sessions", list_sessions_handler)
     app.router.add_post("/api/clear", clear_sessions_handler)
-    app.router.add_get("/api/sessions/{session_id}/active-run", active_chat_run_for_session_handler)
     app.router.add_get("/api/sessions/{session_id}/status", session_status_handler)
     app.router.add_post("/api/sessions/{session_id}/abort", abort_session_handler)
-    app.router.add_post("/api/sessions/{session_id}/hard-reset", hard_reset_session_handler)
     app.router.add_get("/api/sessions/{session_id}/chatlog", session_chatlog_handler)
     app.router.add_post("/api/sessions/{session_id}/rename", rename_session_handler)
     app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/edit/async", edit_message_async_handler)
@@ -1569,13 +704,6 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             if hasattr(manager, "run_watchdog"):
                 app[OPENCODE_WATCHDOG_TASK_KEY] = asyncio.create_task(manager.run_watchdog(app=app))
 
-    async def _reconcile_chat_runs(app):
-        try:
-            summary = await reconcile_chat_runs_on_startup(app)
-            print(f"chat run reconciliation summary: {summary}")
-        except Exception as exc:
-            print(f"chat run reconciliation failed: {exc}")
-
     async def _start_event_bridge(app):
         bridge = app.get(EVENT_BRIDGE_KEY)
         if bridge:
@@ -1586,7 +714,6 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
     app.on_startup.append(_managed_opencode_startup)
-    app.on_startup.append(_reconcile_chat_runs)
     if should_start_event_bridge:
         app.on_startup.append(_start_event_bridge)
         app.on_cleanup.append(_cleanup_event_bridge)

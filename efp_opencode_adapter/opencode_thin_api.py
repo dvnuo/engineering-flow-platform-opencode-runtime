@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import json
 from typing import Any
 
 from aiohttp import web
@@ -8,7 +8,6 @@ from aiohttp import web
 from .app_keys import OPENCODE_BINDING_STORE_KEY, OPENCODE_CLIENT_KEY
 from .opencode_binding_store import OpenCodeBindingStore
 from .opencode_client import OpenCodeClientError, _model_ref_from_value
-from .opencode_event_proxy import write_sse_response
 from .opencode_permission_adapter import map_permission_response
 from .opencode_status_adapter import build_conversation_status, unreachable_status
 from .opencode_thin_contract import (
@@ -281,31 +280,53 @@ async def send_conversation_handler(request: web.Request) -> web.Response:
         prompt_body["tools"] = body.get("tools")
     if "noReply" in body or "no_reply" in body:
         prompt_body["noReply"] = bool(body.get("noReply", body.get("no_reply")))
+    client = _client(request)
     try:
-        await _client(request).prompt_async(binding.opencode_session_id, prompt_body)
+        if hasattr(client, "message"):
+            response_payload = await client.message(binding.opencode_session_id, prompt_body)
+        else:
+            model_arg = None
+            raw_model = body.get("model")
+            if isinstance(raw_model, str):
+                model_arg = raw_model
+            elif isinstance(prompt_body.get("model"), dict):
+                model_ref = prompt_body["model"]
+                model_arg = f"{model_ref.get('providerID')}/{model_ref.get('modelID')}"
+            response_payload = await client.send_message(
+                binding.opencode_session_id,
+                parts=prompt_body["parts"],
+                model=model_arg,
+                agent=prompt_body.get("agent"),
+                system=prompt_body.get("system"),
+                message_id=prompt_body.get("messageID"),
+                no_reply=prompt_body.get("noReply"),
+                tools=prompt_body.get("tools"),
+            )
     except OpenCodeClientError as exc:
         return web.json_response(error_payload("opencode_error", detail=public_error_detail(exc)), status=502)
+    except ValueError as exc:
+        return web.json_response(error_payload("invalid_message_id", detail=str(exc)), status=400)
+    try:
+        messages = await client.list_messages(binding.opencode_session_id)
+    except OpenCodeClientError as exc:
+        return web.json_response(error_payload("opencode_error", detail=public_error_detail(exc)), status=502)
+    _raw_status, post_status = await _status_for_session(client, binding.opencode_session_id, include_children=False)
     return web.json_response(
         ok_payload(
-            status="accepted",
+            status="completed",
             conversation_id=binding.portal_conversation_id,
             opencode_session_id=binding.opencode_session_id,
             message_id=message_id,
-            action_hint="watch_events_then_reconcile",
+            message=response_payload,
+            messages=messages if isinstance(messages, list) else [],
+            session_status=post_status["status"],
+            action_hint="refresh_messages",
         )
     )
 
 
 async def _post_abort_status(client, session_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    last_raw: dict[str, Any] = {}
-    last_status: dict[str, Any] = unreachable_status()
-    for attempt in range(3):
-        last_raw, last_status = await _status_for_session(client, session_id, include_children=False)
-        if not last_status["status"]["active"]:
-            return last_raw, last_status
-        if attempt < 2:
-            await asyncio.sleep(0.05)
-    return last_raw, last_status
+    return await _status_for_session(client, session_id, include_children=False)
 
 
 async def abort_conversation_handler(request: web.Request) -> web.Response:
@@ -339,15 +360,37 @@ async def conversation_events_handler(request: web.Request) -> web.StreamRespons
     binding = _binding_for_request(request)
     if binding is None:
         raise web.HTTPNotFound(text='{"ok": false, "error": "conversation_not_found"}', content_type="application/json")
-    client = _client(request)
-    if not hasattr(client, "event_stream"):
-        raise web.HTTPNotImplemented(text='{"ok": false, "error": "opencode_event_stream_unsupported"}', content_type="application/json")
-    return await write_sse_response(
-        request,
-        client.event_stream(),
-        conversation_id=binding.portal_conversation_id,
-        opencode_session_id=binding.opencode_session_id,
+    response = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache",
+            "Connection": "close",
+        },
     )
+    await response.prepare(request)
+    for event_name, payload in (
+        (
+            "opencode.connected",
+            {
+                "ok": True,
+                "conversation_id": binding.portal_conversation_id,
+                "opencode_session_id": binding.opencode_session_id,
+            },
+        ),
+        (
+            "opencode.snapshot.required",
+            {
+                "ok": True,
+                "conversation_id": binding.portal_conversation_id,
+                "opencode_session_id": binding.opencode_session_id,
+                "action_hint": "refresh_messages",
+            },
+        ),
+    ):
+        await response.write(f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8"))
+    await response.write_eof()
+    return response
 
 
 async def conversation_children_handler(request: web.Request) -> web.Response:
