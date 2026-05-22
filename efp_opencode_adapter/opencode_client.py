@@ -455,13 +455,8 @@ class OpenCodeClient:
                 return tools
         raise OpenCodeClientError("unexpected tool ids response shape", payload=data)
 
-    async def create_session(self, title: str | None = None, parent_id: str | None = None) -> dict:
-        payload: dict[str, Any] = {}
-        if title:
-            payload["title"] = title
-        if parent_id:
-            payload["parentID"] = parent_id
-        return await self._request_json("POST", "/session", json=payload, expected_statuses=(200, 201))
+    async def create_session(self, title: str | None = None) -> dict:
+        return await self._request_json("POST", "/session", json={"title": title} if title else {}, expected_statuses=(200, 201))
 
     async def list_sessions(self) -> list[dict]:
         data = await self._request_json("GET", "/session")
@@ -487,9 +482,6 @@ class OpenCodeClient:
             if isinstance(children, list):
                 return [item for item in children if isinstance(item, dict)]
         return []
-
-    async def children(self, session_id: str) -> list[dict[str, Any]]:
-        return await self.list_session_children(session_id)
 
     async def get_session_status_raw(self, timeout_seconds: int = 30) -> Any:
         return await self._request_json("GET", "/session/status", timeout_seconds=timeout_seconds)
@@ -548,18 +540,10 @@ class OpenCodeClient:
         submit_timeout = max(300, int(getattr(self.settings, "chat_submit_timeout_seconds", getattr(self.settings, "chat_completion_timeout_seconds", 300))))
         return await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200,), timeout_seconds=submit_timeout)
 
-    async def message(self, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        payload = _normalize_prompt_body(body)
-        data = await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200,))
-        return data if isinstance(data, dict) else {"data": data}
-
     async def fork_session(self, session_id: str, message_id: str | None = None) -> dict:
         payload = {"messageID": require_opencode_message_id(message_id)} if message_id else {}
         data = await self._request_json("POST", f"/session/{session_id}/fork", json=payload, expected_statuses=(200, 201))
         return data if isinstance(data, dict) else {}
-
-    async def fork(self, session_id: str, message_id: str | None = None) -> dict:
-        return await self.fork_session(session_id, message_id)
 
     async def abort_session(self, session_id: str) -> dict[str, Any]:
         status, _ = await self._request_json_with_status("POST", f"/session/{session_id}/abort", expected_statuses=(200, 202, 204))
@@ -632,36 +616,14 @@ class OpenCodeClient:
         body = _normalize_prompt_body(payload)
         return await self._request_json("POST", f"/session/{session_id}/prompt_async", json=body, expected_statuses=(204,))
 
-    async def permission_response(self, session_id: str, permission_id: str, payload: dict[str, Any]) -> dict:
+    async def respond_permission(self, session_id: str, permission_id: str, payload: dict[str, Any]) -> dict:
+        body = _permission_response_from_body(payload)
         return await self._request_json(
             "POST",
             f"/session/{session_id}/permissions/{permission_id}",
-            json=dict(payload),
+            json=body,
             expected_statuses=(200, 201, 202, 204),
         ) or {"success": True}
-
-    async def respond_permission(self, session_id: str, permission_id: str, payload: dict[str, Any]) -> dict:
-        body = _permission_response_from_body(payload)
-        return await self.permission_response(session_id, permission_id, body)
-
-    async def todo(self, session_id: str) -> Any:
-        return await self._request_json("GET", f"/session/{session_id}/todo")
-
-    async def diff(self, session_id: str, message_id: str | None = None) -> Any:
-        path = f"/session/{session_id}/diff"
-        if message_id:
-            path = f"{path}?{urlencode({'messageID': message_id})}"
-        return await self._request_json("GET", path)
-
-    async def mcp_status(self) -> dict[str, Any]:
-        data = await self._request_json("GET", "/mcp", expected_statuses=(200,))
-        if isinstance(data, dict):
-            if isinstance(data.get("servers"), dict):
-                return {"servers": data["servers"]}
-            if "tools" in data:
-                return {"servers": {}}
-            return {"servers": data}
-        return {"servers": {}}
 
     async def cancel_message(self, session_id: str, message_id: str | None = None) -> dict[str, Any]:
         valid_message_id = require_opencode_message_id(message_id) if message_id else None

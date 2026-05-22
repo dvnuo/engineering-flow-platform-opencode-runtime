@@ -16,18 +16,15 @@ class FakeOpenCodeClient:
         self.fork_mode = fork_mode
         self.fork_calls: list[dict[str, Any]] = []
         self.revert_calls: list[dict[str, Any]] = []
-        self.permission_calls: list[dict[str, Any]] = []
 
     async def health(self):
         return {"healthy": True, "version": "1.14.39"}
 
-    async def create_session(self, title=None, parent_id=None):
+    async def create_session(self, title=None):
         self.create_calls += 1
         sid = f"ses-{self.next_id}"
         self.next_id += 1
         self.sessions[sid] = {"id": sid, "title": title or "Chat"}
-        if parent_id:
-            self.sessions[sid]["parentID"] = parent_id
         self.messages[sid] = []
         return {"id": sid, "title": title or "Chat"}
 
@@ -47,9 +44,6 @@ class FakeOpenCodeClient:
             raise OpenCodeClientError("not found", status=404)
         return []
 
-    async def children(self, session_id):
-        return await self.list_session_children(session_id)
-
     async def patch_session(self, session_id, title):
         if session_id not in self.sessions:
             raise OpenCodeClientError("not found", status=404)
@@ -60,7 +54,7 @@ class FakeOpenCodeClient:
         self.sessions.pop(session_id, None)
         self.messages.pop(session_id, None)
 
-    async def list_messages(self, session_id, limit=None):
+    async def list_messages(self, session_id):
         return list(self.messages.get(session_id, []))
 
     async def get_message(self, session_id, message_id):
@@ -104,9 +98,6 @@ class FakeOpenCodeClient:
                 self.messages[sid] = list(old_messages[: index + 1])
         return {"id": sid, "title": self.sessions[sid]["title"]}
 
-    async def fork(self, session_id, message_id=None):
-        return await self.fork_session(session_id, message_id)
-
     async def abort_session(self, session_id):
         self.abort_session_called += 1
         return {"success": True, "supported": True, "status": 200}
@@ -125,28 +116,7 @@ class FakeOpenCodeClient:
         self.messages[session_id] = list(messages[:index])
         return {"success": True, "supported": True, "status": 200}
 
-    async def permission_response(self, session_id, permission_id, payload):
-        self.permission_calls.append({"session_id": session_id, "permission_id": permission_id, "payload": payload})
+    async def respond_permission(self, session_id, permission_id, payload):
         if session_id not in self.sessions:
             raise OpenCodeClientError("not found", status=404)
         return {"success": True}
-
-    async def respond_permission(self, session_id, permission_id, payload):
-        return await self.permission_response(session_id, permission_id, payload)
-
-    async def todo(self, session_id):
-        if session_id not in self.sessions:
-            raise OpenCodeClientError("not found", status=404)
-        return []
-
-    async def diff(self, session_id, message_id=None):
-        if session_id not in self.sessions:
-            raise OpenCodeClientError("not found", status=404)
-        return {"files": [], "message_id": message_id}
-
-    async def mcp_status(self):
-        return {"servers": {}}
-
-    async def event_stream(self):
-        if False:
-            yield {}
