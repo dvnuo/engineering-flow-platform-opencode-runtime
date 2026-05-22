@@ -72,6 +72,34 @@ async def test_event_proxy_session_idle_sets_idle_status():
 
 
 @pytest.mark.asyncio
+async def test_event_proxy_drops_sessionless_message_and_permission_events():
+    async def events():
+        yield {"type": "server.connected", "data": {"hello": True}}
+        yield {"type": "message.updated", "messageID": "msg-without-session"}
+        yield {"type": "message.part.updated", "partID": "part-without-session"}
+        yield {"type": "permission.requested", "permissionID": "perm-without-session"}
+        yield {"type": "snapshot.required"}
+        yield {"type": "opencode.error", "message": "x"}
+
+    out = [
+        item
+        async for item in iter_filtered_events(
+            events(),
+            conversation_id="pc-1",
+            opencode_session_id="ses-1",
+        )
+    ]
+
+    names = [name for name, _ in out]
+    assert "opencode.connected" in names
+    assert "opencode.snapshot.required" in names
+    assert "opencode.error" in names
+    assert all(payload.get("messageID") != "msg-without-session" for _name, payload in out)
+    assert all(payload.get("partID") != "part-without-session" for _name, payload in out)
+    assert all(payload.get("permissionID") != "perm-without-session" for _name, payload in out)
+
+
+@pytest.mark.asyncio
 async def test_event_proxy_status_event_sets_send_abort_hints():
     out = [
         item

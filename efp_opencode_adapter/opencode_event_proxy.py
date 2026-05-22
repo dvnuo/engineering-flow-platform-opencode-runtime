@@ -24,9 +24,25 @@ def event_session_id(event: Any) -> str:
     return ""
 
 
+def _normalized_event_kind(event: dict[str, Any]) -> str:
+    raw_type = str(event.get("type") or event.get("event_type") or "").strip().lower()
+    return raw_type.replace("_", ".").replace("-", ".")
+
+
+def _is_sessionless_control_event(event: dict[str, Any]) -> bool:
+    kind = _normalized_event_kind(event)
+    return (
+        kind in {"server.connected", "connected"}
+        or "snapshot" in kind
+        or "error" in kind
+    )
+
+
 def event_matches_session(event: dict[str, Any], opencode_session_id: str) -> bool:
     session_id = event_session_id(event)
-    return not session_id or session_id == opencode_session_id
+    if session_id:
+        return session_id == opencode_session_id
+    return _is_sessionless_control_event(event)
 
 
 def normalize_opencode_event(

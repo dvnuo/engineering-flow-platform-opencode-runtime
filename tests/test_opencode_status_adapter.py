@@ -1,6 +1,19 @@
 from efp_opencode_adapter.opencode_status_adapter import is_status_active, normalize_status_type
 
 
+def test_status_adapter_maps_accepted_and_submitted_as_busy():
+    assert normalize_status_type("accepted") == "busy"
+    assert normalize_status_type("submitted") == "busy"
+    assert is_status_active("accepted") is True
+    assert is_status_active("submitted") is True
+
+
+def test_status_adapter_keeps_negative_statuses_inactive():
+    for value in ["not-running", "not_running", "not-busy", "not_busy", "inactive"]:
+        assert normalize_status_type(value) == "idle"
+        assert is_status_active(value) is False
+
+
 def test_thin_status_does_not_treat_negative_status_as_active():
     for value in [
         "not-running",
@@ -15,6 +28,7 @@ def test_thin_status_does_not_treat_negative_status_as_active():
 
 
 def test_thin_status_strict_exact_mapping():
+    assert normalize_status_type("queued") == "busy"
     assert normalize_status_type("running") == "busy"
     assert normalize_status_type("busy") == "busy"
     assert normalize_status_type("retry") == "retry"

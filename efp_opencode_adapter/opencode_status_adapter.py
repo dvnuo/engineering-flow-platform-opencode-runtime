@@ -4,6 +4,8 @@ from typing import Any
 
 
 _ACTIVE_STATUS_VALUES = {
+    "accepted",
+    "submitted",
     "busy",
     "running",
     "streaming",
