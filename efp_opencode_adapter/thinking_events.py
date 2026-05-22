@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
+
+UTC = timezone.utc
 
 SENSITIVE_KEYS = [
     "password",

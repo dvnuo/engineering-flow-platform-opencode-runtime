@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import re
 from typing import Any
+
+UTC = timezone.utc
 
 
 def message_role(message: Any) -> str:

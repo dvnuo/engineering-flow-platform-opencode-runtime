@@ -56,9 +56,6 @@ class Settings:
     chat_completion_poll_seconds: float = 1.0
     chat_submit_timeout_seconds: float = 300.0
     chat_total_wall_timeout_seconds: float = 21600.0
-    chat_timeout_recovery_enabled: bool = True
-    chat_timeout_recovery_max_seconds: float = 900.0
-    chat_timeout_recovery_poll_seconds: float = 2.0
     chat_auto_continue_enabled: bool = True
     chat_auto_continue_max_turns: int = 3
     chat_auto_continue_checkpoint_enabled: bool = True
@@ -102,9 +99,6 @@ class Settings:
             chat_completion_poll_seconds=max(0.1, float(os.getenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "1.0"))),
             chat_submit_timeout_seconds=max(300.0, float(os.getenv("EFP_CHAT_SUBMIT_TIMEOUT_SECONDS", os.getenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "300")))),
             chat_total_wall_timeout_seconds=max(0.001, float(os.getenv("EFP_CHAT_TOTAL_WALL_TIMEOUT_SECONDS", "21600"))),
-            chat_timeout_recovery_enabled=_env_bool("EFP_CHAT_TIMEOUT_RECOVERY_ENABLED", True),
-            chat_timeout_recovery_max_seconds=max(0.0, float(os.getenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "900"))),
-            chat_timeout_recovery_poll_seconds=max(0.001, float(os.getenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "2.0"))),
             chat_auto_continue_enabled=_env_bool("EFP_CHAT_AUTO_CONTINUE_ENABLED", True),
             chat_auto_continue_max_turns=max(0, int(os.getenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "3"))),
             chat_auto_continue_checkpoint_enabled=_env_bool("EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_ENABLED", True),

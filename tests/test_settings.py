@@ -55,9 +55,6 @@ def test_settings_legacy_external_tool_env_ignored(monkeypatch):
 def test_chat_long_run_settings_defaults(monkeypatch):
     for name in [
         "EFP_CHAT_TOTAL_WALL_TIMEOUT_SECONDS",
-        "EFP_CHAT_TIMEOUT_RECOVERY_ENABLED",
-        "EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS",
-        "EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS",
         "EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_ENABLED",
         "EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT",
         "EFP_CHAT_AUTO_CONTINUE_PROMPT",
@@ -70,9 +67,6 @@ def test_chat_long_run_settings_defaults(monkeypatch):
     settings = Settings.from_env()
 
     assert settings.chat_total_wall_timeout_seconds == 21600
-    assert settings.chat_timeout_recovery_enabled is True
-    assert settings.chat_timeout_recovery_max_seconds == 900
-    assert settings.chat_timeout_recovery_poll_seconds == 2.0
     assert settings.chat_auto_continue_checkpoint_enabled is True
     assert settings.chat_auto_continue_max_turns == 3
     assert "Continue the same user request" in settings.chat_auto_continue_checkpoint_prompt
@@ -84,9 +78,6 @@ def test_chat_long_run_settings_defaults(monkeypatch):
 
 def test_chat_long_run_settings_env_overrides(monkeypatch):
     monkeypatch.setenv("EFP_CHAT_TOTAL_WALL_TIMEOUT_SECONDS", "42")
-    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_ENABLED", "false")
-    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "7")
-    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.25")
     monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "50")
     monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_ENABLED", "false")
     monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT", "checkpoint prompt")
@@ -97,9 +88,6 @@ def test_chat_long_run_settings_env_overrides(monkeypatch):
     settings = Settings.from_env()
 
     assert settings.chat_total_wall_timeout_seconds == 42
-    assert settings.chat_timeout_recovery_enabled is False
-    assert settings.chat_timeout_recovery_max_seconds == 7
-    assert settings.chat_timeout_recovery_poll_seconds == 0.25
     assert settings.chat_auto_continue_max_turns == 50
     assert settings.chat_auto_continue_checkpoint_enabled is False
     assert settings.chat_auto_continue_checkpoint_prompt == "checkpoint prompt"

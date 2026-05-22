@@ -21,14 +21,14 @@ async def test_events_ws(tmp_path, monkeypatch):
 
     await client.post("/api/chat", json={"message": "hello", "session_id": "portal-1"})
     events = []
-    for _ in range(12):
+    for _ in range(8):
         events.append(await ws.receive_json(timeout=2))
-        if events[-1].get("type") == "execution.completed":
+        if events[-1].get("type") == "chat.completed":
             break
     types = {e["type"] for e in events}
-    assert "execution.started" in types
+    assert "chat.started" in types
     assert "llm_thinking" in types
-    assert "execution.completed" in types
+    assert "chat.completed" in types
 
     ws2 = await client.ws_connect("/api/events?session_id=portal-filter")
     assert (await ws2.receive_json())["type"] == "connected"
@@ -162,7 +162,7 @@ async def test_events_ws_replay_after_last_event_at(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_events_ws_replay_stream_detached_and_assistant_completed(tmp_path, monkeypatch):
+async def test_events_ws_replay_chat_completed_and_assistant_completed(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
     client = TestClient(TestServer(app))
@@ -170,11 +170,11 @@ async def test_events_ws_replay_stream_detached_and_assistant_completed(tmp_path
 
     await app[EVENT_BUS_KEY].publish(
         {
-            "type": "chat.stream_detached",
-            "event_type": "chat.stream_detached",
-            "session_id": "portal-detached",
-            "request_id": "req-detached",
-            "data": {"reason": "client_disconnected"},
+            "type": "chat.completed",
+            "event_type": "chat.completed",
+            "session_id": "portal-completed",
+            "request_id": "req-completed",
+            "data": {"completion_state": "completed"},
             "created_at": "2026-05-19T00:00:00+00:00",
         }
     )
@@ -182,19 +182,19 @@ async def test_events_ws_replay_stream_detached_and_assistant_completed(tmp_path
         {
             "type": "assistant.message.completed",
             "event_type": "assistant.message.completed",
-            "session_id": "portal-detached",
-            "request_id": "req-detached",
+            "session_id": "portal-completed",
+            "request_id": "req-completed",
             "data": {"assistant_message_id": "a-1", "text": "final"},
             "created_at": "2026-05-19T00:00:01+00:00",
         }
     )
 
-    ws = await client.ws_connect("/api/events?session_id=portal-detached&replay=1")
+    ws = await client.ws_connect("/api/events?session_id=portal-completed&replay=1")
     assert (await ws.receive_json())["type"] == "connected"
     first = await ws.receive_json(timeout=2)
     second = await ws.receive_json(timeout=2)
 
-    assert [first["type"], second["type"]] == ["chat.stream_detached", "assistant.message.completed"]
+    assert [first["type"], second["type"]] == ["chat.completed", "assistant.message.completed"]
     assert first["metadata"]["replayed"] is True
     assert second["data"]["replayed"] is True
 

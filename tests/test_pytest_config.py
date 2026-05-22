@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 
 def test_pytest_disables_external_ddtrace_plugins_by_default():
