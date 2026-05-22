@@ -25,6 +25,7 @@ from .app_keys import (
     EVENT_BRIDGE_TASK_KEY,
     OPENCODE_PROCESS_MANAGER_KEY,
     OPENCODE_WATCHDOG_TASK_KEY,
+    OPENCODE_BINDING_STORE_KEY,
     REQUEST_BINDING_STORE_KEY,
 )
 
@@ -35,6 +36,8 @@ from .chatlog_store import ChatLogStore
 from .chat_run_store import ChatRunStore
 from .active_run_payload import active_run_public_from_store, run_state_diagnostics, synthetic_active_run_from_resolved
 from .opencode_client import is_session_missing_error
+from .opencode_binding_store import OpenCodeBindingStore
+from .opencode_thin_api import register_opencode_thin_routes
 from .opencode_run_state import ResolvedOpenCodeRunState, resolve_opencode_run_state
 from .compat_api import (
     git_info_handler,
@@ -1481,6 +1484,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app[TASK_STORE_KEY] = TaskStore(state_paths.tasks_dir)
     app[CHATLOG_STORE_KEY] = ChatLogStore(state_paths.chatlogs_dir)
     app[CHAT_RUN_STORE_KEY] = ChatRunStore(state_paths.chat_runs_file)
+    app[OPENCODE_BINDING_STORE_KEY] = OpenCodeBindingStore(state_paths.root / "opencode_conversation_bindings.json")
     app[USER_DISPLAY_STORE_KEY] = UserDisplayStore(state_paths.sessions_dir / "user_display_messages.json")
     app[USAGE_TRACKER_KEY] = UsageTracker(state_paths.usage_file)
     app[EVENT_BUS_KEY] = EventBus(settings.event_replay_limit, settings.event_replay_ttl_seconds)
@@ -1529,6 +1533,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/api/events", events_ws_handler)
     app.router.add_get("/api/usage", usage_handler)
     app.router.add_post("/api/permissions/{permission_id}/respond", permission_respond_handler)
+    register_opencode_thin_routes(app)
     app.router.add_get("/api/sessions", list_sessions_handler)
     app.router.add_post("/api/clear", clear_sessions_handler)
     app.router.add_get("/api/sessions/{session_id}/active-run", active_chat_run_for_session_handler)

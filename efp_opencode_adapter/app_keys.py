@@ -20,5 +20,6 @@ FILE_SERVICE_KEY = web.AppKey('file_service', object)
 ATTACHMENT_SERVICE_KEY = web.AppKey('attachment_service', object)
 OPENCODE_PROCESS_MANAGER_KEY = web.AppKey('opencode_process_manager', object)
 OPENCODE_WATCHDOG_TASK_KEY = web.AppKey('opencode_watchdog_task', object)
+OPENCODE_BINDING_STORE_KEY = web.AppKey('opencode_binding_store', object)
 
 REQUEST_BINDING_STORE_KEY = web.AppKey('request_binding_store', object)
