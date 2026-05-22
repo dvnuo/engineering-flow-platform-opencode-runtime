@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from typing import Any
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -95,7 +95,7 @@ class UsageTracker:
         cost = _safe_float(usage.get("cost") or usage.get("total_cost"))
 
         rec = {
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": "chat",
             "session_id": session_id,
             "request_id": request_id,
@@ -114,7 +114,7 @@ class UsageTracker:
 
     def summarize(self, *, days: int = 30) -> dict:
         days = min(365, max(1, int(days)))
-        cutoff = datetime.now(UTC) - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         rows = []
         if self.usage_file.exists():
             for line in self.usage_file.read_text(encoding="utf-8").splitlines():

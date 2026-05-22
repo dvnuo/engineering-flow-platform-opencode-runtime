@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -34,7 +34,7 @@ async def test_usage_api_handles_malformed_historical_usage_rows(tmp_path, monke
     usage_file.write_text(
         json.dumps(
             {
-                "timestamp": datetime.now(UTC).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "type": "chat",
                 "session_id": "s",
                 "request_id": "r",

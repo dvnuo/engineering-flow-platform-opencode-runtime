@@ -176,8 +176,9 @@ async def test_chat_stream_runtime_profile_must_be_object_emits_error(tmp_path, 
 
     assert res.status == 200
     assert "text/event-stream" in res.headers.get("Content-Type", "")
-    assert "event: runtime_event" in body
     assert "event: error" in body
+    assert "event: final" in body
+    assert "event: done" in body
     assert "runtime_profile_must_be_object" in body
     await client.close()
 
@@ -320,10 +321,9 @@ async def test_chat_with_corrupted_existing_chatlog_recovers_and_succeeds(tmp_pa
     assert body["usage"]["requests"] == 1
 
     event_types = [event["type"] for event in body["runtime_events"]]
-    assert "execution.started" in event_types
+    assert "chat.started" in event_types
     assert "llm_thinking" in event_types
-    assert "complete" in event_types
-    assert "execution.completed" in event_types
+    assert "chat.completed" in event_types
 
     after = await client.get("/api/sessions/s-corrupt/chatlog")
     assert after.status == 200
@@ -365,7 +365,7 @@ async def test_app_starts_with_corrupted_session_index_and_chat_succeeds(tmp_pat
     body = await resp.json()
     assert body["response"]
     assert body["usage"]["requests"] == 1
-    assert any(e["type"] == "execution.completed" for e in body["runtime_events"])
+    assert any(e["type"] == "chat.completed" for e in body["runtime_events"])
 
     chatlog = await (await client.get("/api/sessions/s-after-corrupt-index/chatlog")).json()
     assert chatlog["success"] is True

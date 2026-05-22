@@ -108,23 +108,10 @@ def message_to_text(message: Any) -> str:
     return message_to_visible_text(message)
 
 
-def _message_parts(message: Any) -> list[dict[str, Any]]:
-    if isinstance(message, dict):
-        parts = message.get("parts")
-        if isinstance(parts, list):
-            return [p for p in parts if isinstance(p, dict)]
-        message_obj = message.get("message")
-        if isinstance(message_obj, dict) and isinstance(message_obj.get("parts"), list):
-            return [p for p in message_obj["parts"] if isinstance(p, dict)]
-    return []
-
-
 def normalize_canonical_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for raw in messages:
         if not isinstance(raw, dict):
-            continue
-        if _is_internal_efp_message(raw):
             continue
 
         info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
@@ -158,17 +145,6 @@ def normalize_canonical_messages(messages: list[dict[str, Any]]) -> list[dict[st
     return out
 
 
-def _is_internal_efp_message(message: Any) -> bool:
-    mid = _message_id(message)
-    if mid.startswith("efp-auto-continue-"):
-        return True
-    for part in _message_parts(message):
-        metadata = part.get("metadata")
-        if isinstance(metadata, dict) and metadata.get("efp_internal") == "auto_continue":
-            return True
-    return False
-
-
 def _to_efp_messages(
     messages: list[dict[str, Any]],
     *,
@@ -176,9 +152,8 @@ def _to_efp_messages(
     portal_session_id: str = "",
     opencode_session_id: str = "",
 ) -> list[dict[str, Any]]:
-    filtered = [msg for msg in messages if not _is_internal_efp_message(msg)]
     out = []
-    for idx, msg in enumerate(filtered):
+    for idx, msg in enumerate(messages):
         efp = to_efp_message(msg, index=idx)
         if str(efp.get("role") or "").lower() == "user" and display_store is not None:
             metadata = efp.get("metadata") if isinstance(efp.get("metadata"), dict) else {}
@@ -210,7 +185,6 @@ def _visible_message_signatures(messages: list[dict[str, Any]]) -> list[dict[str
     return [
         {"role": _message_role(message), "content": _normalize_visible_content(message_to_text(message))}
         for message in messages
-        if not _is_internal_efp_message(message)
     ]
 
 

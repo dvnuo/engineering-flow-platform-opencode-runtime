@@ -4,7 +4,6 @@ from pathlib import Path
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from efp_opencode_adapter.app_keys import CHAT_RUN_STORE_KEY
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
@@ -81,24 +80,18 @@ async def test_create_list_get_and_update_conversation(tmp_path, monkeypatch):
 
         include_archived = await (await client.get("/api/opencode/conversations?include_archived=true")).json()
         assert include_archived["conversations"][0]["archived_at"]
-        assert app[CHAT_RUN_STORE_KEY] is not None
+        assert "4096" not in json.dumps(include_archived)
     finally:
         await client.close()
 
 
 @pytest.mark.asyncio
-async def test_status_uses_opencode_status_and_ignores_chat_run_store(tmp_path, monkeypatch):
+async def test_status_uses_opencode_status_without_long_task_store(tmp_path, monkeypatch):
     fake = ThinOpenCodeClient()
     client, app = await _client(tmp_path, monkeypatch, fake)
     try:
         conversation = await _create_conversation(client)
         fake.states["ses-1"] = "running"
-
-        def forbidden(*_args, **_kwargs):
-            raise AssertionError("ChatRunStore must not be used by /api/opencode/*")
-
-        app[CHAT_RUN_STORE_KEY].active_for_session = forbidden
-        app[CHAT_RUN_STORE_KEY].latest_for_session = forbidden
 
         busy = await client.get(f"/api/opencode/conversations/{conversation['id']}/status")
         body = await busy.json()

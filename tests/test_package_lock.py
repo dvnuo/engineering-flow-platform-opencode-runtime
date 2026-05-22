@@ -6,7 +6,7 @@ def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _resolve_locked_version(lock_payload: dict, package_name: str) -> str | None:
+def _resolve_locked_version(lock_payload: dict, package_name: str):
     package_key = f"node_modules/{package_name}"
     version = ((lock_payload.get("packages") or {}).get(package_key) or {}).get("version")
     if version is not None:

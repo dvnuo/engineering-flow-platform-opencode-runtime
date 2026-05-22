@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import re
 from typing import Any
 
@@ -90,7 +90,7 @@ def _as_iso(value: Any) -> str:
         return value
     if isinstance(value, (int, float)):
         seconds = value / 1000 if value > 1_000_000_000_000 else value
-        return datetime.fromtimestamp(seconds, UTC).isoformat()
+        return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
     return ""
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import inspect
 import re
 import time
 from typing import Any, Iterable
@@ -238,7 +239,15 @@ async def _send_message(
         if system:
             body["system"] = system
         return await client.message(session_id, body)
-    return await client.send_message(session_id, parts=parts, model=model, agent=agent, system=system, message_id=message_id)
+    kwargs: dict[str, Any] = {"parts": parts, "model": model, "agent": agent, "system": system}
+    try:
+        sig = inspect.signature(client.send_message)
+        accepts_message_id = "message_id" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    except (TypeError, ValueError):
+        accepts_message_id = True
+    if accepts_message_id:
+        kwargs["message_id"] = message_id
+    return await client.send_message(session_id, **kwargs)
 
 
 def _event_payload(
@@ -507,6 +516,9 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
     settings = app[SETTINGS_KEY]
     runtime_events: list[dict[str, Any]] = []
     opencode_session_id = ""
+    existing_record = store.get(portal_session_id)
+    if existing_record is not None and not existing_record.deleted:
+        opencode_session_id = existing_record.opencode_session_id
     provider_for_trace_raw = _optional_str(runtime_profile.get("provider")) or _optional_str(metadata.get("provider"))
     provider_for_trace = normalize_opencode_provider_id(provider_for_trace_raw)
     profile_version, runtime_profile_id = profile_version_from_metadata(metadata, runtime_profile)

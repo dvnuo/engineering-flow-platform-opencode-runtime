@@ -123,7 +123,7 @@ async def test_real_opencode_fork_candidates_preserve_expected_prefix():
         candidates: list[dict[str, str]] = []
         seen: set[str] = set()
 
-        def add_candidate(message: dict[str, Any] | None) -> None:
+        def add_candidate(message: "dict[str, Any] | None") -> None:
             if not message:
                 return
             message_id = _message_id(message)

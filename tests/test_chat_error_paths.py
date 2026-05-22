@@ -65,7 +65,7 @@ async def test_existing_session_get_session_error_returns_502_and_failed_event(t
     assert fake.create_calls == 1
 
     evt = await ws.receive_json(timeout=2)
-    assert evt["type"] == "execution.failed"
+    assert evt["type"] == "chat.failed"
     assert evt["session_id"] == "portal-1"
     assert evt["request_id"]
     assert evt["opencode_session_id"]
@@ -92,7 +92,7 @@ async def test_create_session_error_returns_502_and_failed_event(tmp_path, monke
     assert payload["error"] == "opencode_error"
 
     evt = await ws.receive_json(timeout=2)
-    assert evt["type"] == "execution.failed"
+    assert evt["type"] == "chat.failed"
     assert evt["session_id"] == "portal-new"
 
     await ws.close()
@@ -127,8 +127,10 @@ async def test_chat_stream_upstream_error_emits_sse_error(tmp_path, monkeypatch)
 
     assert res.status == 200
     assert "text/event-stream" in res.headers.get("Content-Type", "")
-    assert "event: runtime_event" in body
+    assert "event: chat.started" in body
     assert "event: error" in body
+    assert "event: final" in body
+    assert "event: done" in body
     assert "chat_failed" in body or "opencode_error" in body
 
     await client.close()

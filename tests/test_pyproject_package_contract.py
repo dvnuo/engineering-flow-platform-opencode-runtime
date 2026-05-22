@@ -1,5 +1,8 @@
 from pathlib import Path
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib
 
 
 def test_pyproject_setuptools_package_discovery_contract():

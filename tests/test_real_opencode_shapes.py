@@ -78,11 +78,9 @@ async def test_chat_api_accepts_opencode_list_response_payload(tmp_path, monkeyp
     assert body["usage"]["cost"] == 0.0
 
     event_types = {event["type"] for event in body["runtime_events"]}
-    assert "execution.started" in event_types
+    assert "chat.started" in event_types
     assert "llm_thinking" in event_types
-    assert "assistant_delta" in event_types
-    assert "complete" in event_types
-    assert "execution.completed" in event_types
+    assert "chat.completed" in event_types
 
     chatlog_resp = await client.get("/api/sessions/s-list/chatlog")
     assert chatlog_resp.status == 200
@@ -91,7 +89,7 @@ async def test_chat_api_accepts_opencode_list_response_payload(tmp_path, monkeyp
     assert chatlog["status"] == "success"
     assert chatlog["chatlog"]["entries"][-1]["status"] == "success"
     assert chatlog["chatlog"]["entries"][-1]["response"] == "assistant from list"
-    assert any(e["type"] == "execution.completed" for e in chatlog["runtime_events"])
+    assert any(e["type"] == "chat.completed" for e in chatlog["runtime_events"])
 
     usage_resp = await client.get("/api/usage?days=30")
     assert usage_resp.status == 200

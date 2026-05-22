@@ -200,8 +200,9 @@ async def test_events_route_streams_filtered_sse(tmp_path, monkeypatch):
         assert resp.status == 200
         assert "text/event-stream" in resp.headers.get("Content-Type", "")
         assert "event: opencode.connected" in body
-        assert "event: opencode.message.updated" in body
-        assert "event: opencode.message.part.updated" in body
+        assert "event: opencode.snapshot.required" in body
+        assert "event: opencode.message.updated" not in body
+        assert "event: opencode.message.part.updated" not in body
         assert "msg-other" not in body
         assert "part-other" not in body
     finally:

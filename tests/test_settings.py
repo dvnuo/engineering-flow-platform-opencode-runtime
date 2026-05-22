@@ -52,7 +52,7 @@ def test_settings_legacy_external_tool_env_ignored(monkeypatch):
     assert not hasattr(settings, "tools_dir")
 
 
-def test_chat_long_run_settings_defaults(monkeypatch):
+def test_deprecated_chat_long_run_settings_defaults_disabled(monkeypatch):
     for name in [
         "EFP_CHAT_TOTAL_WALL_TIMEOUT_SECONDS",
         "EFP_CHAT_TIMEOUT_RECOVERY_ENABLED",
@@ -61,6 +61,8 @@ def test_chat_long_run_settings_defaults(monkeypatch):
         "EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_ENABLED",
         "EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT",
         "EFP_CHAT_AUTO_CONTINUE_PROMPT",
+        "EFP_CHAT_AUTO_CONTINUE_ENABLED",
+        "EFP_CHAT_AUTO_CONTINUE_MAX_TURNS",
         "EFP_CHAT_NO_PROGRESS_TIMEOUT_SECONDS",
         "EFP_EVENT_REPLAY_LIMIT",
         "EFP_EVENT_REPLAY_TTL_SECONDS",
@@ -70,11 +72,12 @@ def test_chat_long_run_settings_defaults(monkeypatch):
     settings = Settings.from_env()
 
     assert settings.chat_total_wall_timeout_seconds == 21600
-    assert settings.chat_timeout_recovery_enabled is True
+    assert settings.chat_timeout_recovery_enabled is False
     assert settings.chat_timeout_recovery_max_seconds == 900
     assert settings.chat_timeout_recovery_poll_seconds == 2.0
     assert settings.chat_auto_continue_checkpoint_enabled is True
-    assert settings.chat_auto_continue_max_turns == 3
+    assert settings.chat_auto_continue_enabled is False
+    assert settings.chat_auto_continue_max_turns == 0
     assert "Continue the same user request" in settings.chat_auto_continue_checkpoint_prompt
     assert settings.chat_auto_continue_prompt == settings.chat_auto_continue_checkpoint_prompt
     assert settings.chat_no_progress_timeout_seconds == 1800

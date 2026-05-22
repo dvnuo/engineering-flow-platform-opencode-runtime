@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 SENSITIVE_KEYS = [
@@ -24,7 +24,7 @@ SENSITIVE_KEYS = [
 
 
 def utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _is_sensitive_key(key: str) -> bool:

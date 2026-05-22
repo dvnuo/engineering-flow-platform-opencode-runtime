@@ -1,0 +1,1 @@
+from test_runtime_profile_apply import test_apply_with_manager_does_not_defer_restart_for_active_chat_run
