@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import inspect
@@ -29,6 +30,7 @@ from .opencode_message_adapter import (
     extract_assistant_message_ids,
     extract_last_assistant_visible_text,
     extract_reasoning_texts_from_parts,
+    find_latest_assistant_completion,
     message_id as adapter_message_id,
     message_role as adapter_message_role,
 )
@@ -47,6 +49,7 @@ FINAL_RESPONSE_CONTRACT_SUFFIX = (
 )
 
 DATA_URL_RE = re.compile(r"data:[A-Za-z0-9.+/_-]+(?:;[A-Za-z0-9.+/_=-]+)*;base64,[A-Za-z0-9+/=]+")
+TERMINAL_ASSISTANT_COMPLETION_STATES = {"completed", "blocked", "error", "empty_final"}
 
 
 def _bad_request(error: str) -> web.HTTPBadRequest:
@@ -252,6 +255,102 @@ async def _send_message(
         return await client.prompt_async(session_id, payload)
 
     raise OpenCodeClientError("OpenCode client does not support send_message")
+
+
+def _is_terminal_assistant_completion(probe: dict[str, Any]) -> bool:
+    return str(probe.get("completion_state") or "") in TERMINAL_ASSISTANT_COMPLETION_STATES
+
+
+def _assistant_completion_timeout_probe(
+    *,
+    last_probe: dict[str, Any],
+    last_assistant_id: str,
+    timeout_seconds: float,
+    poll_seconds: float,
+    poll_attempts: int,
+) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {}
+    probe_diagnostics = last_probe.get("diagnostics") if isinstance(last_probe, dict) else None
+    if isinstance(probe_diagnostics, dict):
+        diagnostics.update(probe_diagnostics)
+    elif probe_diagnostics is not None:
+        diagnostics["last_diagnostics"] = safe_preview(probe_diagnostics, 1000)
+    diagnostics.update(
+        {
+            "last_completion_state": str(last_probe.get("completion_state") or "incomplete") if isinstance(last_probe, dict) else "incomplete",
+            "last_reason": str(last_probe.get("reason") or "no_terminal_assistant_message") if isinstance(last_probe, dict) else "no_terminal_assistant_message",
+            "poll_attempts": poll_attempts,
+            "timeout_seconds": timeout_seconds,
+            "poll_seconds": poll_seconds,
+        }
+    )
+    return {
+        "text": "",
+        "message_id": last_assistant_id,
+        "completion_state": "incomplete",
+        "reason": "final_assistant_message_timeout",
+        "diagnostics": diagnostics,
+    }
+
+
+async def _wait_for_visible_assistant_response(
+    *,
+    client: Any,
+    opencode_session_id: str,
+    response_payload: Any,
+    before_messages: list[dict[str, Any]],
+    timeout_seconds: float,
+    poll_seconds: float,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    before_assistant_ids = set(extract_assistant_message_ids(before_messages))
+    last_messages: list[dict[str, Any]] = []
+    last_probe = find_latest_assistant_completion(response_payload, exclude_message_ids=before_assistant_ids)
+    assistant_ids = extract_assistant_message_ids(response_payload, exclude_message_ids=before_assistant_ids)
+    last_assistant_id = assistant_ids[-1] if assistant_ids else str(last_probe.get("message_id") or "")
+    if _is_terminal_assistant_completion(last_probe):
+        return last_probe, last_messages
+
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    poll_interval = max(0.01, poll_seconds)
+    poll_attempts = 0
+    while True:
+        poll_attempts += 1
+        last_messages = await client.list_messages(opencode_session_id)
+        last_probe = find_latest_assistant_completion(last_messages, exclude_message_ids=before_assistant_ids)
+        assistant_ids = extract_assistant_message_ids(last_messages, exclude_message_ids=before_assistant_ids)
+        if assistant_ids:
+            last_assistant_id = assistant_ids[-1]
+        elif last_probe.get("message_id"):
+            last_assistant_id = str(last_probe.get("message_id") or "")
+
+        if _is_terminal_assistant_completion(last_probe):
+            return last_probe, last_messages
+
+        now = time.monotonic()
+        if now >= deadline:
+            return (
+                _assistant_completion_timeout_probe(
+                    last_probe=last_probe,
+                    last_assistant_id=last_assistant_id,
+                    timeout_seconds=timeout_seconds,
+                    poll_seconds=poll_seconds,
+                    poll_attempts=poll_attempts,
+                ),
+                last_messages,
+            )
+        await asyncio.sleep(min(poll_interval, max(0.0, deadline - now)))
+
+
+def _non_success_assistant_text(completion_state: str, reason: str) -> str:
+    if completion_state == "empty_final":
+        return "OpenCode completed without a visible assistant response."
+    if reason == "final_assistant_message_timeout":
+        return "OpenCode did not produce a final visible assistant response before the short request timeout."
+    if completion_state == "blocked":
+        return "OpenCode is blocked before producing a final visible assistant response."
+    if completion_state == "error":
+        return "OpenCode failed before producing a final visible assistant response."
+    return "OpenCode did not produce a final visible assistant response."
 
 
 def _event_payload(
@@ -652,17 +751,41 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                 message_id=initial_user_message_id,
             )
 
-        after_messages = await client.list_messages(record.opencode_session_id)
-        response_text = synthetic_response or extract_assistant_text(response_payload) or extract_assistant_text(after_messages)
-        if response_text.strip():
-            assistant_text = response_text.strip()
+        if synthetic_response is not None:
+            after_messages = await client.list_messages(record.opencode_session_id)
+            completion_probe = {
+                "text": synthetic_response,
+                "message_id": "",
+                "completion_state": "completed",
+                "reason": "synthetic_response",
+                "diagnostics": {},
+            }
+        else:
+            completion_probe, after_messages = await _wait_for_visible_assistant_response(
+                client=client,
+                opencode_session_id=record.opencode_session_id,
+                response_payload=response_payload,
+                before_messages=before_messages,
+                timeout_seconds=settings.chat_completion_timeout_seconds,
+                poll_seconds=settings.chat_completion_poll_seconds,
+            )
+            if not after_messages:
+                try:
+                    after_messages = await client.list_messages(record.opencode_session_id)
+                except Exception:
+                    after_messages = []
+
+        completion_state = str(completion_probe.get("completion_state") or "incomplete")
+        completion_reason = str(completion_probe.get("reason") or "")
+        response_text = str(completion_probe.get("text") or "").strip()
+        if completion_state == "completed" and response_text:
+            assistant_text = response_text
             completion_state = "completed"
             incomplete_reason = ""
             ok = synthetic_response is None
         else:
-            assistant_text = "OpenCode completed without a visible assistant response."
-            completion_state = "empty_final"
-            incomplete_reason = "empty_final_assistant_text"
+            assistant_text = _non_success_assistant_text(completion_state, completion_reason)
+            incomplete_reason = completion_reason or completion_state
             ok = False
 
         payload_message = response_payload.get("message") if isinstance(response_payload, dict) else None
@@ -686,6 +809,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         before_assistant_ids = set(extract_assistant_message_ids(before_messages))
         _append_unique_message_ids(assistant_message_ids, extract_assistant_message_ids(after_messages, exclude_message_ids=before_assistant_ids))
         _append_unique_message_ids(assistant_message_ids, extract_assistant_message_ids(response_payload, exclude_message_ids=before_assistant_ids))
+        _append_unique_message_ids(assistant_message_ids, [str(completion_probe.get("message_id") or "")])
         if not assistant_message_id and isinstance(response_payload, dict):
             candidate = response_payload.get("info", {}).get("id") if isinstance(response_payload.get("info"), dict) else ""
             if not candidate and isinstance(response_payload.get("message"), dict):
@@ -697,6 +821,9 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
 
         terminal_type = "chat.completed" if completion_state == "completed" else "chat.failed"
         terminal_state = "success" if completion_state == "completed" else completion_state
+        terminal_data = {"message": assistant_text, "completion_state": completion_state}
+        if incomplete_reason:
+            terminal_data["incomplete_reason"] = incomplete_reason
         if completion_state == "completed":
             assistant_delta = _event_payload(
                 "assistant_delta",
@@ -727,7 +854,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             opencode_session_id=record.opencode_session_id,
             state=terminal_state,
             summary=assistant_text,
-            data={"message": assistant_text, "completion_state": completion_state},
+            data=terminal_data,
             trace_context=trace_context,
         )
         execution_terminal = _event_payload(
@@ -737,7 +864,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             opencode_session_id=record.opencode_session_id,
             state=terminal_state,
             summary=assistant_text,
-            data={"message": assistant_text, "completion_state": completion_state},
+            data=terminal_data,
             trace_context=trace_context,
         )
         await _publish_event(bus, runtime_events, execution_terminal)
@@ -766,6 +893,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
                 "assistant_message_id": assistant_message_id,
                 "assistant_message_ids": assistant_message_ids,
             },
+            "completion_probe": safe_preview(completion_probe, 2000),
             "attachments": attachment_debug,
         }
         if skill_debug:
