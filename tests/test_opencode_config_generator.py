@@ -76,6 +76,35 @@ def test_copilot_provider_config_does_not_include_integration_header(tmp_path, m
     assert "provider" not in updated
 
 
+def test_copilot_api_key_generates_local_proxy_base_url_without_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    source_token = "ghu_PORTAL_TOKEN"
+    cfg, _, updated = build_opencode_config(
+        Settings.from_env(),
+        {"llm": {"provider": "github_copilot", "model": "gpt-x", "api_key": source_token}},
+    )
+    assert cfg["provider"]["github-copilot"]["options"]["baseURL"] == "http://127.0.0.1:8000/api/internal/copilot"
+    assert "provider" in updated
+    encoded = json.dumps(cfg)
+    assert source_token not in encoded
+    assert "Authorization" not in encoded
+    assert "ghu_" not in encoded
+    assert "gho_" not in encoded
+    assert "tid=" not in encoded
+
+
+def test_copilot_proxy_base_url_can_be_overridden(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_COPILOT_PROXY_BASE_URL", "http://127.0.0.1:9999/copilot/")
+    cfg, _, _ = build_opencode_config(
+        Settings.from_env(),
+        {"llm": {"provider": "github_copilot", "model": "gpt-x", "oauth": {"access": "gho_PORTAL_TOKEN"}}},
+    )
+    assert cfg["provider"]["github-copilot"]["options"]["baseURL"] == "http://127.0.0.1:9999/copilot"
+
+
 def test_copilot_provider_base_url_keeps_provider_options_without_integration_header(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))

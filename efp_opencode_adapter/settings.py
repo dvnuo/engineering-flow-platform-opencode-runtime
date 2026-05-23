@@ -51,11 +51,15 @@ class Settings:
     event_replay_ttl_seconds: float = 21600.0
     opencode_permission_mode: str = "workspace_full_access"
     opencode_allow_bash_all: bool = True
+    copilot_proxy_base_url: str = "http://127.0.0.1:8000/api/internal/copilot"
+    copilot_github_api_base_url: str = "https://api.github.com"
 
     @classmethod
     def from_env(cls, opencode_url: str | None = None) -> "Settings":
         workspace_dir = Path(os.getenv("EFP_WORKSPACE_DIR", "/workspace"))
         home_dir = Path(os.getenv("HOME", "/root"))
+        copilot_proxy_base_url = (os.getenv("EFP_COPILOT_PROXY_BASE_URL") or "http://127.0.0.1:8000/api/internal/copilot").rstrip("/")
+        copilot_github_api_base_url = (os.getenv("EFP_COPILOT_GITHUB_API_BASE_URL") or "https://api.github.com").rstrip("/")
         return cls(
             opencode_url=opencode_url or os.getenv("EFP_OPENCODE_URL", "http://127.0.0.1:4096"),
             adapter_state_dir=Path(os.getenv("EFP_ADAPTER_STATE_DIR", "/root/.local/share/efp-compat")),
@@ -85,4 +89,6 @@ class Settings:
             event_replay_ttl_seconds=max(1.0, float(os.getenv("EFP_EVENT_REPLAY_TTL_SECONDS", "21600"))),
             opencode_permission_mode=_normalize_opencode_permission_mode(os.getenv("EFP_OPENCODE_PERMISSION_MODE", "workspace_full_access")),
             opencode_allow_bash_all=_env_bool("EFP_OPENCODE_ALLOW_BASH_ALL", True),
+            copilot_proxy_base_url=copilot_proxy_base_url,
+            copilot_github_api_base_url=copilot_github_api_base_url,
         )

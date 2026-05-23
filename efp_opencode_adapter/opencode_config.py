@@ -101,7 +101,18 @@ def _int_or_none(value: object) -> int | None:
     return parsed if parsed > 0 else None
 
 
-def provider_config_from_runtime_profile(runtime_config: dict) -> dict:
+def _clean_string(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _copilot_credential_present(llm: dict) -> bool:
+    oauth = llm.get("oauth") if isinstance(llm.get("oauth"), dict) else None
+    if isinstance(oauth, dict) and (_clean_string(oauth.get("refresh")) or _clean_string(oauth.get("access"))):
+        return True
+    return bool(_clean_string(llm.get("api_key")))
+
+
+def provider_config_from_runtime_profile(runtime_config: dict, settings: Settings | None = None) -> dict:
     llm = runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
     provider = normalize_opencode_provider_id(llm.get("provider"))
     if not provider:
@@ -112,7 +123,11 @@ def provider_config_from_runtime_profile(runtime_config: dict) -> dict:
         return {}
     options: dict[str, object] = {}
     base_url = llm.get("base_url") or llm.get("api_base") or llm.get("baseURL") or llm.get("endpoint")
-    if isinstance(base_url, str) and base_url.strip():
+    if provider == "github-copilot" and _copilot_credential_present(llm):
+        proxy_base_url = (settings.copilot_proxy_base_url if settings else Settings.from_env().copilot_proxy_base_url).strip().rstrip("/")
+        if proxy_base_url:
+            options["baseURL"] = proxy_base_url
+    elif isinstance(base_url, str) and base_url.strip():
         options["baseURL"] = base_url.strip().rstrip("/")
     timeout_ms = _int_or_none(llm.get("timeout_ms") or llm.get("timeout"))
     if timeout_ms:
@@ -153,7 +168,7 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
     if model:
         generated["agent"]["efp-main"]["model"] = model
         updated.append("llm")
-    provider_patch = provider_config_from_runtime_profile(runtime_config)
+    provider_patch = provider_config_from_runtime_profile(runtime_config, settings)
     if provider_patch:
         generated.setdefault("provider", {}).update(provider_patch["provider"])
         updated.append("provider")

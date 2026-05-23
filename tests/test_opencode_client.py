@@ -717,17 +717,17 @@ async def test_list_tool_ids_rejects_invalid_shape(monkeypatch):
         await client.list_tool_ids()
 
 @pytest.mark.asyncio
-async def test_put_auth_info_sends_oauth(monkeypatch):
+async def test_put_auth_info_sends_non_copilot_api_auth(monkeypatch):
     app = web.Application()
     async def put_auth(request: web.Request):
         assert request.headers.get("Authorization") is None
         body = await request.json()
-        assert body == {"type": "oauth", "refresh": "gho_R", "access": "gho_A", "expires": 0}
+        assert body == {"type": "api", "key": "sk_TEST"}
         return web.json_response({}, status=200)
-    app.router.add_put("/auth/github-copilot", put_auth)
+    app.router.add_put("/auth/anthropic", put_auth)
     server = TestServer(app); await server.start_server()
     monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
-    result = await OpenCodeClient(Settings.from_env()).put_auth_info("github-copilot", {"type": "oauth", "refresh": "gho_R", "access": "gho_A", "expires": 0})
+    result = await OpenCodeClient(Settings.from_env()).put_auth_info("anthropic", {"type": "api", "key": "sk_TEST"})
     assert result["success"] is True
     await server.close()
 
