@@ -8,7 +8,6 @@ from uuid import uuid4
 
 from aiohttp import web
 from .app_keys import (
-    CHAT_RUN_STORE_KEY,
     CHATLOG_STORE_KEY,
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
@@ -18,13 +17,10 @@ from .app_keys import (
     USER_DISPLAY_STORE_KEY,
 )
 
-from .active_run_payload import active_run_public_from_store, session_status_summary, synthetic_active_run_from_resolved
 from .chat_api import handle_chat_payload_for_app
-from .chat_run_validation import validate_chat_run_against_opencode
 from .opencode_client import OpenCodeClientError
 from .opencode_ids import new_opencode_message_id
 from .opencode_message_adapter import message_to_visible_text, to_efp_message
-from .opencode_run_state import resolve_opencode_run_state
 from .thinking_events import safe_preview, utc_now_iso
 
 
@@ -162,13 +158,6 @@ def normalize_canonical_messages(messages: list[dict[str, Any]]) -> list[dict[st
 
 
 def _is_internal_efp_message(message: Any) -> bool:
-    mid = _message_id(message)
-    if mid.startswith("efp-auto-continue-"):
-        return True
-    for part in _message_parts(message):
-        metadata = part.get("metadata")
-        if isinstance(metadata, dict) and metadata.get("efp_internal") == "auto_continue":
-            return True
     return False
 
 
@@ -546,75 +535,6 @@ def _latest_session_runtime_status_metadata(chatlog_store, sid: str) -> dict[str
     }
 
 
-async def _chat_run_session_metadata(
-    chat_run_store: Any,
-    client: Any,
-    sid: str,
-    opencode_session_id: str,
-    messages: list[dict[str, Any]],
-    event_bus: Any = None,
-) -> dict[str, Any]:
-    resolved = await resolve_opencode_run_state(client, opencode_session_id)
-    session_status = session_status_summary(resolved, active_run=None)
-    if chat_run_store is None:
-        active_run = synthetic_active_run_from_resolved(portal_session_id=sid, opencode_session_id=opencode_session_id, resolved=resolved) if resolved.active else None
-        session_status = session_status_summary(resolved, active_run=active_run)
-        return {"active_run": active_run, "latest_run": None, "session_status": session_status}
-    try:
-        active_record = chat_run_store.active_for_session(sid)
-        latest_record = chat_run_store.latest_for_session(sid)
-    except Exception:
-        active_run = synthetic_active_run_from_resolved(portal_session_id=sid, opencode_session_id=opencode_session_id, resolved=resolved) if resolved.active else None
-        session_status = session_status_summary(resolved, active_run=active_run)
-        return {"active_run": active_run, "latest_run": None, "session_status": session_status}
-    active_public = None
-    active_run_stale_reason = ""
-    if active_record is not None:
-        active_public = await validate_chat_run_against_opencode(store=chat_run_store, client=client, record=active_record, event_bus=event_bus, resolved=resolved)
-        if active_public is None or active_public.get("opencode_active") is not True:
-            refreshed = chat_run_store.get(active_record.request_id) if hasattr(chat_run_store, "get") else active_record
-            active_run_stale_reason = str(
-                (active_public or {}).get("validation_reason")
-                or getattr(refreshed, "incomplete_reason", "")
-                or "opencode_not_active"
-            )
-            active_record = None
-        else:
-            active_record = chat_run_store.get(active_record.request_id) if hasattr(chat_run_store, "get") else active_record
-    latest_record = chat_run_store.latest_for_session(sid)
-    if resolved.active:
-        if active_public is not None and active_public.get("opencode_active") is True:
-            active_run = active_run_public_from_store(
-                active_public,
-                portal_session_id=sid,
-                opencode_session_id=opencode_session_id,
-                resolved=resolved,
-            )
-        else:
-            active_run = synthetic_active_run_from_resolved(portal_session_id=sid, opencode_session_id=opencode_session_id, resolved=resolved)
-    else:
-        active_run = None
-    latest_run = chat_run_store.to_session_summary(latest_record) if latest_record is not None else None
-    session_status = session_status_summary(resolved, active_run=active_run)
-    metadata: dict[str, Any] = {"active_run": active_run, "latest_run": latest_run, "session_status": session_status}
-    if not active_run_stale_reason and active_record is None and latest_record is not None and getattr(latest_record, "status", "") == "stale":
-        active_run_stale_reason = str(getattr(latest_record, "incomplete_reason", "") or latest_record.metadata.get("validation_reason") or "opencode_not_active")
-    if active_run_stale_reason:
-        metadata["active_run_stale_reason"] = active_run_stale_reason
-    if latest_record is not None and latest_record.last_response_text:
-        message_ids = {str(message.get("id") or (message.get("metadata") or {}).get("opencode_message_id") or "") for message in messages if isinstance(message, dict)}
-        assistant_ids = [latest_record.assistant_message_id, *latest_record.assistant_message_ids]
-        has_matching_message = any(message_id and message_id in message_ids for message_id in assistant_ids)
-        if not has_matching_message:
-            metadata["assistant_projection"] = {
-                "request_id": latest_record.request_id,
-                "assistant_message_id": latest_record.assistant_message_id,
-                "text": latest_record.last_response_text,
-                "display_blocks": list(latest_record.last_display_blocks),
-            }
-    return metadata
-
-
 async def get_session_handler(request: web.Request) -> web.Response:
     sid = request.match_info["session_id"]
     store = request.app[SESSION_STORE_KEY]
@@ -649,14 +569,6 @@ async def get_session_handler(request: web.Request) -> web.Response:
                 "opencode_session_id": record.opencode_session_id,
                 "partial_recovery": record.partial_recovery,
                 **_latest_session_runtime_status_metadata(request.app.get(CHATLOG_STORE_KEY), sid),
-                **await _chat_run_session_metadata(
-                    request.app.get(CHAT_RUN_STORE_KEY),
-                    client,
-                    sid,
-                    record.opencode_session_id,
-                    efp_messages,
-                    request.app.get(EVENT_BUS_KEY),
-                ),
             },
         }
     )
@@ -704,26 +616,16 @@ async def delete_session_handler(request: web.Request) -> web.Response:
     client = request.app[OPENCODE_CLIENT_KEY]
     portal_metadata = request.app.get(PORTAL_METADATA_CLIENT_KEY)
     chatlog_store = request.app.get(CHATLOG_STORE_KEY)
-    chat_run_store = request.app.get(CHAT_RUN_STORE_KEY)
     display_store = request.app.get(USER_DISPLAY_STORE_KEY)
     record = store.get(sid)
     if record is None or record.deleted:
         metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
-        chat_runs_deleted = chat_run_store.delete_for_session(sid) if chat_run_store is not None and hasattr(chat_run_store, "delete_for_session") else 0
         display_delete = _delete_user_display_best_effort(
             display_store,
             portal_session_id=sid,
             opencode_session_id=record.opencode_session_id if record else None,
         )
-        return web.json_response({"success": True, "session_id": sid, "already_deleted": True, "runtime_deleted": False, "opencode_deleted": False, "opencode_missing": record is None, "metadata_delete": metadata_delete, "display_delete": display_delete, "chat_runs_deleted": chat_runs_deleted})
-    abort_result = None
-    if chat_run_store is not None and hasattr(chat_run_store, "active_for_session"):
-        active_run = chat_run_store.active_for_session(sid)
-        if active_run is not None and getattr(active_run, "opencode_session_id", "") and hasattr(client, "abort_session_tree"):
-            try:
-                abort_result = await client.abort_session_tree(active_run.opencode_session_id)
-            except Exception as exc:
-                abort_result = {"success": False, "error": safe_preview(str(exc), 1000)}
+        return web.json_response({"success": True, "session_id": sid, "already_deleted": True, "runtime_deleted": False, "opencode_deleted": False, "opencode_missing": record is None, "metadata_delete": metadata_delete, "display_delete": display_delete})
     opencode_deleted = False
     opencode_missing = False
     try:
@@ -735,11 +637,10 @@ async def delete_session_handler(request: web.Request) -> web.Response:
         else:
             return web.json_response({"success": False, "error": "opencode_delete_failed", "session_id": sid, "opencode_session_id": record.opencode_session_id, "opencode_status": exc.status, "detail": str(exc)}, status=502)
     store.mark_deleted(sid)
-    chat_runs_deleted = chat_run_store.delete_for_session(sid) if chat_run_store is not None and hasattr(chat_run_store, "delete_for_session") else 0
     chatlog_delete = _delete_chatlog_best_effort(chatlog_store, sid)
     display_delete = _delete_user_display_best_effort(display_store, portal_session_id=sid, opencode_session_id=record.opencode_session_id)
     metadata_delete = await _delete_portal_metadata_best_effort(portal_metadata, sid)
-    return web.json_response({"success": True, "session_id": sid, "opencode_session_id": record.opencode_session_id, "already_deleted": False, "runtime_deleted": True, "opencode_deleted": opencode_deleted, "opencode_missing": opencode_missing, "metadata_delete": metadata_delete, "chatlog_delete": chatlog_delete, "display_delete": display_delete, "chat_runs_deleted": chat_runs_deleted, "abort_result": abort_result})
+    return web.json_response({"success": True, "session_id": sid, "opencode_session_id": record.opencode_session_id, "already_deleted": False, "runtime_deleted": True, "opencode_deleted": opencode_deleted, "opencode_missing": opencode_missing, "metadata_delete": metadata_delete, "chatlog_delete": chatlog_delete, "display_delete": display_delete})
 
 
 async def clear_sessions_handler(request: web.Request) -> web.Response:
@@ -747,20 +648,11 @@ async def clear_sessions_handler(request: web.Request) -> web.Response:
     client = request.app[OPENCODE_CLIENT_KEY]
     portal_metadata = request.app.get(PORTAL_METADATA_CLIENT_KEY)
     chatlog_store = request.app.get(CHATLOG_STORE_KEY)
-    chat_run_store = request.app.get(CHAT_RUN_STORE_KEY)
     display_store = request.app.get(USER_DISPLAY_STORE_KEY)
     failures = []
     deleted_count = 0
     metadata_results = []
     for rec in store.list_active():
-        abort_result = None
-        if chat_run_store is not None and hasattr(chat_run_store, "active_for_session"):
-            active_run = chat_run_store.active_for_session(rec.portal_session_id)
-            if active_run is not None and getattr(active_run, "opencode_session_id", "") and hasattr(client, "abort_session_tree"):
-                try:
-                    abort_result = await client.abort_session_tree(active_run.opencode_session_id)
-                except Exception as exc:
-                    abort_result = {"success": False, "error": safe_preview(str(exc), 1000)}
         try:
             await client.delete_session(rec.opencode_session_id)
             op_missing = False
@@ -772,11 +664,10 @@ async def clear_sessions_handler(request: web.Request) -> web.Response:
                 continue
         store.mark_deleted(rec.portal_session_id)
         deleted_count += 1
-        chat_runs_deleted = chat_run_store.delete_for_session(rec.portal_session_id) if chat_run_store is not None and hasattr(chat_run_store, "delete_for_session") else 0
         chatlog_delete = _delete_chatlog_best_effort(chatlog_store, rec.portal_session_id)
         display_delete = _delete_user_display_best_effort(display_store, portal_session_id=rec.portal_session_id, opencode_session_id=rec.opencode_session_id)
         metadata = await _delete_portal_metadata_best_effort(portal_metadata, rec.portal_session_id)
-        metadata_results.append({"session_id": rec.portal_session_id, "opencode_missing": op_missing, "metadata_delete": metadata, "chatlog_delete": chatlog_delete, "display_delete": display_delete, "chat_runs_deleted": chat_runs_deleted, "abort_result": abort_result})
+        metadata_results.append({"session_id": rec.portal_session_id, "opencode_missing": op_missing, "metadata_delete": metadata, "chatlog_delete": chatlog_delete, "display_delete": display_delete})
     if failures:
         return web.json_response({"success": False, "deleted_count": deleted_count, "failed_count": len(failures), "failures": failures, "metadata_delete": metadata_results}, status=502)
     return web.json_response({"success": True, "deleted_count": deleted_count, "failed_count": 0, "metadata_delete": metadata_results})

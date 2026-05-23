@@ -1,11 +1,13 @@
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
+
+UTC = timezone.utc
 
 @pytest.mark.asyncio
 async def test_usage_api(tmp_path, monkeypatch):

@@ -52,68 +52,37 @@ def test_settings_legacy_external_tool_env_ignored(monkeypatch):
     assert not hasattr(settings, "tools_dir")
 
 
-def test_chat_long_run_settings_defaults(monkeypatch):
-    for name in [
-        "EFP_CHAT_TOTAL_WALL_TIMEOUT_SECONDS",
-        "EFP_CHAT_TIMEOUT_RECOVERY_ENABLED",
-        "EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS",
-        "EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS",
-        "EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_ENABLED",
-        "EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT",
-        "EFP_CHAT_AUTO_CONTINUE_PROMPT",
-        "EFP_CHAT_NO_PROGRESS_TIMEOUT_SECONDS",
-        "EFP_EVENT_REPLAY_LIMIT",
-        "EFP_EVENT_REPLAY_TTL_SECONDS",
-    ]:
-        monkeypatch.delenv(name, raising=False)
-
+def test_settings_no_long_chat_recovery_options(monkeypatch, tmp_path):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path))
     settings = Settings.from_env()
 
-    assert settings.chat_total_wall_timeout_seconds == 21600
-    assert settings.chat_timeout_recovery_enabled is True
-    assert settings.chat_timeout_recovery_max_seconds == 900
-    assert settings.chat_timeout_recovery_poll_seconds == 2.0
-    assert settings.chat_auto_continue_checkpoint_enabled is True
-    assert settings.chat_auto_continue_max_turns == 3
-    assert "Continue the same user request" in settings.chat_auto_continue_checkpoint_prompt
-    assert settings.chat_auto_continue_prompt == settings.chat_auto_continue_checkpoint_prompt
-    assert settings.chat_no_progress_timeout_seconds == 1800
-    assert settings.event_replay_limit == 500
-    assert settings.event_replay_ttl_seconds == 21600
+    forbidden_attrs = [
+        "chat_total_wall_timeout_seconds",
+        "chat_auto_continue_enabled",
+        "chat_auto_continue_max_turns",
+        "chat_auto_continue_checkpoint_enabled",
+        "chat_auto_continue_checkpoint_prompt",
+        "chat_auto_continue_prompt",
+        "chat_auto_continue_no_progress_stop",
+        "chat_auto_continue_after_running_timeout",
+        "chat_no_progress_timeout_seconds",
+    ]
+
+    for name in forbidden_attrs:
+        assert not hasattr(settings, name)
 
 
-def test_chat_long_run_settings_env_overrides(monkeypatch):
-    monkeypatch.setenv("EFP_CHAT_TOTAL_WALL_TIMEOUT_SECONDS", "42")
-    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_ENABLED", "false")
-    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_MAX_SECONDS", "7")
-    monkeypatch.setenv("EFP_CHAT_TIMEOUT_RECOVERY_POLL_SECONDS", "0.25")
-    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_MAX_TURNS", "50")
-    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_ENABLED", "false")
-    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT", "checkpoint prompt")
-    monkeypatch.setenv("EFP_CHAT_NO_PROGRESS_TIMEOUT_SECONDS", "9")
+def test_chat_short_request_and_event_replay_settings_env_overrides(monkeypatch):
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "42")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.25")
+    monkeypatch.setenv("EFP_CHAT_SUBMIT_TIMEOUT_SECONDS", "301")
     monkeypatch.setenv("EFP_EVENT_REPLAY_LIMIT", "12")
     monkeypatch.setenv("EFP_EVENT_REPLAY_TTL_SECONDS", "13")
 
     settings = Settings.from_env()
 
-    assert settings.chat_total_wall_timeout_seconds == 42
-    assert settings.chat_timeout_recovery_enabled is False
-    assert settings.chat_timeout_recovery_max_seconds == 7
-    assert settings.chat_timeout_recovery_poll_seconds == 0.25
-    assert settings.chat_auto_continue_max_turns == 50
-    assert settings.chat_auto_continue_checkpoint_enabled is False
-    assert settings.chat_auto_continue_checkpoint_prompt == "checkpoint prompt"
-    assert settings.chat_auto_continue_prompt == "checkpoint prompt"
-    assert settings.chat_no_progress_timeout_seconds == 9
+    assert settings.chat_completion_timeout_seconds == 42
+    assert settings.chat_completion_poll_seconds == 0.25
+    assert settings.chat_submit_timeout_seconds == 301
     assert settings.event_replay_limit == 12
     assert settings.event_replay_ttl_seconds == 13
-
-
-def test_legacy_auto_continue_prompt_env_still_supported(monkeypatch):
-    monkeypatch.delenv("EFP_CHAT_AUTO_CONTINUE_CHECKPOINT_PROMPT", raising=False)
-    monkeypatch.setenv("EFP_CHAT_AUTO_CONTINUE_PROMPT", "legacy prompt")
-
-    settings = Settings.from_env()
-
-    assert settings.chat_auto_continue_checkpoint_prompt == "legacy prompt"
-    assert settings.chat_auto_continue_prompt == "legacy prompt"
