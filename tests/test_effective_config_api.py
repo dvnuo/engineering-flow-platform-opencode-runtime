@@ -23,6 +23,7 @@ async def test_effective_config_profile_and_copilot_integration_are_safe(tmp_pat
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(data))
     monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    monkeypatch.setenv("EFP_COPILOT_API_BASE_URL", "https://fallback.copilot-api.local/")
     (workspace / ".opencode").mkdir(parents=True, exist_ok=True)
     (workspace / ".opencode/opencode.json").write_text(json.dumps({"agent": {"efp-main": {"model": "github-copilot/gpt-x"}}, "provider": {"github-copilot": {"options": {"baseURL": "http://127.0.0.1:8000/api/internal/copilot"}}}}))
     data.mkdir(parents=True, exist_ok=True)
@@ -38,6 +39,7 @@ async def test_effective_config_profile_and_copilot_integration_are_safe(tmp_pat
     assert body['profile']['runtime_profile_id'] == 'rp-1'
     assert body['profile']['revision'] == 3
     assert 'SECRET' not in json.dumps(body)
+    assert "fallback.copilot-api.local" not in json.dumps(body)
     assert "external_tools" not in body
     assert "runtime_integrations" in body
     copilot = body["runtime_integrations"]["copilot"]

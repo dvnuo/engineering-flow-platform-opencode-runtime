@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 from aiohttp import web
@@ -14,6 +15,12 @@ from efp_opencode_adapter.copilot_plugin_auth import (
     save_copilot_plugin_credential,
 )
 from efp_opencode_adapter.settings import Settings
+
+
+def test_proxy_endpoint_parsing_supports_subscription_tier_hosts():
+    assert mod.parse_copilot_api_base_url_from_token("tid=SECRET;proxy-ep=proxy.enterprise.githubcopilot.com") == "https://api.enterprise.githubcopilot.com"
+    assert mod.parse_copilot_api_base_url_from_token("tid=SECRET;proxy-ep=proxy.business.githubcopilot.com") == "https://api.business.githubcopilot.com"
+    assert mod.parse_copilot_api_base_url_from_token("tid=SECRET;proxy-ep=proxy.individual.githubcopilot.com") == "https://api.individual.githubcopilot.com"
 
 
 def test_extracting_copilot_credential_prefers_oauth_refresh_then_access_and_api_key():
@@ -68,7 +75,7 @@ async def test_exchange_request_includes_plugin_headers_and_parses_proxy_endpoin
     async def token_handler(request):
         captured["method"] = request.method
         captured["headers"] = dict(request.headers)
-        return web.json_response({"token": "tid=SECRET;proxy-ep=proxy.individual.githubcopilot.com", "expires_at": 4102444800})
+        return web.json_response({"token": "tid=SECRET;proxy-ep=proxy.enterprise.githubcopilot.com", "expires_at": 4102444800})
 
     app = web.Application()
     app.router.add_get("/copilot_internal/v2/token", token_handler)
@@ -87,8 +94,29 @@ async def test_exchange_request_includes_plugin_headers_and_parses_proxy_endpoin
     assert captured["headers"]["Editor-Version"] == "vscode/1.107.0"
     assert captured["headers"]["Editor-Plugin-Version"] == "copilot-chat/0.35.0"
     assert captured["headers"]["Copilot-Integration-Id"] == "vscode-chat"
-    assert token.token == "tid=SECRET;proxy-ep=proxy.individual.githubcopilot.com"
-    assert token.api_base_url == "https://api.individual.githubcopilot.com"
+    assert token.token == "tid=SECRET;proxy-ep=proxy.enterprise.githubcopilot.com"
+    assert token.api_base_url == "https://api.enterprise.githubcopilot.com"
+
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_exchange_uses_configured_copilot_api_fallback_when_token_has_no_proxy_endpoint(tmp_path, monkeypatch):
+    async def token_handler(_request):
+        return web.json_response({"token": "tid=SECRET", "expires_at": 4102444800})
+
+    app = web.Application()
+    app.router.add_get("/copilot_internal/v2/token", token_handler)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("EFP_COPILOT_GITHUB_API_BASE_URL", str(server.make_url("/")).rstrip("/"))
+    monkeypatch.setenv("EFP_COPILOT_API_BASE_URL", "https://copilot-api.local/")
+
+    settings = Settings.from_env()
+    credential = extract_copilot_source_credential({"llm": {"provider": "github_copilot", "api_key": "gho_PORTAL"}})
+    token = await exchange_copilot_internal_token(settings, credential)
+
+    assert token.api_base_url == "https://copilot-api.local"
 
     await server.close()
 
@@ -102,7 +130,7 @@ async def test_token_manager_uses_cache_until_near_expiry(tmp_path, monkeypatch)
 
     async def token_handler(_request):
         calls["count"] += 1
-        return web.json_response({"token": f"tid=SECRET{calls['count']};proxy-ep=proxy.individual.githubcopilot.com", "expires_at": now[0] + 1000})
+        return web.json_response({"token": f"tid=SECRET{calls['count']};proxy-ep=proxy.enterprise.githubcopilot.com", "expires_at": now[0] + 1000})
 
     app = web.Application()
     app.router.add_get("/copilot_internal/v2/token", token_handler)
@@ -127,3 +155,12 @@ async def test_token_manager_uses_cache_until_near_expiry(tmp_path, monkeypatch)
     assert calls["count"] == 2
 
     await server.close()
+
+
+def test_source_does_not_use_individual_copilot_api_as_fallback_constant():
+    source_dir = Path(__file__).resolve().parents[1] / "efp_opencode_adapter"
+    matches = []
+    for path in source_dir.rglob("*.py"):
+        if "api.individual.githubcopilot.com" in path.read_text(encoding="utf-8"):
+            matches.append(str(path.relative_to(source_dir.parent)))
+    assert matches == []

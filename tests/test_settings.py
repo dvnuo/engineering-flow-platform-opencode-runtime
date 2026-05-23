@@ -18,11 +18,13 @@ def test_settings_permission_defaults(monkeypatch):
     monkeypatch.delenv("EFP_OPENCODE_ALLOW_BASH_ALL", raising=False)
     monkeypatch.delenv("EFP_COPILOT_PROXY_BASE_URL", raising=False)
     monkeypatch.delenv("EFP_COPILOT_GITHUB_API_BASE_URL", raising=False)
+    monkeypatch.delenv("EFP_COPILOT_API_BASE_URL", raising=False)
     settings = Settings.from_env()
     assert settings.opencode_permission_mode == "workspace_full_access"
     assert settings.opencode_allow_bash_all is True
     assert settings.copilot_proxy_base_url == "http://127.0.0.1:8000/api/internal/copilot"
     assert settings.copilot_github_api_base_url == "https://api.github.com"
+    assert settings.copilot_api_base_url == "https://api.enterprise.githubcopilot.com"
 
 
 def test_settings_permission_overrides(monkeypatch):
@@ -30,11 +32,13 @@ def test_settings_permission_overrides(monkeypatch):
     monkeypatch.setenv("EFP_OPENCODE_ALLOW_BASH_ALL", "false")
     monkeypatch.setenv("EFP_COPILOT_PROXY_BASE_URL", "http://127.0.0.1:9000/copilot/")
     monkeypatch.setenv("EFP_COPILOT_GITHUB_API_BASE_URL", "http://github-api.local/")
+    monkeypatch.setenv("EFP_COPILOT_API_BASE_URL", "https://copilot-api.local/")
     settings = Settings.from_env()
     assert settings.opencode_permission_mode == "profile_policy"
     assert settings.opencode_allow_bash_all is False
     assert settings.copilot_proxy_base_url == "http://127.0.0.1:9000/copilot"
     assert settings.copilot_github_api_base_url == "http://github-api.local"
+    assert settings.copilot_api_base_url == "https://copilot-api.local"
 
 
 def test_settings_permission_mode_unknown_or_empty_fallback(monkeypatch):

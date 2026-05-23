@@ -25,7 +25,6 @@ COPILOT_PLUGIN_HEADERS = {
     "Copilot-Integration-Id": "vscode-chat",
 }
 TOKEN_REFRESH_MARGIN_SECONDS = 300
-DEFAULT_COPILOT_API_BASE_URL = "https://api.individual.githubcopilot.com"
 
 
 @dataclass(frozen=True)
@@ -193,16 +192,16 @@ def copilot_token_exchange_url(settings: Settings) -> str:
     return f"{settings.copilot_github_api_base_url.rstrip('/')}/copilot_internal/v2/token"
 
 
-def parse_copilot_api_base_url_from_token(token: str) -> str:
+def parse_copilot_api_base_url_from_token(token: str) -> str | None:
     match = re.search(r"(?:^|[;&,\s])proxy-ep=([^;&,\s]+)", token or "")
     if not match:
-        return DEFAULT_COPILOT_API_BASE_URL
+        return None
     raw_value = unquote(match.group(1).strip())
     parsed = urlparse(raw_value)
     host = parsed.netloc or parsed.path.split("/", 1)[0]
     host = host.strip()
     if not host:
-        return DEFAULT_COPILOT_API_BASE_URL
+        return None
     if host.startswith("proxy."):
         host = "api." + host[len("proxy.") :]
     return f"https://{host.rstrip('/')}"
@@ -239,7 +238,7 @@ async def exchange_copilot_internal_token(settings: Settings, credential: Copilo
     return CopilotInternalToken(
         token=token,
         expires_at=expires_at,
-        api_base_url=parse_copilot_api_base_url_from_token(token),
+        api_base_url=parse_copilot_api_base_url_from_token(token) or settings.copilot_api_base_url,
     )
 
 
