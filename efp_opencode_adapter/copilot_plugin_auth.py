@@ -14,6 +14,7 @@ from urllib.parse import unquote, urlparse
 import aiohttp
 
 from .opencode_config import normalize_opencode_provider_id
+from .outbound_proxy import outbound_proxy_config_for_url
 from .path_utils import path_exists
 from .settings import Settings
 
@@ -211,9 +212,10 @@ async def exchange_copilot_internal_token(settings: Settings, credential: Copilo
     url = copilot_token_exchange_url(settings)
     headers = build_copilot_token_exchange_headers(credential.credential)
     timeout = aiohttp.ClientTimeout(total=30)
+    proxy_config = outbound_proxy_config_for_url(settings, url)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, headers=headers) as response:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=proxy_config.trust_env) as session:
+            async with session.get(url, headers=headers, proxy=proxy_config.proxy_url) as response:
                 status = response.status
                 if not 200 <= status < 300:
                     raise CopilotTokenExchangeError(f"copilot token exchange failed with status {status}")
@@ -224,7 +226,10 @@ async def exchange_copilot_internal_token(settings: Settings, credential: Copilo
     except CopilotTokenExchangeError:
         raise
     except Exception as exc:
-        raise CopilotTokenExchangeError(redact_copilot_secrets(str(exc), extra=[credential.credential])) from exc
+        extra = [credential.credential]
+        if proxy_config.proxy_url:
+            extra.append(proxy_config.proxy_url)
+        raise CopilotTokenExchangeError(redact_copilot_secrets(str(exc), extra=extra)) from exc
 
     if not isinstance(payload, Mapping):
         raise CopilotTokenExchangeError("copilot token exchange returned invalid response")
@@ -291,6 +296,7 @@ def redact_copilot_secrets(text: str, *, extra: Iterable[str] = ()) -> str:
     for secret in extra:
         if secret:
             redacted = redacted.replace(secret, "[redacted]")
+    redacted = re.sub(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s?#@]+@", r"\1[redacted]@", redacted)
     redacted = re.sub(r"gh[uo]_[A-Za-z0-9._~+/=-]+", "[redacted]", redacted)
     redacted = re.sub(r"tid=[^;&,\s\"']+", "[redacted]", redacted)
     redacted = re.sub(r"(?i)authorization\s*[:=]\s*bearer\s+[^;&,\s\"']+", "[redacted-header]", redacted)

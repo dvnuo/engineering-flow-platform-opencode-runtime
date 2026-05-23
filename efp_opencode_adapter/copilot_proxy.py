@@ -6,13 +6,14 @@ from typing import Mapping
 import aiohttp
 from aiohttp import web
 
-from .app_keys import COPILOT_TOKEN_MANAGER_KEY
+from .app_keys import COPILOT_TOKEN_MANAGER_KEY, SETTINGS_KEY
 from .copilot_plugin_auth import (
     COPILOT_PLUGIN_HEADERS,
     CopilotCredentialMissing,
     CopilotTokenExchangeError,
     redact_copilot_secrets,
 )
+from .outbound_proxy import outbound_proxy_config_for_url
 
 
 _REQUEST_HEADER_BLOCKLIST = {
@@ -82,10 +83,10 @@ def _safe_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return safe
 
 
-def _json_error(status: int, error: str, detail: str | None = None) -> web.Response:
+def _json_error(status: int, error: str, detail: str | None = None, *, extra: list[str] | None = None) -> web.Response:
     payload = {"success": False, "error": error}
     if detail:
-        payload["detail"] = redact_copilot_secrets(detail)
+        payload["detail"] = redact_copilot_secrets(detail, extra=extra or [])
     return web.json_response(payload, status=status)
 
 
@@ -120,6 +121,8 @@ async def copilot_proxy_handler(request: web.Request) -> web.StreamResponse:
         request.match_info.get("tail", ""),
         request.query_string,
     )
+    settings = request.app[SETTINGS_KEY]
+    proxy_config = outbound_proxy_config_for_url(settings, upstream)
     outbound_headers = _safe_request_headers(request.headers)
     outbound_headers.update(COPILOT_PLUGIN_HEADERS)
     outbound_headers.update(
@@ -132,12 +135,13 @@ async def copilot_proxy_handler(request: web.Request) -> web.StreamResponse:
     body = await request.read()
 
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), trust_env=proxy_config.trust_env) as session:
             async with session.request(
                 request.method,
                 upstream,
                 headers=outbound_headers,
                 data=body if body else None,
+                proxy=proxy_config.proxy_url,
             ) as upstream_response:
                 response_headers = _safe_response_headers(upstream_response.headers)
                 content_type = upstream_response.headers.get("Content-Type", "")
@@ -157,4 +161,7 @@ async def copilot_proxy_handler(request: web.Request) -> web.StreamResponse:
                     ).encode("utf-8")
                 return web.Response(status=upstream_response.status, body=response_body, headers=response_headers)
     except Exception as exc:
-        return _json_error(502, "copilot upstream request failed", str(exc))
+        extra = [internal_token.token]
+        if proxy_config.proxy_url:
+            extra.append(proxy_config.proxy_url)
+        return _json_error(502, "copilot upstream request failed", str(exc), extra=extra)

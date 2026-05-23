@@ -8,12 +8,14 @@ from aiohttp.test_utils import TestServer
 from efp_opencode_adapter import copilot_plugin_auth as mod
 from efp_opencode_adapter.copilot_plugin_auth import (
     CopilotTokenManager,
+    CopilotTokenExchangeError,
     copilot_plugin_auth_path,
     exchange_copilot_internal_token,
     extract_copilot_source_credential,
     load_copilot_plugin_credential,
     save_copilot_plugin_credential,
 )
+from efp_opencode_adapter.runtime_env import write_runtime_env_file
 from efp_opencode_adapter.settings import Settings
 
 
@@ -119,6 +121,84 @@ async def test_exchange_uses_configured_copilot_api_fallback_when_token_has_no_p
     assert token.api_base_url == "https://copilot-api.local"
 
     await server.close()
+
+
+@pytest.mark.asyncio
+async def test_exchange_passes_selected_runtime_proxy_to_aiohttp(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("HTTPS_PROXY", "http://process.proxy:8080")
+    settings = Settings.from_env()
+    write_runtime_env_file(settings, {"HTTPS_PROXY": "http://user:pass@runtime.proxy:8080"})
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def json(self):
+            return {"token": "tid=SECRET;proxy-ep=proxy.enterprise.githubcopilot.com", "expires_at": 4102444800}
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            captured["session_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def get(self, url, **kwargs):
+            captured["url"] = url
+            captured["get_kwargs"] = kwargs
+            return FakeResponse()
+
+    monkeypatch.setattr(mod.aiohttp, "ClientSession", FakeSession)
+
+    credential = extract_copilot_source_credential({"llm": {"provider": "github_copilot", "api_key": "gho_PORTAL"}})
+    token = await exchange_copilot_internal_token(settings, credential)
+
+    assert captured["url"] == "https://api.github.com/copilot_internal/v2/token"
+    assert captured["session_kwargs"]["trust_env"] is True
+    assert captured["get_kwargs"]["proxy"] == "http://user:pass@runtime.proxy:8080"
+    assert token.api_base_url == "https://api.enterprise.githubcopilot.com"
+
+
+@pytest.mark.asyncio
+async def test_exchange_error_redacts_proxy_url_with_credentials(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    settings = Settings.from_env()
+    proxy_url = "http://user:pass@runtime.proxy:8080"
+    write_runtime_env_file(settings, {"HTTPS_PROXY": proxy_url})
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def get(self, _url, **_kwargs):
+            raise RuntimeError(f"failed through {proxy_url}")
+
+    monkeypatch.setattr(mod.aiohttp, "ClientSession", FakeSession)
+
+    credential = extract_copilot_source_credential({"llm": {"provider": "github_copilot", "api_key": "gho_PORTAL"}})
+    with pytest.raises(CopilotTokenExchangeError) as excinfo:
+        await exchange_copilot_internal_token(settings, credential)
+
+    detail = str(excinfo.value)
+    assert proxy_url not in detail
+    assert "user:pass" not in detail
+    assert "runtime.proxy:8080" not in detail
 
 
 @pytest.mark.asyncio
