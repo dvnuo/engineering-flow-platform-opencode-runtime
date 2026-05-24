@@ -568,3 +568,87 @@ async def test_task_prompt_message_id_is_msg_prefixed_and_imported(tmp_path, mon
     assert tj["opencode_message_id"].startswith("msg")
     assert "efp-task-" not in tj["opencode_message_id"]
     await c.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_async_task_without_metadata_system_prompt_sends_default_system(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    resp = await c.post("/api/tasks/execute", json={
+        "task_id": "agent-system-1",
+        "task_type": "agent_async_task",
+        "session_id": "agent-task:root-system",
+        "input_payload": {
+            "schema": "agent_async_task.v1",
+            "user_task": "Summarize runtime risks.",
+            "skill_name": "runtime-review",
+            "task_session_id": "agent-task:root-system",
+            "root_task_id": "root-system",
+            "autonomous": True,
+        },
+        "metadata": {},
+    })
+    assert resp.status == 202
+    payload = fake.prompt_async_calls[0][1]
+    assert "system" in payload
+    assert "autonomous background runtime task" in payload["system"]
+    assert "Do not ask the user" in payload["system"]
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_async_task_same_portal_session_reuses_opencode_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    session_id = "agent-task:root-reuse"
+    first = await c.post("/api/tasks/execute", json={
+        "task_id": "agent-reuse-1",
+        "task_type": "agent_async_task",
+        "session_id": session_id,
+        "input_payload": {"schema": "agent_async_task.v1", "user_task": "Initial task.", "skill_name": "runtime-review"},
+        "metadata": {},
+    })
+    second = await c.post("/api/tasks/execute", json={
+        "task_id": "agent-reuse-2",
+        "task_type": "agent_async_task",
+        "session_id": session_id,
+        "input_payload": {"schema": "agent_async_task.v1", "followup_task": "Follow up task.", "skill_name": "runtime-review"},
+        "metadata": {},
+    })
+    assert first.status == 202
+    assert second.status == 202
+    assert fake.create_calls == 1
+    assert len(fake.prompt_async_calls) == 2
+    assert fake.prompt_async_calls[0][0] == fake.prompt_async_calls[1][0]
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_async_task_prompt_includes_selected_skill_and_user_task(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app)); await c.start_server()
+    resp = await c.post("/api/tasks/execute", json={
+        "task_id": "agent-prompt-1",
+        "task_type": "agent_async_task",
+        "session_id": "agent-task:root-prompt",
+        "input_payload": {
+            "schema": "agent_async_task.v1",
+            "user_task": "Build a concise migration checklist.",
+            "skill_name": "migration-planner",
+            "task_session_id": "agent-task:root-prompt",
+            "root_task_id": "root-prompt",
+        },
+        "metadata": {"portal_task_mode": "agent_async_task"},
+    })
+    assert resp.status == 202
+    prompt = fake.prompt_async_calls[0][1]["parts"][0]["text"]
+    assert "migration-planner" in prompt
+    assert "Build a concise migration checklist." in prompt
+    assert ".opencode/skills/migration-planner/SKILL.md" in prompt
+    await c.close()

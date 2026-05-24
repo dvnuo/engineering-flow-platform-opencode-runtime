@@ -18,3 +18,24 @@ def test_other_prompts():
     assert 'task_template_id' in b and 'skill_name' in b
     g = build_task_prompt(task_id='t5', task_type='unknown_x', input_payload={}, metadata={})
     assert 'Generic task' in g
+
+
+def test_agent_async_task_prompt_drives_background_skill_execution():
+    p = build_task_prompt(
+        task_id='t-agent-1',
+        task_type='agent_async_task',
+        input_payload={
+            'user_task': 'Analyze the checkout flow and propose fixes.',
+            'skill_name': 'runtime-review',
+            'task_session_id': 'agent-task:root-1',
+            'root_task_id': 'root-1',
+        },
+        metadata={},
+    )
+    assert 'background task' in p
+    assert 'autonomous' in p.lower()
+    assert 'runtime-review' in p
+    assert 'Analyze the checkout flow and propose fixes.' in p
+    assert 'final_response' in p
+    assert 'needs_user_input' in p
+    assert 'Return exactly one JSON object' in p

@@ -32,3 +32,20 @@ def test_delegation_nested_extraction():
     )
     assert p['delegation_result']['summary'] == 'nested'
     assert p['delegation_result']['artifacts'] == [{'x': 1}]
+
+
+def test_agent_async_task_final_response_falls_back_from_summary():
+    s, p, _ = parse_task_completion('{"status":"success","summary":"Completed the background work."}', task_type='agent_async_task')
+    assert s == 'success'
+    assert p['final_response'] == 'Completed the background work.'
+    assert p['needs_user_input'] is False
+    assert p['artifacts'] == []
+    assert p['audit_trace'] == []
+    assert p['external_actions'] == []
+
+
+def test_agent_async_task_blocked_defaults_needs_user_input():
+    s, p, _ = parse_task_completion('{"status":"blocked","summary":"Missing repo","blockers":["repository URL"]}', task_type='agent_async_task')
+    assert s == 'blocked'
+    assert p['needs_user_input'] is True
+    assert p['final_response'] == 'Missing repo'
