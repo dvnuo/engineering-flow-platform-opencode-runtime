@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping
 
 from .opencode_config import normalize_opencode_provider_id
+from .path_utils import path_exists
+from .settings import Settings
 
 
 @dataclass(frozen=True)
@@ -25,46 +29,6 @@ def _provider_from_llm(llm: Mapping[str, Any]) -> str | None:
     return provider or None
 
 
-def _normalize_oauth_payload(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, Mapping):
-        return None
-    oauth_type = value.get("type")
-    if oauth_type not in (None, "oauth"):
-        return None
-    refresh = value.get("refresh") if isinstance(value.get("refresh"), str) else ""
-    access = value.get("access") if isinstance(value.get("access"), str) else ""
-    refresh = refresh.strip()
-    access = access.strip()
-    if not refresh and access:
-        refresh = access
-    if not access and refresh:
-        access = refresh
-    if not refresh or not access:
-        return None
-    try:
-        expires = int(value.get("expires", 0))
-        if expires < 0:
-            expires = 0
-    except Exception:
-        expires = 0
-    auth_info: dict[str, Any] = {"type": "oauth", "refresh": refresh, "access": access, "expires": expires}
-    for extra in ("enterpriseUrl", "accountId"):
-        extra_value = value.get(extra)
-        if isinstance(extra_value, str) and extra_value.strip():
-            auth_info[extra] = extra_value.strip()
-    return auth_info
-
-
-def _selected_copilot_oauth(llm: Mapping[str, Any]) -> dict[str, Any] | None:
-    oauth = _normalize_oauth_payload(llm.get("oauth"))
-    if oauth:
-        return oauth
-    oauth_by_runtime = llm.get("oauth_by_runtime")
-    if not isinstance(oauth_by_runtime, Mapping):
-        return None
-    return _normalize_oauth_payload(oauth_by_runtime.get("opencode"))
-
-
 def build_opencode_auth_from_llm(llm: Mapping[str, Any]) -> AuthBuildResult:
     provider = _provider_from_llm(llm)
     if not provider:
@@ -72,16 +36,7 @@ def build_opencode_auth_from_llm(llm: Mapping[str, Any]) -> AuthBuildResult:
     raw_api_key = llm.get("api_key")
     api_key = raw_api_key.strip() if isinstance(raw_api_key, str) else ""
     if provider == "github-copilot":
-        oauth = _selected_copilot_oauth(llm)
-        if oauth:
-            return AuthBuildResult(provider=provider, auth_info=oauth, auth_type="oauth")
-        if api_key.startswith("gho_"):
-            return AuthBuildResult(provider=provider, auth_info={"type": "oauth", "refresh": api_key, "access": api_key, "expires": 0}, auth_type="oauth")
-        if api_key.startswith("ghu_"):
-            return AuthBuildResult(provider=provider, warning="github-copilot received a legacy ghu_ token from Portal copilot/token_verification flow; OpenCode requires oauth auth generated from GitHub device flow")
-        if api_key:
-            return AuthBuildResult(provider=provider, warning="github-copilot auth skipped because no valid oauth token was provided")
-        return AuthBuildResult(provider=provider)
+        return AuthBuildResult(provider=provider, auth_info=None, auth_type="copilot_plugin_proxy")
 
     if api_key:
         return AuthBuildResult(provider=provider, auth_info={"type": "api", "key": api_key}, auth_type="api")
@@ -93,3 +48,27 @@ def build_opencode_auth_from_runtime_config(runtime_config: Mapping[str, Any]) -
     if not isinstance(llm, Mapping):
         return AuthBuildResult()
     return build_opencode_auth_from_llm(llm)
+
+
+def clear_opencode_auth_provider(settings: Settings, provider: str) -> bool:
+    normalized_provider = normalize_opencode_provider_id(provider)
+    if not normalized_provider:
+        return False
+    auth_path = settings.opencode_data_dir / "auth.json"
+    if not path_exists(auth_path):
+        return False
+    try:
+        existing = json.loads(auth_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(existing, dict) or normalized_provider not in existing:
+        return False
+    updated = dict(existing)
+    updated.pop(normalized_provider, None)
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = Path(f"{auth_path}.tmp")
+    tmp_path.write_text(json.dumps(updated, indent=2) + "\n", encoding="utf-8")
+    tmp_path.chmod(0o600)
+    tmp_path.replace(auth_path)
+    auth_path.chmod(0o600)
+    return True

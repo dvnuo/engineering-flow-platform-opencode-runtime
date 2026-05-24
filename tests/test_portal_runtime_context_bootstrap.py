@@ -4,6 +4,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from efp_opencode_adapter.copilot_plugin_auth import copilot_plugin_auth_path
 from efp_opencode_adapter import portal_runtime_context_bootstrap as mod
 
 
@@ -30,7 +31,7 @@ async def test_bootstrap_requires_portal_context_env_when_required(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_fetches_portal_context_and_writes_config_and_auth(tmp_path, monkeypatch, capsys):
+async def test_bootstrap_fetches_portal_context_and_writes_proxy_config_and_plugin_credential(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "workspace"
     data = tmp_path / "opdata"
     state = tmp_path / "state"
@@ -68,10 +69,13 @@ async def test_bootstrap_fetches_portal_context_and_writes_config_and_auth(tmp_p
     assert cfg_path.exists()
     cfg = json.loads(cfg_path.read_text())
     assert cfg["agent"]["efp-main"]["model"] == "github-copilot/gpt-x"
-    assert cfg["provider"]["github-copilot"]["options"]["baseURL"] == "http://litellm.local/v1"
+    assert cfg["provider"]["github-copilot"]["options"]["baseURL"] == "http://127.0.0.1:8000/api/internal/copilot"
+    assert "gho_TEST" not in cfg_path.read_text(encoding="utf-8")
 
-    auth = json.loads((data / "auth.json").read_text())
-    assert auth == {"github-copilot": {"type": "oauth", "refresh": "gho_TEST", "access": "gho_TEST", "expires": 0}}
+    settings = mod.Settings.from_env()
+    state_payload = json.loads(copilot_plugin_auth_path(settings).read_text(encoding="utf-8"))
+    assert state_payload["credential"] == "gho_TEST"
+    assert not (data / "auth.json").exists()
 
     emitted = capsys.readouterr()
     assert "gho_TEST" not in emitted.out
@@ -81,7 +85,7 @@ async def test_bootstrap_fetches_portal_context_and_writes_config_and_auth(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_copilot_ghu_token_skips_auth(tmp_path, monkeypatch, capsys):
+async def test_bootstrap_copilot_ghu_token_writes_plugin_credential_not_auth(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "workspace"
     data = tmp_path / "opdata"
     state = tmp_path / "state"
@@ -98,10 +102,12 @@ async def test_bootstrap_copilot_ghu_token_skips_auth(tmp_path, monkeypatch, cap
     assert await mod._run(workspace) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["auth_written"] is False
-    assert "auth_warning" in out and "ghu_TEST" not in out["auth_warning"]
-    if (data / "auth.json").exists():
-        auth = json.loads((data / "auth.json").read_text())
-        assert auth.get("github-copilot", {}).get("type") != "api"
+    assert out["copilot_credential_present"] is True
+    assert "auth_warning" not in out
+    settings = mod.Settings.from_env()
+    state_payload = json.loads(copilot_plugin_auth_path(settings).read_text(encoding="utf-8"))
+    assert state_payload["credential"] == "ghu_TEST"
+    assert not (data / "auth.json").exists()
     await server.close()
 
 
@@ -131,13 +137,15 @@ async def test_bootstrap_infers_auth_provider_from_model_prefix(tmp_path, monkey
     monkeypatch.setenv("PORTAL_AGENT_ID", "agent-1")
 
     assert await mod._run(workspace) == 0
-    auth = json.loads((data / "auth.json").read_text())
-    assert "github-copilot" in auth
+    settings = mod.Settings.from_env()
+    state_payload = json.loads(copilot_plugin_auth_path(settings).read_text(encoding="utf-8"))
+    assert state_payload["credential"] == "gho_TEST"
+    assert not (data / "auth.json").exists()
     await server.close()
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_oauth_by_runtime_opencode_writes_auth_without_leaking_tokens(tmp_path, monkeypatch, capsys):
+async def test_bootstrap_oauth_by_runtime_is_ignored_without_leaking_tokens(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "workspace"
     data = tmp_path / "opdata"
     state = tmp_path / "state"
@@ -167,8 +175,9 @@ async def test_bootstrap_oauth_by_runtime_opencode_writes_auth_without_leaking_t
     monkeypatch.setenv("PORTAL_AGENT_ID", "agent-1")
 
     assert await mod._run(workspace) == 0
-    auth = json.loads((data / "auth.json").read_text())
-    assert auth["github-copilot"]["access"] == "OPENCODE_SECRET"
+    settings = mod.Settings.from_env()
+    assert not copilot_plugin_auth_path(settings).exists()
+    assert not (data / "auth.json").exists()
 
     emitted = capsys.readouterr()
     assert "OPENCODE_SECRET" not in emitted.out

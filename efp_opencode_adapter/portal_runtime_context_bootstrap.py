@@ -6,7 +6,8 @@ from pathlib import Path
 import aiohttp
 from .atlassian_cli_config import write_atlassian_cli_config
 from .opencode_config import build_opencode_config, normalize_opencode_provider_id, write_opencode_config
-from .opencode_auth import build_opencode_auth_from_runtime_config
+from .opencode_auth import build_opencode_auth_from_runtime_config, clear_opencode_auth_provider
+from .copilot_plugin_auth import redact_copilot_secrets, save_or_clear_copilot_plugin_credential
 from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_profile_config_for_storage
 from .runtime_env import build_runtime_env_from_config, write_runtime_env_file
 from .git_cli_auth import write_git_gh_auth_assets
@@ -18,7 +19,7 @@ def _sanitize(text: str, api_key: str | None = None) -> str:
     for secret in secrets:
         if secret:
             text = text.replace(secret, "***REDACTED***")
-    return text
+    return redact_copilot_secrets(text)
 
 
 async def _run(workspace_dir: Path) -> int:
@@ -56,6 +57,8 @@ async def _run(workspace_dir: Path) -> int:
 
     generated, config_hash, updated_sections = build_opencode_config(settings, runtime_config if isinstance(runtime_config, dict) else {})
     write_opencode_config(settings, generated)
+    copilot_credential_result = save_or_clear_copilot_plugin_credential(settings, runtime_config if isinstance(runtime_config, dict) else {})
+    clear_opencode_auth_provider(settings, "github-copilot")
 
     llm = runtime_config.get("llm") if isinstance(runtime_config, dict) and isinstance(runtime_config.get("llm"), dict) else {}
     provider = normalize_opencode_provider_id(llm.get("provider"))
@@ -120,7 +123,7 @@ async def _run(workspace_dir: Path) -> int:
         atlassian_confluence_instances=atlassian_result.confluence_instances,
     ))
 
-    out = {"env_written": True, "env_hash": env_result.env_hash, "auth_written": auth_written, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host"), "atlassian_cli_configured": atlassian_result.configured, "atlassian_config_path": atlassian_result.path, "atlassian_jira_instances": atlassian_result.jira_instances, "atlassian_confluence_instances": atlassian_result.confluence_instances, "atlassian_status": atlassian_result.redacted_status}
+    out = {"env_written": True, "env_hash": env_result.env_hash, "auth_written": auth_written, "copilot_credential_present": copilot_credential_result.credential_present, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host"), "atlassian_cli_configured": atlassian_result.configured, "atlassian_config_path": atlassian_result.path, "atlassian_jira_instances": atlassian_result.jira_instances, "atlassian_confluence_instances": atlassian_result.confluence_instances, "atlassian_status": atlassian_result.redacted_status}
     if auth_build.warning:
         out["auth_warning"] = auth_build.warning
     print(json.dumps(out))

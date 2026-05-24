@@ -4,7 +4,7 @@ import subprocess
 
 from efp_opencode_adapter.git_cli_auth import write_git_gh_auth_assets
 from efp_opencode_adapter.settings import Settings
-from tests.test_runtime_env_git_gh import make_settings
+from test_runtime_env_git_gh import make_settings
 
 
 def test_write_assets_with_token(tmp_path):

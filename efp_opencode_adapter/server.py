@@ -24,6 +24,7 @@ from .app_keys import (
     OPENCODE_PROCESS_MANAGER_KEY,
     OPENCODE_WATCHDOG_TASK_KEY,
     REQUEST_BINDING_STORE_KEY,
+    COPILOT_TOKEN_MANAGER_KEY,
 )
 
 from .capabilities import build_capability_catalog
@@ -51,7 +52,9 @@ from .usage_tracker import UsageTracker
 from .agents_md import ensure_default_agents_md
 from .atlassian_cli_config import write_atlassian_cli_config
 from .opencode_config import build_opencode_config, normalize_opencode_provider_id, write_opencode_config
-from .opencode_auth import build_opencode_auth_from_runtime_config
+from .opencode_auth import build_opencode_auth_from_runtime_config, clear_opencode_auth_provider
+from .copilot_plugin_auth import CopilotTokenManager, load_copilot_plugin_credential, save_or_clear_copilot_plugin_credential
+from .copilot_proxy import copilot_proxy_handler
 from .path_utils import path_exists
 from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_status_payload, sanitize_profile_config_for_storage, sanitize_public_secrets
 from .runtime_env import build_runtime_env_from_config, read_runtime_env_file, write_runtime_env_file
@@ -194,8 +197,17 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
         last_error = "config_write_failed"
         ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status="failed", pending_restart=False, warnings=warnings, updated_sections=updated_sections, last_apply_error=last_error, applied=False))
         return web.json_response({"success": False, "engine": "opencode", "status": "failed", "applied": False, "pending_restart": False, "config_written": False, "error": "config_write_failed", "warnings": warnings, "status_endpoint": "/api/internal/runtime-profile/status"}, status=500)
+    try:
+        copilot_credential_result = save_or_clear_copilot_plugin_credential(settings, runtime_config)
+        clear_opencode_auth_provider(settings, "github-copilot")
+    except Exception:
+        last_error = "copilot_credential_state_failed"
+        ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status="failed", pending_restart=False, warnings=warnings, updated_sections=updated_sections, last_apply_error=last_error, applied=False))
+        return web.json_response({"success": False, "engine": "opencode", "status": "failed", "applied": False, "pending_restart": False, "config_written": config_written, "error": last_error, "warnings": warnings, "status_endpoint": "/api/internal/runtime-profile/status"}, status=500)
     llm = runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
-    if llm and any(key in llm for key in ("provider", "model", "api_key", "oauth", "oauth_by_runtime", "temperature", "max_tokens")) and "llm" not in updated_sections:
+    if llm and any(key in llm for key in ("provider", "model", "api_key", "oauth", "temperature", "max_tokens")) and "llm" not in updated_sections:
+        updated_sections.append("llm")
+    if (copilot_credential_result.stored or copilot_credential_result.cleared) and "llm" not in updated_sections:
         updated_sections.append("llm")
     auth_build = build_opencode_auth_from_runtime_config(runtime_config)
     provider = auth_build.provider
@@ -331,7 +343,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
             auth = _json.loads(auth_path.read_text(encoding="utf-8"))
         except Exception:
             auth = {}
-    auth_obj = auth.get(provider) if isinstance(auth, dict) else None
+    auth_obj = auth.get(provider) if isinstance(auth, dict) and provider != "github-copilot" else None
     overlay = ProfileOverlayStore(settings).load()
     profile_cfg = overlay.config if overlay else {}
     github_cfg = profile_cfg.get("github") if isinstance(profile_cfg.get("github"), dict) else {}
@@ -345,6 +357,18 @@ async def effective_config_handler(request: web.Request) -> web.Response:
     git_askpass_present = bool(git_askpass_path and path_exists(Path(git_askpass_path)))
     gitconfig_present = bool(gitconfig_path and path_exists(Path(gitconfig_path)))
     git_auth_configured = bool(env_token_present and git_askpass_present and gitconfig_present)
+    raw_provider_options = (((cfg.get("provider") or {}).get(provider) or {}).get("options") if provider else {}) or {}
+    provider_options = sanitize_public_secrets(raw_provider_options)
+    if not isinstance(provider_options, dict):
+        provider_options = {}
+    copilot_base_url_present = bool(raw_provider_options.get("baseURL")) if isinstance(raw_provider_options, dict) else False
+    token_manager = request.app.get(COPILOT_TOKEN_MANAGER_KEY)
+    if token_manager is not None and hasattr(token_manager, "status_snapshot"):
+        copilot_snapshot = token_manager.status_snapshot()
+    else:
+        credential_present = load_copilot_plugin_credential(settings) is not None
+        copilot_snapshot = {"credential_present": credential_present, "token_cached": False, "expires_at_present": False}
+    copilot_credential_present = bool(copilot_snapshot.get("credential_present"))
     return web.json_response(
         {
             "engine": "opencode",
@@ -352,7 +376,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
             "model": model,
             "provider": provider or None,
             "auth": {"provider": provider or None, "present": isinstance(auth_obj, dict), "type": auth_obj.get("type") if isinstance(auth_obj, dict) else None},
-            "provider_options": (((cfg.get("provider") or {}).get(provider) or {}).get("options") if provider else {}) or {},
+            "provider_options": provider_options,
             "config_path": str(settings.opencode_config_path),
             "profile": {
                 "runtime_profile_id": overlay.runtime_profile_id if overlay else None,
@@ -360,6 +384,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
             },
             "runtime_integrations": {
                 "github": {"enabled": bool(github_cfg) or env_token_present, "base_url": github_cfg.get("api_base_url") or runtime_env.get("GITHUB_API_BASE_URL") or "https://api.github.com", "host": gh_host, "token_present": config_token_present or env_token_present, "git_auth_configured": git_auth_configured, "gh_config_dir": runtime_env.get("GH_CONFIG_DIR"), "git_askpass_present": git_askpass_present, "gitconfig_present": gitconfig_present},
+                "copilot": {"enabled": bool(provider == "github-copilot" or copilot_credential_present or copilot_base_url_present), "credential_present": copilot_credential_present, "token_cached": bool(copilot_snapshot.get("token_cached")), "base_url_present": copilot_base_url_present, "expires_at_present": bool(copilot_snapshot.get("expires_at_present"))},
                 "proxy": {"enabled": bool(proxy_cfg.get("enabled")), "url_present": bool(proxy_cfg.get("url")), "password_present": bool(proxy_cfg.get("password"))},
                 "env_file": {"present": bool(overlay and overlay.env_path), "path": overlay.env_path if overlay else None, "hash": overlay.env_hash if overlay else None},
             },
@@ -499,6 +524,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app[EVENT_BUS_KEY] = EventBus(settings.event_replay_limit, settings.event_replay_ttl_seconds)
     app[REQUEST_BINDING_STORE_KEY] = RequestBindingStore()
     app[TASK_BACKGROUND_TASKS_KEY] = set()
+    app[COPILOT_TOKEN_MANAGER_KEY] = CopilotTokenManager(settings)
     injected_client = opencode_client is not None
     client = opencode_client or OpenCodeClient(settings)
     app[OPENCODE_CLIENT_KEY] = client
@@ -516,6 +542,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     register_file_routes(app)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/actuator/health", health_handler)
+    app.router.add_route("*", "/api/internal/copilot/{tail:.*}", copilot_proxy_handler)
     app.router.add_post("/api/internal/runtime-profile/apply", runtime_profile_apply_handler)
     app.router.add_get("/api/internal/runtime-profile/status", runtime_profile_status_handler)
     app.router.add_get("/api/internal/opencode/status", internal_opencode_status_handler)

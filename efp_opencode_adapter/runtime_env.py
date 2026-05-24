@@ -390,11 +390,17 @@ def read_runtime_env_file(path: Path) -> dict[str, str]:
     return data
 
 
+def _redact_url_userinfo(value: str) -> str:
+    return re.sub(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s?#@]+@", r"\1[redacted]@", str(value))
+
+
 def redact_env_for_status(env: dict[str, str]) -> dict[str, object]:
     out: dict[str, object] = {}
     for key, value in env.items():
         if any(marker in key.upper() for marker in SECRET_MARKERS):
             out[key] = bool(value)
+        elif key in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"}:
+            out[key] = _redact_url_userinfo(value)
         else:
             out[key] = value
     return out

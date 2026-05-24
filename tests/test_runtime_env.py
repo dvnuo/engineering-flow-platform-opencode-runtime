@@ -36,6 +36,7 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     p = write_runtime_env_file(s, r.env)
     assert oct(os.stat(p).st_mode & 0o777) == "0o600"
     assert redact_env_for_status(r.env)["GITHUB_TOKEN"] is True
+    assert redact_env_for_status(r.env)["HTTPS_PROXY"] == "http://[redacted]@h:1"
 
 
 def test_read_runtime_env_file_treats_permission_denied_path_as_missing(tmp_path, monkeypatch):

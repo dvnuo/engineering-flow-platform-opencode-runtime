@@ -22,6 +22,7 @@ def test_long_run_routes_are_not_registered(tmp_path, monkeypatch):
     assert ("POST", "/api/sessions/{session_id}/abort") not in routes
     assert ("POST", "/api/sessions/{session_id}/hard-reset") not in routes
     assert ("GET", "/api/sessions/{session_id}/status") in routes
+    assert ("*", "/api/internal/copilot/{tail}") in routes
 
 
 @pytest.mark.asyncio
