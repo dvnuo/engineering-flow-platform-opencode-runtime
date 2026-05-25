@@ -4,8 +4,63 @@ import json
 from typing import Any
 
 
-def _base(task_id: str, task_type: str, input_payload: dict[str, Any], metadata: dict[str, Any], source: str | None, shared_context_ref: str | None, context_ref: Any) -> str:
+def _first_text(*values: Any) -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _agent_async_task_prompt(task_id: str, input_payload: dict[str, Any], metadata: dict[str, Any]) -> str:
+    skill_name = _first_text(input_payload.get("skill_name"), metadata.get("portal_skill_name"))
+    task_text = _first_text(input_payload.get("user_task"), input_payload.get("followup_task"))
+    task_session_id = _first_text(input_payload.get("task_session_id"), metadata.get("portal_task_session_id"))
+    root_task_id = _first_text(input_payload.get("root_task_id"), metadata.get("portal_root_task_id"))
+    parent_task_id = _first_text(input_payload.get("parent_task_id"), metadata.get("portal_parent_task_id"))
+    autonomous_instruction = _first_text(input_payload.get("autonomous_instruction"))
+    skill_ref = skill_name or "(none provided)"
+
     return (
+        "Agent async task instructions:\n"
+        "- This is an EFP Portal background task launched from Portal Tasks, not interactive chat.\n"
+        "- Work autonomously as a long-running background agent task.\n"
+        f"- Selected skill: `{skill_ref}`.\n"
+        f"- Use the native OpenCode `skill` tool to load skill `{skill_ref}` if available.\n"
+        f"- Follow `.opencode/skills/{skill_ref}/SKILL.md` when that skill exists.\n"
+        "- Do not claim the selected skill is running unless you have actually loaded and applied it.\n"
+        "- If the selected skill cannot be loaded, continue with useful best-effort work unless the skill is required; record exact blockers in JSON.\n\n"
+        "Task identifiers:\n"
+        f"- task_id: {task_id}\n"
+        f"- task_session_id: {task_session_id or '(not provided)'}\n"
+        f"- root_task_id: {root_task_id or '(not provided)'}\n"
+        f"- parent_task_id: {parent_task_id or '(none)'}\n\n"
+        "User task content:\n"
+        f"{task_text or '(no user_task or followup_task provided)'}\n\n"
+        "Autonomous execution rules:\n"
+        "- Do not ask the user questions during execution.\n"
+        "- Make reasonable assumptions and proceed independently.\n"
+        "- Complete as much of the task as possible with available context and tools.\n"
+        "- If information is truly insufficient, return status \"blocked\" with minimal missing information in blockers and needs_user_input true.\n"
+        "- Preserve secrets: do not output tokens, credentials, API keys, or raw authorization values.\n"
+        f"{('- Portal autonomous instruction: ' + autonomous_instruction + chr(10)) if autonomous_instruction else ''}"
+        "\nReturn exactly one JSON object. Do not wrap it in markdown.\n"
+        "The JSON object must match this schema:\n"
+        "{\n"
+        '  "status": "success|blocked|error",\n'
+        '  "summary": "...",\n'
+        '  "final_response": "...",\n'
+        '  "needs_user_input": false,\n'
+        '  "blockers": [],\n'
+        '  "next_recommendation": "...",\n'
+        '  "artifacts": [],\n'
+        '  "audit_trace": [],\n'
+        '  "external_actions": []\n'
+        "}\n"
+    )
+
+
+def _base(task_id: str, task_type: str, input_payload: dict[str, Any], metadata: dict[str, Any], source: str | None, shared_context_ref: str | None, context_ref: Any, *, include_default_schema: bool = True) -> str:
+    prompt = (
         "This is an EFP Portal automation task, not a normal chat.\n"
         "Do not write back to GitHub/Jira/Confluence/Slack unless metadata/policy explicitly allows mutation tools.\n"
         "If execution_mode=chat_tool_loop, read/analyze tools may be used when explicitly allowed; mutation/writeback actions still require explicit policy permission.\n"
@@ -19,6 +74,10 @@ def _base(task_id: str, task_type: str, input_payload: dict[str, Any], metadata:
         f"context_ref: {json.dumps(context_ref, ensure_ascii=False)}\n"
         f"metadata: {json.dumps(metadata, ensure_ascii=False)}\n"
         f"input_payload: {json.dumps(input_payload, ensure_ascii=False)}\n\n"
+    )
+    if not include_default_schema:
+        return prompt
+    return prompt + (
         "Return exactly one JSON object. Do not wrap it in markdown unless your runtime requires it.\n"
         "The JSON object must match:\n"
         '{"status":"success|error|blocked","summary":"...","artifacts":[],"blockers":[],"next_recommendation":"...","audit_trace":[],"external_actions":[]}\n'
@@ -26,7 +85,9 @@ def _base(task_id: str, task_type: str, input_payload: dict[str, Any], metadata:
 
 
 def build_task_prompt(*, task_id: str, task_type: str, input_payload: dict[str, Any], metadata: dict[str, Any], source: str | None = None, shared_context_ref: str | None = None, context_ref: Any = None) -> str:
-    prompt = _base(task_id, task_type, input_payload, metadata, source, shared_context_ref, context_ref)
+    prompt = _base(task_id, task_type, input_payload, metadata, source, shared_context_ref, context_ref, include_default_schema=task_type != "agent_async_task")
+    if task_type == "agent_async_task":
+        return prompt + _agent_async_task_prompt(task_id, input_payload, metadata)
     if task_type in {"github_review_task", "github_pr_review"}:
         return prompt + (
             "GitHub PR review task fields: owner, repo, pull_number, head_sha, base_sha, review_request_id, review_target, review_target_type, writeback_mode, allowed tools/actions, metadata.portal_head_sha.\n"

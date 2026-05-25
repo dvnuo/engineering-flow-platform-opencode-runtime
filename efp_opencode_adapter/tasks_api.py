@@ -26,6 +26,14 @@ from .task_store import TaskRecord, TaskStore, is_valid_task_id, utc_now_iso
 from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
 
 TERMINAL = {"success", "error", "blocked", "cancelled"}
+AGENT_ASYNC_TASK_DEFAULT_SYSTEM_PROMPT = (
+    "You are executing an EFP Portal agent_async_task as an autonomous background runtime task. "
+    "Do not ask the user for more information during execution. Make reasonable assumptions, "
+    "complete independently with available context and tools, and return blocked only when truly necessary. "
+    "When blocked, include minimal missing information in blockers and set needs_user_input to true. "
+    "Preserve secrets: never output tokens, credentials, API keys, or raw authorization values. "
+    "Return exactly one JSON object matching the requested task schema."
+)
 
 
 def _looks_structured_terminal_text(text: str) -> bool:
@@ -412,6 +420,8 @@ async def execute_task_handler(request: web.Request) -> web.Response:
             prompt_payload["agent"] = runtime_profile.get("agent")
         if metadata.get("system_prompt"):
             prompt_payload["system"] = metadata.get("system_prompt")
+        elif task_type == "agent_async_task":
+            prompt_payload["system"] = AGENT_ASYNC_TASK_DEFAULT_SYSTEM_PROMPT
 
         opencode_message_id = new_opencode_message_id()
         prompt_payload["messageID"] = opencode_message_id

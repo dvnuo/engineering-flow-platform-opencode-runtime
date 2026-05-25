@@ -88,6 +88,39 @@ def _extract_delegation_result(payload: dict[str, Any], status: str) -> dict[str
     return result
 
 
+def _agent_async_fallback_response(payload: dict[str, Any], raw: str) -> str:
+    for key in ("response", "answer", "summary", "raw_text"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return raw.strip()
+
+
+def _agent_async_has_blockers(payload: dict[str, Any]) -> bool:
+    blockers = payload.get("blockers")
+    if isinstance(blockers, list):
+        return bool(blockers)
+    if blockers is None:
+        return False
+    if isinstance(blockers, str):
+        return bool(blockers.strip())
+    return bool(blockers)
+
+
+def _normalize_agent_async_task_payload(payload: dict[str, Any], status: str, raw: str) -> dict[str, Any]:
+    payload.setdefault("summary", "")
+    payload.setdefault("artifacts", [])
+    payload.setdefault("blockers", [])
+    payload.setdefault("next_recommendation", "")
+    payload.setdefault("audit_trace", [])
+    payload.setdefault("external_actions", [])
+    if not isinstance(payload.get("final_response"), str) or not payload.get("final_response", "").strip():
+        payload["final_response"] = _agent_async_fallback_response(payload, raw)
+    if "needs_user_input" not in payload or not isinstance(payload.get("needs_user_input"), bool):
+        payload["needs_user_input"] = status == "blocked" or _agent_async_has_blockers(payload)
+    return payload
+
+
 def parse_task_completion(text: str, *, task_type: str, input_payload: dict[str, Any] | None = None, metadata: dict[str, Any] | None = None) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
     raw = text or ""
     parsed = _extract_json(raw)
@@ -129,5 +162,8 @@ def parse_task_completion(text: str, *, task_type: str, input_payload: dict[str,
             "audit_trace": result.get("audit_trace", []),
             "delegation_result": result,
         }
+
+    if task_type == "agent_async_task":
+        payload = _normalize_agent_async_task_payload(payload, status, raw)
 
     return status, payload, error
