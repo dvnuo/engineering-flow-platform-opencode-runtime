@@ -84,7 +84,10 @@ def test_copilot_api_key_generates_local_proxy_base_url_without_secrets(tmp_path
         Settings.from_env(),
         {"llm": {"provider": "github_copilot", "model": "gpt-x", "api_key": source_token}},
     )
-    assert cfg["provider"]["github-copilot"]["options"]["baseURL"] == "http://127.0.0.1:8000/api/internal/copilot"
+    provider_cfg = cfg["provider"]["github-copilot"]
+    assert provider_cfg["npm"] == "@ai-sdk/openai"
+    assert provider_cfg["options"]["baseURL"] == "http://127.0.0.1:8000/api/internal/copilot"
+    assert provider_cfg["options"]["apiKey"] == "efp-copilot-proxy"
     assert "provider" in updated
     encoded = json.dumps(cfg)
     assert source_token not in encoded
@@ -102,14 +105,20 @@ def test_copilot_proxy_base_url_can_be_overridden(tmp_path, monkeypatch):
         Settings.from_env(),
         {"llm": {"provider": "github_copilot", "model": "gpt-x", "oauth": {"access": "gho_PORTAL_TOKEN"}}},
     )
-    assert cfg["provider"]["github-copilot"]["options"]["baseURL"] == "http://127.0.0.1:9999/copilot"
+    provider_cfg = cfg["provider"]["github-copilot"]
+    assert provider_cfg["npm"] == "@ai-sdk/openai"
+    assert provider_cfg["options"]["baseURL"] == "http://127.0.0.1:9999/copilot"
+    assert provider_cfg["options"]["apiKey"] == "efp-copilot-proxy"
 
 
 def test_copilot_provider_base_url_keeps_provider_options_without_integration_header(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     cfg, _, updated = build_opencode_config(Settings.from_env(), {"llm": {"provider": "github_copilot", "model": "gpt-x", "api_base": "http://copilot.local"}})
-    assert cfg["provider"]["github-copilot"]["options"]["baseURL"] == "http://copilot.local"
+    provider_cfg = cfg["provider"]["github-copilot"]
+    assert provider_cfg["npm"] == "@ai-sdk/openai"
+    assert provider_cfg["options"]["baseURL"] == "http://copilot.local"
+    assert provider_cfg["options"]["apiKey"] == "efp-copilot-proxy"
     assert "copilot-integration-id" not in json.dumps(cfg)
     assert "provider" in updated
 

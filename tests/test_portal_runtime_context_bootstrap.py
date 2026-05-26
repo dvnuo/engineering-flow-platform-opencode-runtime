@@ -140,6 +140,10 @@ async def test_bootstrap_infers_auth_provider_from_model_prefix(tmp_path, monkey
     settings = mod.Settings.from_env()
     state_payload = json.loads(copilot_plugin_auth_path(settings).read_text(encoding="utf-8"))
     assert state_payload["credential"] == "gho_TEST"
+    cfg = json.loads((workspace / ".opencode" / "opencode.json").read_text(encoding="utf-8"))
+    assert cfg["provider"]["github-copilot"]["npm"] == "@ai-sdk/openai"
+    assert cfg["provider"]["github-copilot"]["options"]["baseURL"] == "http://127.0.0.1:8000/api/internal/copilot"
+    assert cfg["provider"]["github-copilot"]["options"]["apiKey"] == "efp-copilot-proxy"
     assert not (data / "auth.json").exists()
     await server.close()
 
