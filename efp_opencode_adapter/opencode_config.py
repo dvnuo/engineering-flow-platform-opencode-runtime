@@ -64,6 +64,9 @@ Rules:
 - Only Zulu JDK 21 is installed in this runtime.
 """
 
+COPILOT_RESPONSES_PROVIDER_NPM = "@ai-sdk/openai"
+COPILOT_PROXY_API_KEY_PLACEHOLDER = "efp-copilot-proxy"
+
 
 def normalize_opencode_provider_id(provider: str | None) -> str:
     raw = str(provider or "").strip().lower()
@@ -135,6 +138,14 @@ def provider_config_from_runtime_profile(runtime_config: dict, settings: Setting
     chunk_timeout_ms = _int_or_none(llm.get("chunk_timeout_ms") or llm.get("chunkTimeout"))
     if chunk_timeout_ms:
         options["chunkTimeout"] = chunk_timeout_ms
+    if provider == "github-copilot" and options.get("baseURL"):
+        # GitHub Copilot GPT-5.4 class models require the OpenAI Responses API
+        # when function tools/reasoning options are present. OpenCode's
+        # openai-compatible provider uses /chat/completions; @ai-sdk/openai
+        # selects /responses for these models. The local proxy strips inbound
+        # Authorization and replaces it with the internal Copilot token.
+        options.setdefault("apiKey", COPILOT_PROXY_API_KEY_PLACEHOLDER)
+        return {"provider": {provider: {"npm": COPILOT_RESPONSES_PROVIDER_NPM, "options": options}}}
     if not options:
         return {}
     return {"provider": {provider: {"options": options}}}

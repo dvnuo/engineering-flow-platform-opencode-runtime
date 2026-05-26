@@ -296,7 +296,9 @@ async def test_apply_github_copilot_oauth_writes_plugin_credential_state_without
     state_payload = json.loads(copilot_plugin_auth_path(settings).read_text(encoding="utf-8"))
     assert state_payload["credential"] == "gho_R"
     cfg = json.loads((workspace / ".opencode/opencode.json").read_text(encoding="utf-8"))
+    assert cfg["provider"]["github-copilot"]["npm"] == "@ai-sdk/openai"
     assert cfg["provider"]["github-copilot"]["options"]["baseURL"] == "http://127.0.0.1:8000/api/internal/copilot"
+    assert cfg["provider"]["github-copilot"]["options"]["apiKey"] == "efp-copilot-proxy"
     assert not (settings.opencode_data_dir / "auth.json").exists()
     assert "gho_R" not in json.dumps(body)
     assert "gho_A" not in json.dumps(body)
