@@ -3,12 +3,38 @@ from __future__ import annotations
 import json
 from typing import Any
 
+_PROMPT_METADATA_AUTHORIZATION_KEYS = {
+    "authorization_source",
+    "allowed_external_systems",
+    "allowed_actions",
+    "allowed_adapter_actions",
+    "allowed_capability_ids",
+    "allowed_capability_types",
+    "resolved_action_mappings",
+    "unresolved_tools",
+    "unresolved_skills",
+    "unresolved_channels",
+    "unresolved_actions",
+    "skill_details",
+}
+
 
 def _first_text(*values: Any) -> str:
     for value in values:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _metadata_for_prompt(metadata: dict[str, Any]) -> dict[str, Any]:
+    def sanitize(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: sanitize(val) for key, val in value.items() if key not in _PROMPT_METADATA_AUTHORIZATION_KEYS}
+        if isinstance(value, list):
+            return [sanitize(item) for item in value]
+        return value
+
+    return sanitize(metadata)
 
 
 def _agent_async_task_prompt(task_id: str, input_payload: dict[str, Any], metadata: dict[str, Any]) -> str:
@@ -61,12 +87,14 @@ def _agent_async_task_prompt(task_id: str, input_payload: dict[str, Any], metada
 
 def _base(task_id: str, task_type: str, input_payload: dict[str, Any], metadata: dict[str, Any], source: str | None, shared_context_ref: str | None, context_ref: Any, *, include_default_schema: bool = True) -> str:
     prompt = (
-        "This is an EFP Portal automation task, not a normal chat.\n"
-        "Do not write back to GitHub/Jira/Confluence/Slack unless metadata/policy explicitly allows mutation tools.\n"
-        "If execution_mode=chat_tool_loop, read/analyze tools may be used when explicitly allowed; mutation/writeback actions still require explicit policy permission.\n"
+        "This is an EFP Portal automation task, not interactive chat. Tasks use the same OpenCode runtime profile/permission configuration as chat.\n"
+        "Do not treat missing Portal allowed_* metadata as denial; these fields are not the task permission boundary.\n"
+        "Use the applied OpenCode runtime permission profile and OpenCode permission policy for tool/action access decisions.\n"
+        "Real OpenCode permission denials, unresolved OpenCode permission requests, or explicit denied_* policy fields are blockers; return status=blocked when they prevent execution.\n"
+        "Do not write back to GitHub/Jira/Confluence/Slack unless the OpenCode runtime permission profile and OpenCode permission policy allow mutation tools.\n"
+        "If execution_mode=chat_tool_loop, read/analyze tools may be used when allowed by the OpenCode runtime permission profile; mutation/writeback actions still require OpenCode permission policy allowance.\n"
         "If data is missing, do not invent it; return status=blocked and list missing fields.\n"
         "Do not include secrets/tokens/raw credentials in output JSON.\n"
-        "If policy/permission blocks execution, return status=blocked.\n\n"
         f"task_id: {task_id}\n"
         f"task_type: {task_type}\n"
         f"source: {source}\n"
@@ -85,20 +113,21 @@ def _base(task_id: str, task_type: str, input_payload: dict[str, Any], metadata:
 
 
 def build_task_prompt(*, task_id: str, task_type: str, input_payload: dict[str, Any], metadata: dict[str, Any], source: str | None = None, shared_context_ref: str | None = None, context_ref: Any = None) -> str:
-    prompt = _base(task_id, task_type, input_payload, metadata, source, shared_context_ref, context_ref, include_default_schema=task_type != "agent_async_task")
+    prompt_metadata = _metadata_for_prompt(metadata)
+    prompt = _base(task_id, task_type, input_payload, prompt_metadata, source, shared_context_ref, context_ref, include_default_schema=task_type != "agent_async_task")
     if task_type == "agent_async_task":
-        return prompt + _agent_async_task_prompt(task_id, input_payload, metadata)
+        return prompt + _agent_async_task_prompt(task_id, input_payload, prompt_metadata)
     if task_type in {"github_review_task", "github_pr_review"}:
         return prompt + (
-            "GitHub PR review task fields: owner, repo, pull_number, head_sha, base_sha, review_request_id, review_target, review_target_type, writeback_mode, allowed tools/actions, metadata.portal_head_sha.\n"
-            "Do not write back to GitHub unless Portal policy explicitly allows mutation tools. Missing data must return status=blocked.\n"
+            "GitHub PR review task fields: owner, repo, pull_number, head_sha, base_sha, review_request_id, review_target, review_target_type, writeback_mode, metadata.portal_head_sha.\n"
+            "Do not write back to GitHub unless the OpenCode runtime permission profile and OpenCode permission policy allow mutation tools. Missing data must return status=blocked.\n"
             'If the current PR head SHA differs from metadata.portal_head_sha or input_payload.head_sha, return: {"status":"error","summary":"PR head SHA changed before review completed.","error_code":"superseded_by_new_head_sha","recommendation":"comment","review_comments":[],"artifacts":[],"blockers":["PR head SHA changed"],"next_recommendation":"Re-dispatch review for the latest head SHA.","audit_trace":[],"external_actions":[]}\n'
             'Also keep output fields: {"summary":"...","recommendation":"comment|approve|request_changes","review_comments":[],"error_code":null}.\n'
         )
     if task_type in {"jira_workflow_review_task", "jira_workflow_review"}:
         return prompt + (
             "Jira workflow review fields: issue_key, project_key, workflow_rule_id, portal_workflow_rule_id, transition config, reassign config, review criteria, allowed transition/reassign/writeback actions.\n"
-            "Do not transition or reassign Jira issues unless Portal policy explicitly allows the specific mutation action. Missing data must return status=blocked.\n"
+            "Do not transition or reassign Jira issues unless the OpenCode runtime permission profile and OpenCode permission policy allow the specific mutation action. Missing data must return status=blocked.\n"
         )
     if task_type == "delegation_task":
         return prompt + (
@@ -109,12 +138,12 @@ def build_task_prompt(*, task_id: str, task_type: str, input_payload: dict[str, 
     if task_type in {"bundle_action_task", "requirement_bundle_analysis"}:
         return prompt + (
             "Bundle task fields: task_template_id, metadata.portal_task_template_id, skill_name, bundle_id, sources, input_payload, shared_context_ref, context_ref.\n"
-            "Do not perform mutation/writeback unless explicitly allowed by policy. Missing data must return status=blocked.\n"
+            "Do not perform mutation/writeback unless allowed by the OpenCode runtime permission profile and OpenCode permission policy. Missing data must return status=blocked.\n"
             'Also keep output fields: {"summary":"...","artifacts":[],"bundle_updates":[],"error_code":null}.\n'
         )
     if task_type == "triggered_event_task":
         return prompt + (
             "Triggered event fields: source_kind, portal_binding_id, portal_automation_rule, portal_automation_rule_id, body, and GitHub/Jira issue/PR/comment identifiers if present.\n"
-            "Do not perform mutation/writeback unless explicitly allowed by policy. Missing data must return status=blocked.\n"
+            "Do not perform mutation/writeback unless allowed by the OpenCode runtime permission profile and OpenCode permission policy. Missing data must return status=blocked.\n"
         )
     return prompt + "Generic task: unknown task_type allowed; return structured JSON result.\n"
