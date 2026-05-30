@@ -46,6 +46,22 @@ def test_permission_from_skills_index_does_not_restore_external_tools(tmp_path, 
     assert "efp_update" not in perm
 
 
+def test_runtime_v2_tool_selection_maps_to_permission_without_efp_tools(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    cfg, _, _ = build_opencode_config(
+        Settings.from_env(),
+        {"enabled_tools": ["read", "bash", "web_fetch"], "disabled_tools": ["bash"]},
+    )
+    perm = cfg["permission"]
+    assert perm["read"] == "allow"
+    assert perm["write"] == "deny"
+    assert perm["webfetch"] == "allow"
+    assert all(value == "deny" for value in perm["bash"].values())
+    assert "efp_" not in json.dumps(perm)
+
+
 def test_removed_tool_index_auto_allow_and_secret_not_leaked(tmp_path, monkeypatch):
     workspace, state = tmp_path / "workspace", tmp_path / "state"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))

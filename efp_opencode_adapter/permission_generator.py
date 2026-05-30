@@ -6,19 +6,38 @@ from typing import Any
 # external_directory is an OpenCode built-in workspace-escape guardrail key,
 # not the removed EFP external-tools subsystem.
 RESERVED_PERMISSION_KEYS = {"*", "read", "glob", "grep", "edit", "write", "bash", "external_directory", "webfetch", "websearch", "skill", "todowrite", "question"}
+SUPPORTED_BUILTIN_TOOL_PERMISSION_KEYS = (
+    "read",
+    "glob",
+    "grep",
+    "edit",
+    "write",
+    "bash",
+    "webfetch",
+    "websearch",
+    "todowrite",
+    "question",
+    "skill",
+)
 BUILTIN_PERMISSION_ALIASES = {
-    "read": {"read", "opencode.builtin.read"},
-    "glob": {"glob", "opencode.builtin.glob"},
-    "grep": {"grep", "opencode.builtin.grep"},
-    "edit": {"edit", "opencode.builtin.edit"},
-    "write": {"write", "opencode.builtin.write"},
-    "bash": {"bash", "opencode.builtin.bash"},
-    "todowrite": {"todowrite", "opencode.builtin.todowrite"},
-    "webfetch": {"webfetch", "opencode.builtin.webfetch"},
-    "websearch": {"websearch", "opencode.builtin.websearch"},
-    "question": {"question", "opencode.builtin.question"},
-    "skill": {"skill", "opencode.builtin.skill"},
+    "read": {"read", "read_file", "file_read", "opencode.builtin.read"},
+    "glob": {"glob", "file_search", "opencode.builtin.glob"},
+    "grep": {"grep", "search", "opencode.builtin.grep"},
+    "edit": {"edit", "apply_patch", "opencode.builtin.edit"},
+    "write": {"write", "write_file", "file_write", "opencode.builtin.write"},
+    "bash": {"bash", "shell", "shell_exec", "opencode.builtin.bash"},
+    "todowrite": {"todowrite", "todo_write", "todo", "opencode.builtin.todowrite"},
+    "webfetch": {"webfetch", "fetch", "web_fetch", "opencode.builtin.webfetch"},
+    "websearch": {"websearch", "web_search", "opencode.builtin.websearch"},
+    "question": {"question", "ask_user", "opencode.builtin.question"},
+    "skill": {"skill", "skills", "opencode.builtin.skill"},
 }
+BUILTIN_PERMISSION_ALIAS_TO_KEY = {
+    alias: key
+    for key, aliases in BUILTIN_PERMISSION_ALIASES.items()
+    for alias in aliases
+}
+TOOL_PERMISSION_ACTIONS = {"allow", "ask", "deny"}
 
 
 def normalize_permission_mode(raw: Any) -> str:
@@ -169,24 +188,85 @@ def _norm(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def _apply_builtin_denies(permission: dict[str, Any], denied_actions: set[str], denied_types: set[str]) -> None:
-    deny_all_tools = "tool" in denied_types
-    deny_shell = "shell" in denied_types
-    for key, aliases in BUILTIN_PERMISSION_ALIASES.items():
-        if not (deny_all_tools or aliases & denied_actions or (key == "bash" and deny_shell)):
-            continue
-        if key == "bash":
-            bash_permission = permission.setdefault("bash", {})
-            if not isinstance(bash_permission, dict):
-                bash_permission = {}
-                permission["bash"] = bash_permission
+def _normalize_builtin_tool_key(value: Any) -> str | None:
+    return BUILTIN_PERMISSION_ALIAS_TO_KEY.get(_norm(value))
+
+
+def _normalize_builtin_tool_list(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {key for item in value if (key := _normalize_builtin_tool_key(item))}
+
+
+def _normalize_tool_permission_action(value: Any) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("action")
+    action = _norm(value)
+    return action if action in TOOL_PERMISSION_ACTIONS else None
+
+
+def _ensure_nested_permission(permission: dict[str, Any], key: str) -> dict[str, Any]:
+    nested = permission.setdefault(key, {})
+    if not isinstance(nested, dict):
+        nested = {}
+        permission[key] = nested
+    return nested
+
+
+def _set_builtin_tool_action(permission: dict[str, Any], key: str, action: str, *, deny_existing_skill_entries: bool = False) -> None:
+    if key == "bash":
+        bash_permission = _ensure_nested_permission(permission, "bash")
+        if action == "deny":
             for pattern in list(bash_permission.keys()):
                 bash_permission[pattern] = "deny"
-            bash_permission["*"] = "deny"
-        elif key == "skill":
-            permission["skill"]["*"] = "deny"
-        else:
-            permission[key] = "deny"
+        bash_permission["*"] = action
+    elif key == "skill":
+        skill_permission = _ensure_nested_permission(permission, "skill")
+        if action == "deny" and deny_existing_skill_entries:
+            for name in list(skill_permission.keys()):
+                skill_permission[name] = "deny"
+        skill_permission["*"] = action
+    else:
+        permission[key] = action
+
+
+def _apply_builtin_denies(permission: dict[str, Any], denied_actions: set[str], denied_types: set[str]) -> None:
+    denied_actions_norm = {_norm(x) for x in denied_actions}
+    denied_types_norm = {_norm(x) for x in denied_types}
+    deny_all_tools = "tool" in denied_types_norm
+    deny_shell = "shell" in denied_types_norm
+    for key, aliases in BUILTIN_PERMISSION_ALIASES.items():
+        if not (deny_all_tools or aliases & denied_actions_norm or (key == "bash" and deny_shell)):
+            continue
+        _set_builtin_tool_action(permission, key, "deny")
+
+
+def _apply_tool_permissions(permission: dict[str, Any], config: dict[str, Any]) -> None:
+    tool_permissions = config.get("tool_permissions")
+    if not isinstance(tool_permissions, dict):
+        return
+    for tool_name, raw_action in tool_permissions.items():
+        key = _normalize_builtin_tool_key(tool_name)
+        action = _normalize_tool_permission_action(raw_action)
+        if key and action:
+            _set_builtin_tool_action(permission, key, action, deny_existing_skill_entries=(key == "skill" and action == "deny"))
+
+
+def _apply_enabled_tools(permission: dict[str, Any], config: dict[str, Any]) -> None:
+    if "enabled_tools" not in config or config.get("enabled_tools") is None:
+        return
+    if not isinstance(config.get("enabled_tools"), list):
+        return
+    enabled = _normalize_builtin_tool_list(config.get("enabled_tools"))
+    for key in SUPPORTED_BUILTIN_TOOL_PERMISSION_KEYS:
+        if key not in enabled:
+            _set_builtin_tool_action(permission, key, "deny", deny_existing_skill_entries=True)
+
+
+def _apply_disabled_tools(permission: dict[str, Any], config: dict[str, Any]) -> None:
+    disabled = _normalize_builtin_tool_list(config.get("disabled_tools"))
+    for key in disabled:
+        _set_builtin_tool_action(permission, key, "deny", deny_existing_skill_entries=True)
 
 
 def _collect_allowed_and_denied(config: dict) -> tuple[set[str], set[str], set[str], set[str], set[str], set[str], set[str], set[str]]:
@@ -255,6 +335,10 @@ def build_permission(config: dict, skills_index: dict | None = None, *, permissi
             permission_skill[name] = "deny"
         elif allow_all_skills or (aliases_norm & allowed_values) or (aliases_norm & allowed_skill_values):
             permission_skill[name] = "allow"
+
+    _apply_tool_permissions(permission, config)
+    _apply_enabled_tools(permission, config)
+    _apply_disabled_tools(permission, config)
 
     return permission
 

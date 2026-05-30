@@ -81,6 +81,34 @@ async def test_apply_contract(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_apply_runtime_v2_tool_selection_writes_opencode_permission(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    app = create_app(Settings.from_env(), opencode_client=FakeAuthOnlyClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    resp = await client.post(
+        "/api/internal/runtime-profile/apply",
+        headers={"X-Portal-Author-Source": "portal"},
+        json={"config": {"enabled_tools": ["read", "bash", "web_fetch"], "disabled_tools": ["web_fetch", "bash"]}},
+    )
+
+    assert resp.status == 200
+    cfg = json.loads((workspace / ".opencode/opencode.json").read_text(encoding="utf-8"))
+    perm = cfg["permission"]
+    assert perm["read"] == "allow"
+    assert perm["write"] == "deny"
+    assert perm["webfetch"] == "deny"
+    assert all(value == "deny" for value in perm["bash"].values())
+    assert perm["external_directory"] == "allow"
+    assert "efp_" not in json.dumps(perm)
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_apply_auth_failure_warning(tmp_path, monkeypatch):
     workspace, state = tmp_path / "workspace", tmp_path / "state"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
