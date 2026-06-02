@@ -98,3 +98,11 @@ def test_chat_short_request_and_event_replay_settings_env_overrides(monkeypatch)
     assert settings.chat_submit_timeout_seconds == 301
     assert settings.event_replay_limit == 12
     assert settings.event_replay_ttl_seconds == 13
+
+
+def test_chat_submit_timeout_env_is_floored_at_300(monkeypatch):
+    monkeypatch.setenv("EFP_CHAT_SUBMIT_TIMEOUT_SECONDS", "60")
+
+    settings = Settings.from_env()
+
+    assert settings.chat_submit_timeout_seconds == 300

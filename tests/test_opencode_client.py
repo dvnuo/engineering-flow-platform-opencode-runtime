@@ -324,6 +324,43 @@ async def test_event_stream_partial_consume_can_be_closed_without_leaking_sessio
 
 
 @pytest.mark.asyncio
+async def test_event_stream_without_timeout_uses_no_total_timeout(monkeypatch):
+    captured = {}
+
+    class EmptyContent:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class FakeResponse:
+        status = 200
+        content = EmptyContent()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeSession:
+        def get(self, url, **kwargs):
+            captured["url"] = url
+            captured["timeout"] = kwargs["timeout"]
+            return FakeResponse()
+
+    client = OpenCodeClient(Settings.from_env(), session=FakeSession())  # type: ignore[arg-type]
+    events_iter = client.event_stream()
+
+    with pytest.raises(StopAsyncIteration):
+        await events_iter.__anext__()
+
+    assert captured["url"].endswith("/event")
+    assert captured["timeout"].total is None
+
+
+@pytest.mark.asyncio
 async def test_request_closes_owned_session_when_request_raises(monkeypatch):
     from efp_opencode_adapter import opencode_client as module
 
@@ -949,6 +986,23 @@ async def test_send_message_uses_submit_timeout(monkeypatch):
     monkeypatch.setattr(client, "_request_json", _fake)
     await client.send_message("s1", parts=[{"type":"text","text":"hi"}], model=None, agent=None)
     assert captured["timeout_seconds"] >= 300
+
+
+@pytest.mark.asyncio
+async def test_send_message_env_submit_timeout_below_floor_uses_300(monkeypatch):
+    monkeypatch.setenv("EFP_CHAT_SUBMIT_TIMEOUT_SECONDS", "60")
+    settings = Settings.from_env()
+    client = OpenCodeClient(settings)
+    captured = {}
+
+    async def _fake(method, path, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(client, "_request_json", _fake)
+    await client.send_message("s1", parts=[{"type": "text", "text": "hi"}], model=None, agent=None)
+    assert settings.chat_submit_timeout_seconds == 300
+    assert captured["timeout_seconds"] == 300
 
 
 @pytest.mark.asyncio

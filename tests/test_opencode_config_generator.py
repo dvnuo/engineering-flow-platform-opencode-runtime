@@ -1,6 +1,6 @@
 import json
 
-from efp_opencode_adapter.opencode_config import build_opencode_config, model_from_runtime_profile, normalize_opencode_provider_id, write_opencode_config
+from efp_opencode_adapter.opencode_config import build_opencode_config, model_from_runtime_profile, normalize_opencode_provider_id, provider_config_from_runtime_profile, write_opencode_config
 from efp_opencode_adapter.settings import Settings
 
 
@@ -95,6 +95,34 @@ def test_copilot_api_key_generates_local_proxy_base_url_without_secrets(tmp_path
     assert "ghu_" not in encoded
     assert "gho_" not in encoded
     assert "tid=" not in encoded
+
+
+def test_copilot_timeout_ms_is_preserved_with_proxy_options(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    runtime_config = {
+        "llm": {
+            "provider": "github_copilot",
+            "model": "gpt-x",
+            "api_key": "ghu_PORTAL_TOKEN",
+            "timeout_ms": 300000,
+        }
+    }
+    settings = Settings.from_env()
+
+    provider_patch = provider_config_from_runtime_profile(runtime_config, settings)
+    provider_options = provider_patch["provider"]["github-copilot"]["options"]
+    assert provider_options["baseURL"] == "http://127.0.0.1:8000/api/internal/copilot"
+    assert provider_options["apiKey"] == "efp-copilot-proxy"
+    assert provider_options["timeout"] == 300000
+
+    cfg, _, updated = build_opencode_config(settings, runtime_config)
+    assert cfg["agent"]["efp-main"]["model"] == "github-copilot/gpt-x"
+    assert cfg["provider"]["github-copilot"]["npm"] == "@ai-sdk/openai"
+    assert cfg["provider"]["github-copilot"]["options"]["baseURL"] == "http://127.0.0.1:8000/api/internal/copilot"
+    assert cfg["provider"]["github-copilot"]["options"]["apiKey"] == "efp-copilot-proxy"
+    assert cfg["provider"]["github-copilot"]["options"]["timeout"] == 300000
+    assert "provider" in updated
 
 
 def test_copilot_proxy_base_url_can_be_overridden(tmp_path, monkeypatch):
