@@ -196,6 +196,7 @@ async def test_proxy_passes_selected_runtime_proxy_to_aiohttp(tmp_path, monkeypa
     assert captured["method"] == "POST"
     assert captured["url"] == "https://api.enterprise.githubcopilot.com/chat/completions"
     assert captured["session_kwargs"]["trust_env"] is True
+    assert captured["session_kwargs"]["timeout"].total is None
     assert captured["request_kwargs"]["proxy"] == "http://user:pass@runtime.proxy:8080"
 
     await client.close()
