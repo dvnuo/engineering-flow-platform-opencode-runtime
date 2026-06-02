@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import inspect
@@ -17,6 +18,7 @@ from .app_keys import (
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
     PORTAL_METADATA_CLIENT_KEY,
+    REQUEST_BINDING_STORE_KEY,
     SETTINGS_KEY,
     SESSION_STORE_KEY,
     USAGE_TRACKER_KEY,
@@ -50,6 +52,19 @@ FINAL_RESPONSE_CONTRACT_SUFFIX = (
 
 DATA_URL_RE = re.compile(r"data:[A-Za-z0-9.+/_-]+(?:;[A-Za-z0-9.+/_=-]+)*;base64,[A-Za-z0-9+/=]+")
 TERMINAL_ASSISTANT_COMPLETION_STATES = {"completed", "blocked", "error", "empty_final"}
+
+
+def _stable_runtime_event_id(*, event_type: str, session_id: str, request_id: str, opencode_session_id: str, data: dict[str, Any] | None) -> str:
+    try:
+        payload = json.dumps(safe_preview(data or {}, 1000), sort_keys=True, default=str, ensure_ascii=False)
+    except Exception:
+        payload = str(safe_preview(data or {}, 1000))
+    seed = f"{event_type}\n{session_id}\n{request_id}\n{opencode_session_id}\n{payload}"
+    digest = hashlib.sha256(seed.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    prefix = f"opencode:{request_id or session_id or opencode_session_id}:{event_type}"
+    if len(prefix) > 120:
+        prefix = f"opencode:{digest}:{event_type}"
+    return f"{prefix}:{digest}"
 
 
 def _bad_request(error: str) -> web.HTTPBadRequest:
@@ -364,7 +379,17 @@ def _event_payload(
     data: dict[str, Any] | None = None,
     trace_context: dict[str, str],
 ) -> dict[str, Any]:
+    safe_data = safe_preview(data or {}, 1000)
+    if not isinstance(safe_data, dict):
+        safe_data = {}
     event = {
+        "id": _stable_runtime_event_id(
+            event_type=event_type,
+            session_id=session_id,
+            request_id=request_id,
+            opencode_session_id=opencode_session_id,
+            data=safe_data,
+        ),
         "type": event_type,
         "event_type": event_type,
         "engine": "opencode",
@@ -373,7 +398,7 @@ def _event_payload(
         "opencode_session_id": opencode_session_id,
         "state": state,
         "summary": safe_preview(summary, 500),
-        "data": safe_preview(data or {}, 1000),
+        "data": safe_data,
         "created_at": utc_now_iso(),
         "ts": time.time(),
     }
@@ -638,6 +663,9 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             model=model,
         )
         opencode_session_id = record.opencode_session_id
+        bindings = app.get(REQUEST_BINDING_STORE_KEY)
+        if bindings is not None and hasattr(bindings, "bind_active"):
+            bindings.bind_active(record.opencode_session_id, portal_session_id, request_id, kind="chat")
         trace_context = build_trace_context(
             settings,
             request_id=request_id,
@@ -707,6 +735,8 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             before_messages = []
 
         parts, attachment_debug = await _build_chat_parts(app, portal_session_id=portal_session_id, message=message, attachments=attachments)
+        if bindings is not None and hasattr(bindings, "bind_message"):
+            bindings.bind_message(record.opencode_session_id, initial_user_message_id, portal_session_id, request_id, kind="chat")
         display_store = app.get(USER_DISPLAY_STORE_KEY)
         if display_store is not None:
             try:
@@ -818,6 +848,9 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         _append_unique_message_ids(assistant_message_ids, [assistant_message_id])
         if assistant_message_ids:
             assistant_message_id = assistant_message_ids[-1]
+        if bindings is not None and hasattr(bindings, "bind_message"):
+            for assistant_id in assistant_message_ids:
+                bindings.bind_message(record.opencode_session_id, assistant_id, portal_session_id, request_id, kind="chat")
 
         terminal_type = "chat.completed" if completion_state == "completed" else "chat.failed"
         terminal_state = "success" if completion_state == "completed" else completion_state
@@ -1070,6 +1103,43 @@ async def _safe_write_eof(resp: web.StreamResponse) -> None:
         pass
 
 
+def _consume_background_chat_result(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except Exception:
+        logger.debug("detached chat stream task finished with error", exc_info=True)
+
+
+async def _write_runtime_event_sse(resp: web.StreamResponse, event: dict[str, Any], seen_ids: set[str]) -> None:
+    if not isinstance(event, dict):
+        return
+    event_id = str(event.get("id") or "")
+    if event_id and event_id in seen_ids:
+        return
+    if event_id:
+        seen_ids.add(event_id)
+    await _write_sse(resp, "runtime_event", event)
+
+
+async def _drain_runtime_event_queue(resp: web.StreamResponse, subscriber: Any, seen_ids: set[str]) -> None:
+    while True:
+        try:
+            event = subscriber.queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        await _write_runtime_event_sse(resp, event, seen_ids)
+
+
+async def _stream_runtime_events_until_done(resp: web.StreamResponse, subscriber: Any, chat_task: asyncio.Task, seen_ids: set[str]) -> None:
+    while not chat_task.done():
+        try:
+            event = await asyncio.wait_for(subscriber.queue.get(), timeout=0.1)
+        except asyncio.TimeoutError:
+            continue
+        await _write_runtime_event_sse(resp, event, seen_ids)
+    await _drain_runtime_event_queue(resp, subscriber, seen_ids)
+
+
 def _stream_error_final_payload(*, error_payload: dict[str, Any], session_id: str, request_id: str, runtime_events: list[dict[str, Any]] | None = None, settings: Any = None) -> dict[str, Any]:
     return {
         "ok": False,
@@ -1149,14 +1219,25 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     payload = {**payload, "session_id": session_id, "request_id": request_id}
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "close"})
     await resp.prepare(request)
+    bus = request.app[EVENT_BUS_KEY]
+    subscriber = bus.subscribe({"session_id": session_id, "request_id": request_id})
+    chat_task = asyncio.create_task(handle_chat_payload_for_app(request.app, payload))
+    seen_event_ids: set[str] = set()
     try:
         await _write_sse(resp, "chat.started", {"session_id": session_id, "request_id": request_id, "chatlog_id": request_id, "completion_state": "running"})
-        final_payload = await handle_chat_payload_for_app(request.app, payload)
+        await _stream_runtime_events_until_done(resp, subscriber, chat_task, seen_event_ids)
+        final_payload = await chat_task
+        await _drain_runtime_event_queue(resp, subscriber, seen_event_ids)
         await _write_sse(resp, "final", final_payload)
         await _write_sse(resp, "done", {"ok": True})
     except SSEClientDisconnected:
+        if not chat_task.done():
+            chat_task.add_done_callback(_consume_background_chat_result)
         return resp
     except web.HTTPException as exc:
+        if not chat_task.done():
+            chat_task.cancel()
+            await asyncio.gather(chat_task, return_exceptions=True)
         error_payload = _http_error_payload(exc, session_id=session_id, request_id=request_id)
         runtime_event = _stream_failure_event(request, session_id=session_id, request_id=request_id, error_payload=error_payload)
         final_payload = _stream_error_final_payload(error_payload=error_payload, session_id=session_id, request_id=request_id, runtime_events=[runtime_event], settings=request.app.get(SETTINGS_KEY))
@@ -1168,6 +1249,9 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         except SSEClientDisconnected:
             return resp
     except Exception as exc:
+        if not chat_task.done():
+            chat_task.cancel()
+            await asyncio.gather(chat_task, return_exceptions=True)
         error_payload = {"error": "chat_failed", "detail": safe_preview(str(exc), 500), "session_id": session_id, "request_id": request_id}
         runtime_event = _stream_failure_event(request, session_id=session_id, request_id=request_id, error_payload=error_payload)
         final_payload = _stream_error_final_payload(error_payload=error_payload, session_id=session_id, request_id=request_id, runtime_events=[runtime_event], settings=request.app.get(SETTINGS_KEY))
@@ -1178,5 +1262,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
             await _write_sse(resp, "done", {"ok": True})
         except SSEClientDisconnected:
             return resp
+    finally:
+        bus.unsubscribe(subscriber)
     await _safe_write_eof(resp)
     return resp

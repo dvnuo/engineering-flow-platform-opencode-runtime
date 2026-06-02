@@ -10,6 +10,7 @@ from aiohttp import web
 from .app_keys import (
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
+    REQUEST_BINDING_STORE_KEY,
     SESSION_STORE_KEY,
     SETTINGS_KEY,
     TASK_BACKGROUND_TASKS_KEY,
@@ -425,6 +426,11 @@ async def execute_task_handler(request: web.Request) -> web.Response:
 
         opencode_message_id = new_opencode_message_id()
         prompt_payload["messageID"] = opencode_message_id
+        bindings = request.app.get(REQUEST_BINDING_STORE_KEY)
+        if bindings is not None and hasattr(bindings, "bind_active"):
+            bindings.bind_active(record.opencode_session_id, portal_session_id, request_id, kind="task", task_id=task_id)
+        if bindings is not None and hasattr(bindings, "bind_message"):
+            bindings.bind_message(record.opencode_session_id, opencode_message_id, portal_session_id, request_id, kind="task", task_id=task_id)
         record = task_store.update(task_id, status="running", started_at=utc_now_iso(), opencode_prompt_id=opencode_message_id, opencode_message_id=opencode_message_id)
         await _publish_task_event(request.app, record, "task.started", "running")
         schedule_task_collector(request.app, task_id)

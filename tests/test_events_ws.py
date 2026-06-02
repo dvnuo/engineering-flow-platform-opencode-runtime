@@ -49,23 +49,23 @@ async def test_events_ws_replay_and_type_filter(tmp_path, monkeypatch):
     client = TestClient(TestServer(app))
     await client.start_server()
 
-    await app[EVENT_BUS_KEY].publish({"type": "tool.started", "session_id": "portal-replay", "request_id": "req-replay", "data": {"tool": "bash"}})
+    await app[EVENT_BUS_KEY].publish({"type": "session.next.tool.called", "event_type": "session.next.tool.called", "session_id": "portal-replay", "request_id": "req-replay", "data": {"tool": "bash"}})
     await app[EVENT_BUS_KEY].publish({"type": "provider.retry", "session_id": "portal-replay", "request_id": "req-replay", "data": {"attempt": 1}})
-    await app[EVENT_BUS_KEY].publish({"type": "tool.completed", "session_id": "portal-replay", "request_id": "req-replay", "data": {"tool": "bash"}})
+    await app[EVENT_BUS_KEY].publish({"type": "session.next.tool.success", "event_type": "session.next.tool.success", "session_id": "portal-replay", "request_id": "req-replay", "data": {"tool": "bash"}})
 
-    ws = await client.ws_connect("/api/events?session_id=portal-replay&replay=1&types=tool.started,tool.completed")
+    ws = await client.ws_connect("/api/events?session_id=portal-replay&replay=1&types=session.next.tool.called,session.next.tool.success")
     assert (await ws.receive_json())["type"] == "connected"
     first = await ws.receive_json(timeout=2)
     second = await ws.receive_json(timeout=2)
 
-    assert [first["type"], second["type"]] == ["tool.started", "tool.completed"]
+    assert [first["type"], second["type"]] == ["session.next.tool.called", "session.next.tool.success"]
     assert first["metadata"]["replayed"] is True
     assert second["metadata"]["replayed"] is True
 
     await app[EVENT_BUS_KEY].publish({"type": "provider.retry", "session_id": "portal-replay", "request_id": "req-replay"})
-    await app[EVENT_BUS_KEY].publish({"type": "tool.completed", "session_id": "portal-replay", "request_id": "req-replay", "data": {"tool": "bash"}})
+    await app[EVENT_BUS_KEY].publish({"type": "session.next.tool.success", "event_type": "session.next.tool.success", "session_id": "portal-replay", "request_id": "req-replay", "data": {"tool": "bash"}})
     live = await ws.receive_json(timeout=2)
-    assert live["type"] == "tool.completed"
+    assert live["type"] == "session.next.tool.success"
 
     await ws.close()
     await client.close()
@@ -103,8 +103,8 @@ async def test_events_ws_replay_with_request_id_is_request_scoped(tmp_path, monk
     client = TestClient(TestServer(app))
     await client.start_server()
 
-    await app[EVENT_BUS_KEY].publish({"type": "message.delta", "session_id": "portal-request-scope", "request_id": "req-one", "data": {"delta": "one"}})
-    await app[EVENT_BUS_KEY].publish({"type": "message.delta", "session_id": "portal-request-scope", "request_id": "req-two", "data": {"delta": "two"}})
+    await app[EVENT_BUS_KEY].publish({"type": "session.next.text.delta", "event_type": "session.next.text.delta", "session_id": "portal-request-scope", "request_id": "req-one", "data": {"delta": "one"}})
+    await app[EVENT_BUS_KEY].publish({"type": "session.next.text.delta", "event_type": "session.next.text.delta", "session_id": "portal-request-scope", "request_id": "req-two", "data": {"delta": "two"}})
     await app[EVENT_BUS_KEY].publish({"type": "session.status", "session_id": "portal-request-scope", "opencode_session_id": "oc-request-scope", "request_id": "", "data": {"raw_type": "session.status"}})
 
     ws = await client.ws_connect("/api/events?session_id=portal-request-scope&request_id=req-one&replay=1")
