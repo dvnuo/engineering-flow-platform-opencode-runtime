@@ -53,7 +53,7 @@ def _sse_events(body):
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_is_simple_sse_wrapper(tmp_path, monkeypatch):
+async def test_chat_stream_writes_runtime_events_before_final(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())))
     await client.start_server()
@@ -64,7 +64,14 @@ async def test_chat_stream_is_simple_sse_wrapper(tmp_path, monkeypatch):
         names = [name for name, _payload in events]
 
         assert resp.status == 200
-        assert names == ["chat.started", "final", "done"]
+        assert names[0] == "chat.started"
+        assert names[-2:] == ["final", "done"]
+        assert "runtime_event" in names
+        assert names.index("runtime_event") < names.index("final")
+        runtime_payloads = [payload for name, payload in events if name == "runtime_event"]
+        assert runtime_payloads
+        assert all(isinstance(payload, dict) for payload in runtime_payloads)
+        assert any(payload.get("type") == "chat.started" for payload in runtime_payloads)
         final_payload = dict(events)["final"]
         assert final_payload["completion_state"] == "completed"
         assert final_payload["response"] == "echo: hello stream"
@@ -89,7 +96,13 @@ async def test_chat_stream_waits_for_delayed_assistant_visible_response(tmp_path
         names = [name for name, _payload in events]
 
         assert resp.status == 200
-        assert names == ["chat.started", "final", "done"]
+        assert names[0] == "chat.started"
+        assert names[-2:] == ["final", "done"]
+        assert "runtime_event" in names
+        assert names.index("runtime_event") < names.index("final")
+        runtime_payloads = [payload for name, payload in events if name == "runtime_event"]
+        assert runtime_payloads
+        assert all(isinstance(payload, dict) for payload in runtime_payloads)
         final_payload = dict(events)["final"]
         assert final_payload["completion_state"] == "completed"
         assert final_payload["response"] == "delayed stream final"

@@ -40,6 +40,42 @@ def _normalize_context(tmp_path, monkeypatch):
     return settings, SessionStore(paths.sessions_dir), TaskStore(paths.tasks_dir)
 
 
+def test_raw_session_next_text_delta_passes_through_standard_envelope(tmp_path, monkeypatch):
+    settings, session_store, task_store = _normalize_context(tmp_path, monkeypatch)
+    session_store.upsert(SessionRecord("portal-1", "oc-1", "t", None, None, "a", "a", "", 0))
+
+    event = normalize_opencode_event(
+        {
+            "id": "evt-raw-1",
+            "type": "session.next.text.delta",
+            "properties": {
+                "sessionID": "oc-1",
+                "request_id": "req-1",
+                "messageID": "msg-1",
+                "partID": "part-1",
+                "delta": "hello",
+            },
+            "created_at": "2026-06-02T00:00:00+00:00",
+        },
+        session_store=session_store,
+        task_store=task_store,
+        settings=settings,
+    )
+
+    assert event["id"] == "evt-raw-1"
+    assert event["type"] == "session.next.text.delta"
+    assert event["event_type"] == "session.next.text.delta"
+    assert event["engine"] == "opencode"
+    assert event["session_id"] == "portal-1"
+    assert event["opencode_session_id"] == "oc-1"
+    assert event["request_id"] == "req-1"
+    assert event["raw_type"] == "session.next.text.delta"
+    assert event["properties"]["delta"] == "hello"
+    assert event["data"]["delta"] == "hello"
+    assert event["opencode_message_id"] == "msg-1"
+    assert event["opencode_part_id"] == "part-1"
+
+
 @pytest.mark.asyncio
 async def test_normalizes_permission_event_and_maps_portal_session(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
@@ -55,7 +91,8 @@ async def test_normalizes_permission_event_and_maps_portal_session(tmp_path, mon
     q = bus.subscribe({"session_id": "portal-1"})
     event = await bridge.publish_raw_event({"payload": {"type": "permission.asked", "properties": {"sessionID": "oc-1", "requestID": "perm-1"}}})
     got = await asyncio.wait_for(q.queue.get(), timeout=1)
-    assert got["type"] == "permission_request"
+    assert got["type"] == "permission.requested"
+    assert got["legacy_type"] == "permission_request"
     assert event and event["permission_id"] == "perm-1"
 
 
@@ -69,9 +106,12 @@ async def test_normalizes_tool_events(tmp_path, monkeypatch):
     s = await bridge.publish_raw_event({"type": "tool.start"})
     c = await bridge.publish_raw_event({"type": "tool.complete"})
     f = await bridge.publish_raw_event({"type": "message.part.updated", "part": {"type": "tool", "status": "error", "tool": "bash"}})
-    assert s["type"] == "tool.started"
-    assert c["type"] == "tool.completed"
-    assert f["type"] == "tool.failed"
+    assert s["type"] == "session.next.tool.called"
+    assert s["legacy_type"] == "tool.started"
+    assert c["type"] == "session.next.tool.success"
+    assert c["legacy_type"] == "tool.completed"
+    assert f["type"] == "session.next.tool.failed"
+    assert f["legacy_type"] == "tool.failed"
 
 
 def test_create_app_does_not_auto_start_bridge_for_injected_fake_client(tmp_path, monkeypatch):
@@ -102,7 +142,8 @@ async def test_event_bridge_redacts_secret_strings_and_top_level_tool_fields(tmp
     encoded = json.dumps(event).lower()
     assert "secret-key-should-not-leak" not in encoded
     assert "token" not in encoded
-    assert event["type"] == "tool.started"
+    assert event["type"] == "session.next.tool.called"
+    assert event["legacy_type"] == "tool.started"
     assert event["tool"]
     assert "input_preview" in event
 
@@ -114,7 +155,8 @@ async def test_permission_updated_with_approved_status_is_resolved(tmp_path, mon
     settings = Settings.from_env()
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({"payload": {"type": "permission.updated", "properties": {"sessionID": "oc-1", "permissionID": "perm-1", "status": "approved", "tool": "bash"}}})
-    assert event["type"] == "permission_resolved"
+    assert event["type"] == "permission.resolved"
+    assert event["legacy_type"] == "permission_resolved"
     assert event["permission_id"] == "perm-1"
     assert event["tool"] == "bash"
     assert "decision" in event
@@ -288,7 +330,8 @@ def test_message_part_delta_requires_assistant_role_and_text_part(tmp_path, monk
     settings = Settings.from_env()
     paths = ensure_state_dirs(settings)
     event = normalize_opencode_event({"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "Hello"}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="assistant", part_meta={"type": "text", "ignored": False, "synthetic": False})
-    assert event["type"] == "message.delta"
+    assert event["type"] == "session.next.text.delta"
+    assert event["legacy_type"] == "message.delta"
     assert event["raw_type"] == "message.part.delta"
     assert event["data"]["delta"] == "Hello"
     assert event["data"]["message_role"] == "assistant"
@@ -301,7 +344,8 @@ def test_reasoning_delta_maps_to_llm_thinking(tmp_path, monkeypatch):
     settings = Settings.from_env()
     paths = ensure_state_dirs(settings)
     event = normalize_opencode_event({"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "reasoning text"}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="assistant", part_meta={"type": "reasoning", "ignored": False, "synthetic": False})
-    assert event["type"] == "llm_thinking"
+    assert event["type"] == "session.next.reasoning.delta"
+    assert event["legacy_type"] == "llm_thinking"
     assert event["raw_type"] == "message.part.delta"
     assert event["data"]["message"] == "reasoning text"
     assert event["opencode_message_id"] == "m-assistant"
@@ -313,7 +357,8 @@ def test_reasoning_delta_uses_canonical_part_metadata_when_cache_missing(tmp_pat
     settings = Settings.from_env()
     paths = ensure_state_dirs(settings)
     event = normalize_opencode_event({"payload": {"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "thinking", "part": {"id": "p1", "messageID": "m-assistant", "type": "reasoning"}}}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="assistant", part_meta={})
-    assert event["type"] == "llm_thinking"
+    assert event["type"] == "session.next.reasoning.delta"
+    assert event["legacy_type"] == "llm_thinking"
     assert event["data"]["message"] == "thinking"
 
 
@@ -345,7 +390,8 @@ def test_message_part_delta_with_missing_metadata_still_becomes_message_delta(tm
     settings = Settings.from_env()
     paths = ensure_state_dirs(settings)
     event = normalize_opencode_event({"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "Agenda"}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="", part_meta={})
-    assert event["type"] == "message.delta"
+    assert event["type"] == "session.next.text.delta"
+    assert event["legacy_type"] == "message.delta"
     assert event["data"]["metadata_incomplete"] is True
 
 
@@ -371,7 +417,8 @@ async def test_publish_raw_event_uses_message_and_part_cache_for_delta(tmp_path,
     await bridge.publish_raw_event({"type": "message.updated", "sessionID": "oc-1", "info": {"id": "m-assistant", "role": "assistant", "sessionID": "oc-1"}})
     await bridge.publish_raw_event({"type": "message.part.updated", "sessionID": "oc-1", "part": {"id": "p1", "messageID": "m-assistant", "type": "text"}})
     event = await bridge.publish_raw_event({"type": "message.part.delta", "sessionID": "oc-1", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "Hel"}})
-    assert event["type"] == "message.delta"
+    assert event["type"] == "session.next.text.delta"
+    assert event["legacy_type"] == "message.delta"
     assert event["data"]["delta"] == "Hel"
 
 
@@ -383,7 +430,8 @@ async def test_publish_raw_event_fetches_message_once_when_delta_cache_miss(tmp_
     fake = FakeClient()
     bridge = OpenCodeEventBridge(settings, fake, EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({"type": "message.part.delta", "sessionID": "oc-1", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "Hi"}})
-    assert event["type"] == "message.delta"
+    assert event["type"] == "session.next.text.delta"
+    assert event["legacy_type"] == "message.delta"
     assert fake.get_message_calls == 1
 
 
@@ -400,7 +448,8 @@ async def test_publish_raw_event_uses_top_level_properties_cache_without_fetch(t
     await bridge.publish_raw_event({"id": "evt-part", "type": "message.part.updated", "properties": {"sessionID": "oc-1", "part": {"id": "p1", "messageID": "m-assistant", "type": "text"}}})
     event = await bridge.publish_raw_event({"id": "evt-delta", "type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "Hel"}})
 
-    assert event["type"] == "message.delta"
+    assert event["type"] == "session.next.text.delta"
+    assert event["legacy_type"] == "message.delta"
     assert event["data"]["delta"] == "Hel"
     assert event["data"]["message_role"] == "assistant"
     assert event["data"]["part_type"] == "text"
@@ -416,7 +465,8 @@ async def test_event_bridge_redacts_top_level_request_id(tmp_path, monkeypatch):
     encoded = json.dumps(event).lower()
     assert "secret-key-should-not-leak" not in encoded
     assert "token" not in encoded
-    assert event["type"] == "permission_request"
+    assert event["type"] == "permission.requested"
+    assert event["legacy_type"] == "permission_request"
     assert event["request_id"] == ""
     assert event["raw_request_id"] == "[redacted]"
     assert event["opencode_request_id"] == "[redacted]"
@@ -445,10 +495,24 @@ async def test_permission_updated_response_allow_is_resolved(tmp_path, monkeypat
     settings = Settings.from_env()
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({"payload": {"type": "permission.updated", "properties": {"id": "perm-1", "response": "allow", "tool": "bash"}}})
-    assert event["type"] == "permission_resolved"
+    assert event["type"] == "permission.resolved"
+    assert event["legacy_type"] == "permission_resolved"
     assert event["permission_id"] == "perm-1"
     assert event["tool"] == "bash"
     assert event.get("decision") == "allow"
+
+
+@pytest.mark.asyncio
+async def test_permission_replied_allow_is_resolved(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    settings = Settings.from_env()
+    bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
+    event = await bridge.publish_raw_event({"payload": {"type": "permission.replied", "properties": {"id": "perm-replied", "response": "allow", "tool": "bash"}}})
+    assert event["type"] == "permission.resolved"
+    assert event["legacy_type"] == "permission_resolved"
+    assert event["permission_id"] == "perm-replied"
+    assert event["tool"] == "bash"
 
 
 @pytest.mark.asyncio
@@ -458,7 +522,8 @@ async def test_permission_updated_response_deny_is_resolved(tmp_path, monkeypatc
     settings = Settings.from_env()
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({"payload": {"type": "permission.updated", "properties": {"id": "perm-2", "response": "deny", "tool": "bash"}}})
-    assert event["type"] == "permission_resolved"
+    assert event["type"] == "permission.resolved"
+    assert event["legacy_type"] == "permission_resolved"
     assert event["permission_id"] == "perm-2"
     assert event.get("decision") == "deny"
 
@@ -470,7 +535,8 @@ async def test_permission_updated_without_status_or_response_remains_request(tmp
     settings = Settings.from_env()
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({"payload": {"type": "permission.updated", "properties": {"id": "perm-3", "tool": "bash"}}})
-    assert event["type"] == "permission_request"
+    assert event["type"] == "permission.requested"
+    assert event["legacy_type"] == "permission_request"
     assert event["permission_id"] == "perm-3"
 
 
@@ -483,7 +549,8 @@ async def test_tool_event_enriched_with_mutation_metadata(tmp_path, monkeypatch)
     (settings.adapter_state_dir / "tools-index.json").write_text(json.dumps({"tools":[{"name":"efp_github_add_comment","opencode_name":"efp_github_add_comment","legacy_name":"github_add_comment","capability_id":"efp.tool.github.add_comment","policy_tags":["github","mutation"],"requires_identity_binding":True,"risk_level":"high","mutation":True,"source_ref":"tools/github/github_add_comment.yaml"}]}), encoding="utf-8")
     bridge = OpenCodeEventBridge(settings, FakeClient(), EventBus(), SessionStore(ensure_state_dirs(settings).sessions_dir), TaskStore(ensure_state_dirs(settings).tasks_dir))
     event = await bridge.publish_raw_event({"type":"tool.start","sessionID":"oc-1","tool":"efp_github_add_comment"})
-    assert event["type"] == "tool.started"
+    assert event["type"] == "session.next.tool.called"
+    assert event["legacy_type"] == "tool.started"
     assert event["capability_id"] is None
     assert event["mutation"] is False and event["audit_event"] is False and event["requires_identity_binding"] is False
     assert event["policy_tags"] == [] and event["data"]["mutation"] is False
