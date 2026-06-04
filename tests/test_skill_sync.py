@@ -84,6 +84,31 @@ def test_generated_skill_prompt_does_not_mention_removed_external_tool_contract(
         assert required in md
 
 
+def test_invalid_frontmatter_yaml_is_warned_and_skipped(tmp_path):
+    skills=tmp_path/'skills'; out=tmp_path/'out'; st=tmp_path/'state'
+    bad=skills/'bad'; bad.mkdir(parents=True,exist_ok=True)
+    (bad/'skill.md').write_text(
+        "---\n"
+        "name: bad\n"
+        "description: Guides project patterns. Error Handling: If the pasted source input does not match.\n"
+        "---\n\n"
+        "Body\n",
+        encoding='utf-8',
+    )
+    _write_skill(skills, name="good")
+
+    with pytest.warns(UserWarning, match=r"(?s)bad.*/(?:SKILL|skill)\.md.*invalid skill frontmatter YAML.*Quote scalar values"):
+        idx=sync_skills(skills,out,st)
+
+    assert [x.opencode_name for x in idx.skills] == ["good"]
+    assert not (out/'bad').exists()
+    payload=json.loads((st/'skills-index.json').read_text(encoding='utf-8'))
+    assert len(payload["skills"]) == 1
+    warnings_text="\n".join(payload["warnings"]).replace("SKILL.md", "skill.md")
+    assert "bad/skill.md" in warnings_text
+    assert "invalid skill frontmatter YAML" in warnings_text
+
+
 def test_discovers_uppercase_SKILL_md(tmp_path):
     skills=tmp_path/'skills'; out=tmp_path/'out'; st=tmp_path/'state'
     _write_skill(skills, entry_filename="SKILL.md")

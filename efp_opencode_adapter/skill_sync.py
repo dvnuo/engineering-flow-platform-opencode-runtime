@@ -81,16 +81,32 @@ def _warn(message: str, warnings_list: list[str] | None = None) -> None:
         warnings_list.append(message)
 
 
-def _split_frontmatter(text: str):
+def _split_frontmatter(text: str, source_path: Path | None = None):
     if not text.startswith("---\n"):
         return None
     i = text.find("\n---\n", 4)
     if i == -1:
         return None
-    p = yaml.safe_load(text[4:i]) or {}
+    try:
+        p = yaml.safe_load(text[4:i]) or {}
+    except yaml.YAMLError as exc:
+        where = f"{source_path}: " if source_path is not None else ""
+        raise ValueError(
+            f"{where}invalid skill frontmatter YAML: {exc}. "
+            "Quote scalar values that contain ': ', or use a YAML block scalar."
+        ) from exc
     if not isinstance(p, dict):
-        raise ValueError("frontmatter must be a mapping")
+        where = f"{source_path}: " if source_path is not None else ""
+        raise ValueError(f"{where}frontmatter must be a mapping")
     return p, text[i + 5 :]
+
+
+def _read_skill_frontmatter(source_path: Path, warnings_list: list[str] | None = None):
+    try:
+        return _split_frontmatter(source_path.read_text(encoding="utf-8"), source_path=source_path)
+    except ValueError as exc:
+        _warn(f"skipping invalid skill asset: {exc}", warnings_list)
+        return None
 
 
 def _validate_list_field(frontmatter: dict, source_path: Path, field_name: str) -> list[str]:
@@ -139,7 +155,7 @@ def _discover_skill_files(skills_dir: Path, warnings_list: list[str] | None = No
             out.append(lower)
 
     for md in sorted(skills_dir.glob("*.md"), key=str):
-        if _split_frontmatter(md.read_text(encoding="utf-8")) is not None:
+        if _read_skill_frontmatter(md, warnings_list) is not None:
             out.append(md)
 
     return sorted(dict.fromkeys(out), key=str)
@@ -342,10 +358,12 @@ def sync_skills(
         return idx
 
     discovered = _discover_skill_files(skills_dir, warnings_list)
+    parsed: dict[Path, tuple[dict[str, Any], str]] = {}
     current: set[str] = set()
     for sp in discovered:
-        p = _split_frontmatter(sp.read_text(encoding="utf-8"))
+        p = _read_skill_frontmatter(sp, warnings_list)
         if p:
+            parsed[sp] = p
             raw = str(p[0].get("name") or _skill_fallback_name(sp, skills_dir))
             current.add(normalize_skill_name(raw, str(sp.resolve())))
 
@@ -361,10 +379,7 @@ def sync_skills(
 
     generated: set[str] = set()
     name_to_source: dict[str, Path] = {}
-    for sp in discovered:
-        p = _split_frontmatter(sp.read_text(encoding="utf-8"))
-        if p is None:
-            continue
+    for sp, p in parsed.items():
         fm, body = p
         raw = str(fm.get("name") or _skill_fallback_name(sp, skills_dir))
         name = normalize_skill_name(raw, str(sp.resolve()))
