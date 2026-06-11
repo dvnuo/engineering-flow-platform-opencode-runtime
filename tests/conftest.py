@@ -7,9 +7,10 @@ import pytest
 @pytest.fixture(autouse=True)
 def isolated_runtime_paths(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
+    state = tmp_path / "state"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
-    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path / "opencode-data"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(state / "xdg-data" / "opencode"))
     monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode" / "opencode.json"))
 
 

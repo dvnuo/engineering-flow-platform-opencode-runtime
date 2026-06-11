@@ -57,7 +57,7 @@ from .copilot_plugin_auth import CopilotTokenManager, load_copilot_plugin_creden
 from .copilot_proxy import copilot_proxy_handler
 from .path_utils import path_exists
 from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_status_payload, sanitize_profile_config_for_storage, sanitize_public_secrets
-from .runtime_env import build_runtime_env_from_config, read_runtime_env_file, write_runtime_env_file
+from .runtime_env import aws_status_from_env, build_runtime_env_from_config, read_runtime_env_file, write_runtime_env_file
 from .thinking_events import safe_preview
 from .git_cli_auth import write_git_gh_auth_assets
 from .opencode_process import OpenCodeProcessManager
@@ -90,7 +90,12 @@ GIT_GH_ENV_KEYS = {
     "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_EDITOR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
     "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
 }
-STARTUP_FALLBACK_ENV_KEYS = GIT_GH_ENV_KEYS | {"ATLASSIAN_CONFIG"}
+AWS_ENV_KEYS = {
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION",
+    "AWS_DEFAULT_OUTPUT", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
+}
+STARTUP_FALLBACK_ENV_KEYS = GIT_GH_ENV_KEYS | AWS_ENV_KEYS | {"ATLASSIAN_CONFIG"}
 
 
 def _merge_startup_env_with_process_fallback(settings: Settings, env: dict[str, str]) -> dict[str, str]:
@@ -245,6 +250,8 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     warnings.extend([item for item in env_result.warnings if item not in warnings])
     env_path = write_runtime_env_file(settings, env_result.env)
     git_auth_result = write_git_gh_auth_assets(settings, env_result.env)
+    aws_status = aws_status_from_env(env_result.env)
+    aws_configured = bool("aws" in env_result.updated_sections and aws_status.get("configured"))
     combined_updated_sections = sorted(set(updated_sections + env_result.updated_sections + atlassian_result.updated_sections))
     manager = request.app.get(OPENCODE_PROCESS_MANAGER_KEY)
     restart_performed = False
@@ -281,9 +288,9 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
         if pending_restart:
             warnings.append("opencode config patch unsupported; restart may be required")
         status, applied = ("pending_restart", False) if pending_restart else ("applied", True)
-    overlay = ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status=status, pending_restart=pending_restart, warnings=warnings, updated_sections=combined_updated_sections, last_apply_error=last_error, applied=applied, env_hash=env_result.env_hash, env_path=str(env_path), restart_performed=restart_performed, opencode_pid=opencode_pid, last_restart_at=restart_meta.get("last_restart_at") if restart_meta else None, last_restart_reason=restart_meta.get("last_restart_reason") if restart_meta else None, health_ok=health_ok, git_auth_configured=bool(git_auth_result.get("configured")), gh_host=git_auth_result.get("host"), gh_config_dir=git_auth_result.get("gh_config_dir"), git_askpass_path=git_auth_result.get("askpass_path"), gitconfig_path=git_auth_result.get("gitconfig_path"), atlassian_cli_configured=atlassian_result.configured, atlassian_config_path=atlassian_result.path, atlassian_jira_instances=atlassian_result.jira_instances, atlassian_confluence_instances=atlassian_result.confluence_instances)
+    overlay = ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status=status, pending_restart=pending_restart, warnings=warnings, updated_sections=combined_updated_sections, last_apply_error=last_error, applied=applied, env_hash=env_result.env_hash, env_path=str(env_path), restart_performed=restart_performed, opencode_pid=opencode_pid, last_restart_at=restart_meta.get("last_restart_at") if restart_meta else None, last_restart_reason=restart_meta.get("last_restart_reason") if restart_meta else None, health_ok=health_ok, git_auth_configured=bool(git_auth_result.get("configured")), gh_host=git_auth_result.get("host"), gh_config_dir=git_auth_result.get("gh_config_dir"), git_askpass_path=git_auth_result.get("askpass_path"), gitconfig_path=git_auth_result.get("gitconfig_path"), atlassian_cli_configured=atlassian_result.configured, atlassian_config_path=atlassian_result.path, atlassian_jira_instances=atlassian_result.jira_instances, atlassian_confluence_instances=atlassian_result.confluence_instances, aws_configured=aws_configured, aws_profile=aws_status.get("profile") if aws_configured else None, aws_region=aws_status.get("region") if aws_configured else None, aws_config_path=aws_status.get("config_path") if aws_configured else None, aws_credentials_path=aws_status.get("credentials_path") if aws_configured else None)
     ProfileOverlayStore(settings).save(overlay)
-    response = {"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "env_written": True, "env_hash": env_result.env_hash, "env_path": str(env_path), "updated_sections": combined_updated_sections, "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "auth_update_status": auth_update_status, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "restart_performed": restart_performed, "opencode_pid": opencode_pid, "health_ok": health_ok, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host"), "gh_config_dir": git_auth_result.get("gh_config_dir"), "git_askpass_path": git_auth_result.get("askpass_path"), "gitconfig_path": git_auth_result.get("gitconfig_path"), "atlassian_cli_configured": atlassian_result.configured, "atlassian_config_path": atlassian_result.path, "atlassian_jira_instances": atlassian_result.jira_instances, "atlassian_confluence_instances": atlassian_result.confluence_instances, "atlassian_status": atlassian_result.redacted_status, "status_endpoint": "/api/internal/runtime-profile/status"}
+    response = {"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "env_written": True, "env_hash": env_result.env_hash, "env_path": str(env_path), "updated_sections": combined_updated_sections, "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "auth_update_status": auth_update_status, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "restart_performed": restart_performed, "opencode_pid": opencode_pid, "health_ok": health_ok, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host"), "gh_config_dir": git_auth_result.get("gh_config_dir"), "git_askpass_path": git_auth_result.get("askpass_path"), "gitconfig_path": git_auth_result.get("gitconfig_path"), "atlassian_cli_configured": atlassian_result.configured, "atlassian_config_path": atlassian_result.path, "atlassian_jira_instances": atlassian_result.jira_instances, "atlassian_confluence_instances": atlassian_result.confluence_instances, "atlassian_status": atlassian_result.redacted_status, "aws_configured": aws_configured, "aws_profile": aws_status.get("profile") if aws_configured else None, "aws_region": aws_status.get("region") if aws_configured else None, "aws_config_path": aws_status.get("config_path") if aws_configured else None, "aws_credentials_path": aws_status.get("credentials_path") if aws_configured else None, "status_endpoint": "/api/internal/runtime-profile/status"}
     if restart_deferred_reason:
         response["restart_deferred_reason"] = restart_deferred_reason
     if auth_build.warning:
@@ -298,6 +305,7 @@ async def runtime_profile_status_handler(request: web.Request) -> web.Response:
     overlay = ProfileOverlayStore(settings).load()
     if not overlay:
         runtime_env = _runtime_env_for_status(settings, overlay)
+        aws_status = aws_status_from_env(runtime_env)
         git_askpass_path = runtime_env.get("GIT_ASKPASS")
         gitconfig_path = runtime_env.get("GIT_CONFIG_GLOBAL")
         gh_host = runtime_env.get("GH_HOST") or "github.com"
@@ -319,6 +327,11 @@ async def runtime_profile_status_handler(request: web.Request) -> web.Response:
             "gh_config_dir": runtime_env.get("GH_CONFIG_DIR"),
             "git_askpass_path": git_askpass_path,
             "gitconfig_path": gitconfig_path,
+            "aws_configured": bool(aws_status.get("configured")),
+            "aws_profile": aws_status.get("profile"),
+            "aws_region": aws_status.get("region"),
+            "aws_config_path": aws_status.get("config_path"),
+            "aws_credentials_path": aws_status.get("credentials_path"),
         })
 
     return web.json_response(payload)
@@ -349,6 +362,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
     github_cfg = profile_cfg.get("github") if isinstance(profile_cfg.get("github"), dict) else {}
     proxy_cfg = profile_cfg.get("proxy") if isinstance(profile_cfg.get("proxy"), dict) else {}
     runtime_env = _runtime_env_for_status(settings, overlay)
+    aws_status = aws_status_from_env(runtime_env)
     env_token_present = bool(runtime_env.get("GH_TOKEN") or runtime_env.get("GITHUB_TOKEN") or runtime_env.get("GH_ENTERPRISE_TOKEN") or runtime_env.get("GITHUB_ENTERPRISE_TOKEN"))
     config_token_present = bool(github_cfg.get("api_token") or github_cfg.get("token") or github_cfg.get("access_token"))
     gh_host = github_cfg.get("host") or runtime_env.get("GH_HOST") or "github.com"
@@ -386,6 +400,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
                 "github": {"enabled": bool(github_cfg) or env_token_present, "base_url": github_cfg.get("api_base_url") or runtime_env.get("GITHUB_API_BASE_URL") or "https://api.github.com", "host": gh_host, "token_present": config_token_present or env_token_present, "git_auth_configured": git_auth_configured, "gh_config_dir": runtime_env.get("GH_CONFIG_DIR"), "git_askpass_present": git_askpass_present, "gitconfig_present": gitconfig_present},
                 "copilot": {"enabled": bool(provider == "github-copilot" or copilot_credential_present or copilot_base_url_present), "credential_present": copilot_credential_present, "token_cached": bool(copilot_snapshot.get("token_cached")), "base_url_present": copilot_base_url_present, "expires_at_present": bool(copilot_snapshot.get("expires_at_present"))},
                 "proxy": {"enabled": bool(proxy_cfg.get("enabled")), "url_present": bool(proxy_cfg.get("url")), "password_present": bool(proxy_cfg.get("password"))},
+                "aws": {"enabled": bool(aws_status.get("configured")), "profile": aws_status.get("profile"), "region": aws_status.get("region"), "access_key_present": bool(aws_status.get("access_key_present")), "session_token_present": bool(aws_status.get("session_token_present")), "config_file_present": bool(aws_status.get("config_file_present")), "config_path": aws_status.get("config_path"), "credentials_file_present": bool(aws_status.get("credentials_file_present")), "credentials_path": aws_status.get("credentials_path")},
                 "env_file": {"present": bool(overlay and overlay.env_path), "path": overlay.env_path if overlay else None, "hash": overlay.env_hash if overlay else None},
             },
         }

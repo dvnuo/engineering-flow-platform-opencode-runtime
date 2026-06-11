@@ -27,16 +27,47 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
         "github": {"api_token": "t", "api_base_url": "https://api.github.com"},
         "jira": {"instances": [{"enabled": True, "url": "https://j/", "username": "u", "token": "x", "project": "P"}]},
         "confluence": {"instances": [{"enabled": True, "url": "https://c/", "token": "y"}]},
+        "aws": {
+            "enabled": True,
+            "profile": "prod",
+            "region": "us-east-1",
+            "output": "json",
+            "access_key_id": "AKIA_TEST",
+            "secret_access_key": "aws-secret",
+            "session_token": "aws-session",
+        },
         "proxy": {"enabled": True, "url": "http://h:1", "username": "a", "password": "b"},
         "git": {"author_name": "n", "author_email": "e@x"},
         "debug": {"enabled": True, "log_level": "DEBUG"},
     }
     r = build_runtime_env_from_config(s, cfg)
     assert r.env["JIRA_EMAIL"] == "u" and r.env["JIRA_API_TOKEN"] == "x" and "JIRA_TOKEN" not in r.env
+    assert r.env["AWS_PROFILE"] == "prod"
+    assert r.env["AWS_REGION"] == "us-east-1"
+    assert r.env["AWS_ACCESS_KEY_ID"] == "AKIA_TEST"
+    assert r.env["AWS_SECRET_ACCESS_KEY"] == "aws-secret"
+    assert r.env["AWS_SESSION_TOKEN"] == "aws-session"
+    aws_config = Path(r.env["AWS_CONFIG_FILE"])
+    aws_credentials = Path(r.env["AWS_SHARED_CREDENTIALS_FILE"])
+    assert aws_config.exists() and aws_credentials.exists()
+    if os.name != "nt":
+        assert oct(os.stat(aws_config).st_mode & 0o777) == "0o600"
+        assert oct(os.stat(aws_credentials).st_mode & 0o777) == "0o600"
+    assert "[profile prod]" in aws_config.read_text(encoding="utf-8")
+    assert "region = us-east-1" in aws_config.read_text(encoding="utf-8")
+    credentials_text = aws_credentials.read_text(encoding="utf-8")
+    assert "[prod]" in credentials_text
+    assert "aws_access_key_id = AKIA_TEST" in credentials_text
     p = write_runtime_env_file(s, r.env)
-    assert oct(os.stat(p).st_mode & 0o777) == "0o600"
-    assert redact_env_for_status(r.env)["GITHUB_TOKEN"] is True
-    assert redact_env_for_status(r.env)["HTTPS_PROXY"] == "http://[redacted]@h:1"
+    if os.name != "nt":
+        assert oct(os.stat(p).st_mode & 0o777) == "0o600"
+    redacted = redact_env_for_status(r.env)
+    assert redacted["GITHUB_TOKEN"] is True
+    assert redacted["HTTPS_PROXY"] == "http://[redacted]@h:1"
+    assert redacted["AWS_ACCESS_KEY_ID"] is True
+    assert redacted["AWS_SECRET_ACCESS_KEY"] is True
+    assert redacted["AWS_SESSION_TOKEN"] is True
+    assert "aws-secret" not in json.dumps(redacted)
 
 
 def test_read_runtime_env_file_treats_permission_denied_path_as_missing(tmp_path, monkeypatch):
@@ -59,9 +90,10 @@ def test_runtime_env_respects_disabled_external_sections(tmp_path, monkeypatch):
         "github": {"enabled": False, "api_token": "t"},
         "jira": {"enabled": False, "instances": [{"url": "https://j", "token": "x"}]},
         "confluence": {"enabled": False, "instances": [{"url": "https://c", "token": "y"}]},
+        "aws": {"enabled": False, "access_key_id": "AKIA_TEST", "secret_access_key": "aws-secret", "region": "us-east-1"},
     }
     env = build_runtime_env_from_config(s, cfg).env
-    for key in ("GITHUB_TOKEN", "EFP_GITHUB_CONFIG_JSON", "JIRA_BASE_URL", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_BASE_URL", "EFP_CONFLUENCE_INSTANCES_JSON"):
+    for key in ("GITHUB_TOKEN", "EFP_GITHUB_CONFIG_JSON", "JIRA_BASE_URL", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_BASE_URL", "EFP_CONFLUENCE_INSTANCES_JSON", "AWS_ACCESS_KEY_ID", "AWS_CONFIG_FILE"):
         assert key not in env
 
 
@@ -96,6 +128,29 @@ def test_empty_config_does_not_emit_external_json(tmp_path, monkeypatch):
     assert "GITHUB_API_BASE_URL" not in env
     assert "EFP_JIRA_INSTANCES_JSON" not in env
     assert "EFP_CONFLUENCE_INSTANCES_JSON" not in env
+    assert "AWS_CONFIG_FILE" not in env
+    assert "AWS_ACCESS_KEY_ID" not in env
+
+
+def test_runtime_env_aws_aliases_and_redacted_placeholders(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    env = build_runtime_env_from_config(s, {
+        "aws": {
+            "enabled": True,
+            "profile_name": "ops",
+            "default_region": "ap-southeast-1",
+            "aws_access_key_id": "***REDACTED***",
+            "aws_secret_access_key": "[redacted]",
+            "aws_session_token": "redacted",
+        }
+    }).env
+    assert env["AWS_PROFILE"] == "ops"
+    assert env["AWS_REGION"] == "ap-southeast-1"
+    assert env["AWS_CONFIG_FILE"]
+    assert "AWS_SHARED_CREDENTIALS_FILE" not in env
+    assert "AWS_ACCESS_KEY_ID" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "AWS_SESSION_TOKEN" not in env
 
 
 def test_runtime_env_sets_java_maven_defaults(tmp_path, monkeypatch):
@@ -270,6 +325,7 @@ def test_runtime_env_maps_opencode_xdg_data_home_to_configured_data_dir(tmp_path
 
 
 def test_ensure_opencode_xdg_data_home_rejects_conflicting_regular_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path / "opencode-data"))
     s = _settings(tmp_path, monkeypatch)
     xdg_home = opencode_xdg_data_home(s)
     xdg_home.mkdir(parents=True)

@@ -5,6 +5,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from efp_opencode_adapter.copilot_plugin_auth import CopilotSourceCredential, save_copilot_plugin_credential
 from efp_opencode_adapter.profile_store import ProfileOverlay, ProfileOverlayStore
+from efp_opencode_adapter.runtime_env import write_runtime_env_file
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 
@@ -18,7 +19,7 @@ class FakeClient:
 async def test_effective_config_profile_and_copilot_integration_are_safe(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     state = tmp_path / "state"
-    data = tmp_path / "data"
+    data = state / "xdg-data" / "opencode"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(data))
@@ -57,7 +58,7 @@ async def test_effective_config_profile_and_copilot_integration_are_safe(tmp_pat
 async def test_effective_config_does_not_expose_external_tools_key(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     state = tmp_path / "state"
-    data = tmp_path / "data"
+    data = state / "xdg-data" / "opencode"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(data))
@@ -65,18 +66,37 @@ async def test_effective_config_does_not_expose_external_tools_key(tmp_path, mon
     (workspace / ".opencode").mkdir(parents=True, exist_ok=True)
     (workspace / ".opencode/opencode.json").write_text(json.dumps({"agent": {"efp-main": {"model": "github-copilot/gpt-x"}}}), encoding="utf-8")
     settings = Settings.from_env()
-    ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id="rp-2", revision=4, config={"github": {"api_token": "SECRET"}, "proxy": {"enabled": True, "password": "SECRET", "url": "http://proxy.local"}}, applied_at="2026-01-01T00:00:00Z", generated_config_hash="h2", status="applied", pending_restart=False, warnings=[], updated_sections=["llm"], last_apply_error=None, applied=True, env_path="/tmp/runtime.env", env_hash="h3"))
+    (state / "aws").mkdir(parents=True, exist_ok=True)
+    (state / "aws/config").write_text("[profile prod]\nregion = us-east-1\n", encoding="utf-8")
+    (state / "aws/credentials").write_text("[prod]\naws_secret_access_key = aws-secret\n", encoding="utf-8")
+    env_path = write_runtime_env_file(settings, {
+        "AWS_PROFILE": "prod",
+        "AWS_REGION": "us-east-1",
+        "AWS_ACCESS_KEY_ID": "AKIA_TEST",
+        "AWS_SECRET_ACCESS_KEY": "aws-secret",
+        "AWS_CONFIG_FILE": str(state / "aws/config"),
+        "AWS_SHARED_CREDENTIALS_FILE": str(state / "aws/credentials"),
+    })
+    ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id="rp-2", revision=4, config={"github": {"api_token": "SECRET"}, "proxy": {"enabled": True, "password": "SECRET", "url": "http://proxy.local"}, "aws": {"enabled": True, "access_key_id": "AKIA_TEST", "secret_access_key": "aws-secret"}}, applied_at="2026-01-01T00:00:00Z", generated_config_hash="h2", status="applied", pending_restart=False, warnings=[], updated_sections=["llm"], last_apply_error=None, applied=True, env_path=str(env_path), env_hash="h3"))
 
     app = create_app(settings, opencode_client=FakeClient())
     c = TestClient(TestServer(app)); await c.start_server()
     body = await (await c.get("/api/internal/opencode-effective-config")).json()
     assert "external_tools" not in body
     assert "runtime_integrations" in body
-    assert set(body["runtime_integrations"].keys()) == {"github", "copilot", "proxy", "env_file"}
+    assert set(body["runtime_integrations"].keys()) == {"github", "copilot", "proxy", "aws", "env_file"}
     assert body["runtime_integrations"]["github"]["enabled"] is True
     assert set(body["runtime_integrations"]["copilot"].keys()) == {"enabled", "credential_present", "token_cached", "base_url_present", "expires_at_present"}
     assert all(isinstance(value, bool) for value in body["runtime_integrations"]["copilot"].values())
     assert body["runtime_integrations"]["proxy"]["enabled"] is True
+    assert body["runtime_integrations"]["aws"]["enabled"] is True
+    assert body["runtime_integrations"]["aws"]["profile"] == "prod"
+    assert body["runtime_integrations"]["aws"]["region"] == "us-east-1"
+    assert body["runtime_integrations"]["aws"]["access_key_present"] is True
+    assert body["runtime_integrations"]["aws"]["session_token_present"] is False
+    assert body["runtime_integrations"]["aws"]["config_file_present"] is True
+    assert body["runtime_integrations"]["aws"]["credentials_file_present"] is True
     assert body["runtime_integrations"]["env_file"]["present"] is True
     assert "SECRET" not in json.dumps(body)
+    assert "aws-secret" not in json.dumps(body)
     await c.close()

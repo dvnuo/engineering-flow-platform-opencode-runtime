@@ -21,7 +21,8 @@ RUN set -eux; \
   apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    gnupg; \
+    gnupg \
+    unzip; \
   mkdir -p /etc/apt/keyrings; \
   curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
     | gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
@@ -63,6 +64,13 @@ RUN set -eux; \
   npm --version; \
   git --version; \
   gh --version; \
+  AWS_CLI_ARCH="$(dpkg --print-architecture)"; \
+  case "$AWS_CLI_ARCH" in amd64) AWS_CLI_ARCH="x86_64" ;; arm64) AWS_CLI_ARCH="aarch64" ;; *) echo "Unsupported AWS CLI architecture: $AWS_CLI_ARCH" >&2; exit 1 ;; esac; \
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_CLI_ARCH}.zip" -o /tmp/awscliv2.zip; \
+  unzip -q /tmp/awscliv2.zip -d /tmp; \
+  /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli; \
+  rm -rf /tmp/aws /tmp/awscliv2.zip; \
+  aws --version; \
   test "$(npm root -g)" = "/usr/local/lib/node_modules"; \
   rm -rf /var/lib/apt/lists/*
 
