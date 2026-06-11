@@ -75,13 +75,14 @@ esac
 
     author_name = _sanitize_git_config_value(env.get("GIT_AUTHOR_NAME"), username or "EFP Agent")
     author_email = _sanitize_git_config_value(env.get("GIT_AUTHOR_EMAIL"), "efp@example.invalid")
+    credential_store_config_path = str(credential_store_path).replace("\\", "/")
 
     gitconfig = f"""[user]
 \tname = {author_name}
 \temail = {author_email}
 
 [credential]
-\thelper = store --file={credential_store_path}
+\thelper = store --file={credential_store_config_path}
 
 [safe]
 \tdirectory = *

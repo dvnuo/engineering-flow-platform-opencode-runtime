@@ -9,7 +9,7 @@ from .opencode_config import build_opencode_config, normalize_opencode_provider_
 from .opencode_auth import build_opencode_auth_from_runtime_config, clear_opencode_auth_provider
 from .copilot_plugin_auth import redact_copilot_secrets, save_or_clear_copilot_plugin_credential
 from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_profile_config_for_storage
-from .runtime_env import build_runtime_env_from_config, write_runtime_env_file
+from .runtime_env import aws_status_from_env, build_runtime_env_from_config, write_runtime_env_file
 from .git_cli_auth import write_git_gh_auth_assets
 from .settings import Settings
 
@@ -97,6 +97,8 @@ async def _run(workspace_dir: Path) -> int:
     warnings.extend([item for item in env_result.warnings if item not in warnings])
     env_path = write_runtime_env_file(settings, env_result.env)
     git_auth_result = write_git_gh_auth_assets(settings, env_result.env)
+    aws_status = aws_status_from_env(env_result.env)
+    aws_configured = bool("aws" in env_result.updated_sections and aws_status.get("configured"))
     combined_updated_sections = sorted(set(updated_sections + env_result.updated_sections + atlassian_result.updated_sections))
     ProfileOverlayStore(settings).save(ProfileOverlay(
         runtime_profile_id=runtime_profile_id,
@@ -121,9 +123,14 @@ async def _run(workspace_dir: Path) -> int:
         atlassian_config_path=atlassian_result.path,
         atlassian_jira_instances=atlassian_result.jira_instances,
         atlassian_confluence_instances=atlassian_result.confluence_instances,
+        aws_configured=aws_configured,
+        aws_profile=aws_status.get("profile") if aws_configured else None,
+        aws_region=aws_status.get("region") if aws_configured else None,
+        aws_config_path=aws_status.get("config_path") if aws_configured else None,
+        aws_credentials_path=aws_status.get("credentials_path") if aws_configured else None,
     ))
 
-    out = {"env_written": True, "env_hash": env_result.env_hash, "auth_written": auth_written, "copilot_credential_present": copilot_credential_result.credential_present, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host"), "atlassian_cli_configured": atlassian_result.configured, "atlassian_config_path": atlassian_result.path, "atlassian_jira_instances": atlassian_result.jira_instances, "atlassian_confluence_instances": atlassian_result.confluence_instances, "atlassian_status": atlassian_result.redacted_status}
+    out = {"env_written": True, "env_hash": env_result.env_hash, "auth_written": auth_written, "copilot_credential_present": copilot_credential_result.credential_present, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host"), "atlassian_cli_configured": atlassian_result.configured, "atlassian_config_path": atlassian_result.path, "atlassian_jira_instances": atlassian_result.jira_instances, "atlassian_confluence_instances": atlassian_result.confluence_instances, "atlassian_status": atlassian_result.redacted_status, "aws_configured": aws_configured, "aws_profile": aws_status.get("profile") if aws_configured else None, "aws_region": aws_status.get("region") if aws_configured else None, "aws_config_path": aws_status.get("config_path") if aws_configured else None, "aws_credentials_path": aws_status.get("credentials_path") if aws_configured else None}
     if auth_build.warning:
         out["auth_warning"] = auth_build.warning
     print(json.dumps(out))

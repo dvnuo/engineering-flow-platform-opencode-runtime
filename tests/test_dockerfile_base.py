@@ -75,6 +75,18 @@ def test_dockerfile_installs_java_maven_runtime_tools():
         assert token not in text
 
 
+def test_dockerfile_installs_aws_cli_v2():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "Dockerfile").read_text(encoding="utf-8")
+    for token in [
+        "unzip",
+        "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_CLI_ARCH}.zip",
+        "/tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli",
+        "aws --version",
+    ]:
+        assert token in text
+
+
 def test_dockerfile_installs_only_opencode_runtime_package():
     root = Path(__file__).resolve().parents[1]
     text = (root / "Dockerfile").read_text(encoding="utf-8")

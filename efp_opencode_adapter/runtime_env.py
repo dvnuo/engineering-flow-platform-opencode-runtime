@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import configparser
 import json
 import os
 import re
@@ -18,6 +19,7 @@ MANAGED_EXTERNAL_ENV_KEYS = {
     "ATLASSIAN_CONFIG",
     "JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_PASSWORD", "JIRA_TOKEN", "JIRA_PROJECT_KEY", "EFP_JIRA_INSTANCES_JSON",
     "CONFLUENCE_BASE_URL", "CONFLUENCE_USERNAME", "CONFLUENCE_EMAIL", "CONFLUENCE_API_TOKEN", "CONFLUENCE_PASSWORD", "CONFLUENCE_TOKEN", "CONFLUENCE_SPACE_KEY", "EFP_CONFLUENCE_INSTANCES_JSON",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_DEFAULT_OUTPUT", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
     "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
     "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "GH_PROMPT_DISABLED", "GH_REPO",
@@ -94,6 +96,73 @@ def _github_host_from_urls(*values: object) -> str:
 def _is_github_dotcom_like(host: str) -> bool:
     value = str(host or "").strip().lower()
     return value == "github.com" or value.endswith(".ghe.com")
+
+
+def _aws_config_section_name(profile: str) -> str:
+    value = str(profile or "").strip() or "default"
+    return "default" if value == "default" else f"profile {value}"
+
+
+def _write_ini_section(path: Path, section: str, values: dict[str, str]) -> None:
+    parser = configparser.RawConfigParser()
+    parser.optionxform = str
+    parser.add_section(section)
+    for key, value in values.items():
+        text = str(value or "").strip()
+        if text:
+            parser.set(section, key, text)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        parser.write(handle)
+    path.chmod(0o600)
+
+
+def _write_aws_cli_files(settings: Settings, *, profile: str, region: str, output: str, access_key_id: str, secret_access_key: str, session_token: str) -> tuple[Path, Path | None]:
+    aws_dir = settings.adapter_state_dir / "aws"
+    config_path = aws_dir / "config"
+    credentials_path = aws_dir / "credentials"
+    config_values: dict[str, str] = {}
+    if region:
+        config_values["region"] = region
+    if output:
+        config_values["output"] = output
+    _write_ini_section(config_path, _aws_config_section_name(profile), config_values)
+
+    if not access_key_id and not secret_access_key and not session_token:
+        return config_path, None
+
+    credential_values: dict[str, str] = {}
+    if access_key_id:
+        credential_values["aws_access_key_id"] = access_key_id
+    if secret_access_key:
+        credential_values["aws_secret_access_key"] = secret_access_key
+    if session_token:
+        credential_values["aws_session_token"] = session_token
+    _write_ini_section(credentials_path, profile, credential_values)
+    return config_path, credentials_path
+
+
+def aws_status_from_env(env: dict[str, str]) -> dict[str, object]:
+    config_path = env.get("AWS_CONFIG_FILE")
+    credentials_path = env.get("AWS_SHARED_CREDENTIALS_FILE")
+    access_key_present = bool(env.get("AWS_ACCESS_KEY_ID"))
+    secret_access_key_present = bool(env.get("AWS_SECRET_ACCESS_KEY"))
+    session_token_present = bool(env.get("AWS_SESSION_TOKEN"))
+    profile = env.get("AWS_PROFILE") or env.get("AWS_DEFAULT_PROFILE")
+    region = env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION")
+    return {
+        "configured": bool(profile or region or config_path or credentials_path or access_key_present or secret_access_key_present),
+        "profile": profile,
+        "region": region,
+        "output": env.get("AWS_DEFAULT_OUTPUT"),
+        "access_key_present": access_key_present,
+        "secret_access_key_present": secret_access_key_present,
+        "session_token_present": session_token_present,
+        "config_file_present": bool(config_path and path_exists(Path(config_path))),
+        "config_path": config_path,
+        "credentials_file_present": bool(credentials_path and path_exists(Path(credentials_path))),
+        "credentials_path": credentials_path,
+    }
 
 
 @dataclass(frozen=True)
@@ -334,6 +403,45 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
 
     _apply_instance("jira", "JIRA", "project")
     _apply_instance("confluence", "CONFLUENCE", "space")
+
+    aws = cfg.get("aws") if isinstance(cfg.get("aws"), dict) else {}
+    aws_section_present = isinstance(cfg.get("aws"), dict)
+    aws_enabled = aws_section_present and _section_enabled(aws)
+    if aws_enabled:
+        aws_profile = _first_text(aws.get("profile"), aws.get("profile_name"), os.getenv("AWS_PROFILE"), os.getenv("AWS_DEFAULT_PROFILE"), default="default")
+        aws_region = _first_text(aws.get("region"), aws.get("default_region"), os.getenv("AWS_REGION"), os.getenv("AWS_DEFAULT_REGION"))
+        aws_output = _first_text(aws.get("output"), os.getenv("AWS_DEFAULT_OUTPUT"), default="json")
+        aws_access_key_id = _first_clean_secret(aws.get("access_key_id"), aws.get("aws_access_key_id"), os.getenv("AWS_ACCESS_KEY_ID"))
+        aws_secret_access_key = _first_clean_secret(aws.get("secret_access_key"), aws.get("aws_secret_access_key"), os.getenv("AWS_SECRET_ACCESS_KEY"))
+        aws_session_token = _first_clean_secret(aws.get("session_token"), aws.get("aws_session_token"), os.getenv("AWS_SESSION_TOKEN"))
+        if bool(aws_access_key_id) != bool(aws_secret_access_key):
+            warnings.append("aws enabled but access_key_id and secret_access_key must be provided together")
+        if any((aws_profile, aws_region, aws_output, aws_access_key_id, aws_secret_access_key, aws_session_token)):
+            aws_config_path, aws_credentials_path = _write_aws_cli_files(
+                settings,
+                profile=aws_profile,
+                region=aws_region,
+                output=aws_output,
+                access_key_id=aws_access_key_id,
+                secret_access_key=aws_secret_access_key,
+                session_token=aws_session_token,
+            )
+            env["AWS_PROFILE"] = aws_profile
+            env["AWS_DEFAULT_PROFILE"] = aws_profile
+            env["AWS_CONFIG_FILE"] = str(aws_config_path)
+            if aws_credentials_path is not None:
+                env["AWS_SHARED_CREDENTIALS_FILE"] = str(aws_credentials_path)
+            if aws_region:
+                env["AWS_REGION"] = aws_region
+                env["AWS_DEFAULT_REGION"] = aws_region
+            if aws_output:
+                env["AWS_DEFAULT_OUTPUT"] = aws_output
+            if aws_access_key_id and aws_secret_access_key:
+                env["AWS_ACCESS_KEY_ID"] = aws_access_key_id
+                env["AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key
+            if aws_session_token:
+                env["AWS_SESSION_TOKEN"] = aws_session_token
+            updated.append("aws")
 
     git = cfg.get("git") if isinstance(cfg.get("git"), dict) else {}
     git_user = git.get("user") if isinstance(git.get("user"), dict) else {}

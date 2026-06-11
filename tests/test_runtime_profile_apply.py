@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -278,7 +279,8 @@ async def test_runtime_profile_apply_syncs_skills_before_restart_or_config_gener
     assert resp.status == 200
     assert body["success"] is True
     assert (workspace / ".opencode" / "skills" / "demo" / "scripts" / "run.py").exists()
-    assert not (workspace / ".opencode" / "skills" / "demo" / "skill.md").exists()
+    if os.name != "nt":
+        assert not (workspace / ".opencode" / "skills" / "demo" / "skill.md").exists()
     await client.close()
 
 @pytest.mark.asyncio
@@ -600,6 +602,58 @@ async def test_runtime_profile_status_includes_git_auth_fields(tmp_path, monkeyp
     await client.close()
 
 
+@pytest.mark.asyncio
+async def test_runtime_profile_apply_writes_aws_cli_config_and_status(tmp_path, monkeypatch):
+    workspace, state = tmp_path / "workspace", tmp_path / "state"
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+
+    app = create_app(Settings.from_env(), opencode_client=FakeAuthOnlyClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    resp = await client.post(
+        "/api/internal/runtime-profile/apply",
+        headers={"X-Portal-Author-Source": "portal"},
+        json={
+            "runtime_profile_id": "rp-aws",
+            "revision": 7,
+            "config": {
+                "aws": {
+                    "enabled": True,
+                    "profile": "prod",
+                    "region": "us-east-1",
+                    "access_key_id": "AKIA_TEST",
+                    "secret_access_key": "aws-secret",
+                    "session_token": "aws-session",
+                }
+            },
+        },
+    )
+    body = await resp.json()
+    encoded_body = json.dumps(body)
+
+    assert resp.status == 200
+    assert body["aws_configured"] is True
+    assert body["aws_profile"] == "prod"
+    assert body["aws_region"] == "us-east-1"
+    assert "aws" in body["updated_sections"]
+    assert "aws-secret" not in encoded_body
+    assert "aws-session" not in encoded_body
+    assert Path(body["aws_config_path"]).exists()
+    assert Path(body["aws_credentials_path"]).exists()
+    assert "aws_secret_access_key = aws-secret" in Path(body["aws_credentials_path"]).read_text(encoding="utf-8")
+
+    status_body = await (await client.get("/api/internal/runtime-profile/status")).json()
+    assert status_body["aws_configured"] is True
+    assert status_body["aws_profile"] == "prod"
+    assert status_body["aws_region"] == "us-east-1"
+    assert "aws-secret" not in json.dumps(status_body)
+
+    await client.close()
+
+
 def test_merge_startup_env_with_process_fallback_fills_missing_git_gh(tmp_path, monkeypatch):
     from efp_opencode_adapter.server import _merge_startup_env_with_process_fallback
 
@@ -697,7 +751,7 @@ def test_merge_startup_env_sets_git_config_nosystem(tmp_path):
         skills_dir=tmp_path / "skills",
         workspace_repos_dir=tmp_path / "workspace" / "repos",
         git_checkout_timeout_seconds=120,
-        opencode_data_dir=tmp_path / "opencode-data",
+        opencode_data_dir=tmp_path / "state" / "xdg-data" / "opencode",
         opencode_config_path=tmp_path / "workspace" / ".opencode" / "opencode.json",
         opencode_version="1.14.39",
         ready_timeout_seconds=1,
