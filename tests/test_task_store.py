@@ -10,10 +10,13 @@ def _record(task_id='t1'):
 def test_save_get_reload_append_update(tmp_path):
     store = TaskStore(tmp_path)
     store.save(_record())
+    store.save(_record('t2'))
+    store.update('t2', status='success', output_payload={'summary': 'ok'})
     assert (tmp_path / 't1.json').exists()
     assert store.get('t1').task_type == 'generic_agent_task'
     store2 = TaskStore(tmp_path)
     assert store2.get('t1').request_id == 'r1'
+    assert [record.task_id for record in store2.list_active()] == ['t1']
     store2.append_event('t1', {'type': 'task.accepted'})
     assert len(store2.get('t1').runtime_events) == 1
     store2.update('t1', status='success', output_payload={'summary': 'ok'})

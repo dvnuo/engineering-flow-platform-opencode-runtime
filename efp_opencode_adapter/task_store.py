@@ -100,3 +100,6 @@ class TaskStore:
             except Exception:
                 continue
         return records
+
+    def list_active(self) -> list[TaskRecord]:
+        return [record for record in self.list_all() if record.status in {"accepted", "running"}]
