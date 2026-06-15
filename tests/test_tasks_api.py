@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from efp_opencode_adapter.task_store import TaskRecord, utc_now_iso
-from efp_opencode_adapter.tasks_api import _assistant_text_from_event, _assistant_text_from_messages, _permission_event_delta, cleanup_task_background_tasks
+from efp_opencode_adapter.tasks_api import _assistant_text_from_event, _assistant_text_from_messages, _permission_event_delta, cleanup_task_background_tasks, resume_active_task_collectors
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -236,8 +236,8 @@ async def test_permission_replied_removes_pending(tmp_path, monkeypatch):
         {"directory": "/workspace", "payload": {"type": "permission.replied", "properties": {"permissionID": "perm-1", "sessionID": sid, "response": "allow"}}},
     ]
     p = await _wait_terminal(c, 'treply', tries=120)
-    assert p['status'] == 'blocked'
-    assert p['output_payload']['error_code'] == 'task_completion_timeout'
+    assert p['status'] == 'running'
+    assert p['output_payload']['state_code'] == 'task_completion_window_elapsed'
     assert not p['output_payload'].get('pending_permission_ids')
     await c.close()
 
@@ -428,8 +428,8 @@ async def test_message_part_wrong_parent_does_not_complete_task(tmp_path, monkey
     }
     fake.stream_events = [{"directory": "/workspace", "payload": {"type": "message.part.updated", "properties": {"part": {"sessionID": sid, "messageID": "assistant-other", "type": "text", "text": '{"status":"success","summary":"partial"}'}}}}]
     p = await _wait_terminal(c, 'twrongparent', tries=120)
-    assert p['status'] == 'blocked'
-    assert p['output_payload']['error_code'] == 'task_completion_timeout'
+    assert p['status'] == 'running'
+    assert p['output_payload']['state_code'] == 'task_completion_window_elapsed'
     await c.close()
 
 
@@ -471,11 +471,11 @@ async def test_tasks_special_cases(tmp_path, monkeypatch):
     c = TestClient(TestServer(app)); await c.start_server()
     await c.post('/api/tasks/execute', json={'task_id': 't2', 'task_type': 'generic_agent_task', 'input_payload': {}, 'metadata': {}})
     p = await _wait_terminal(c, 't2')
-    assert p['status'] == 'blocked'
+    assert p['status'] == 'running'
     assert p['output_payload']['completion_state'] == 'incomplete'
     assert p['output_payload']['incomplete_reason'] == 'ambiguous_progress_text'
     assert p['output_payload']['progress_preview'] == 'not-json completion'
-    assert p['output_payload']['error_code'] == 'task_completion_timeout'
+    assert 'error_code' not in p['output_payload']
 
     fake2 = FakeTaskOpenCodeClient(final_text='{"status":"error","error_code":"superseded_by_new_head_sha","summary":"stale"}')
     app2 = create_app(Settings.from_env(), opencode_client=fake2)
@@ -505,6 +505,46 @@ async def test_cleanup_task_background_tasks_uses_appkey_and_cancels_tasks():
     await cleanup_task_background_tasks(app)
     assert sleeper.done()
     assert app[TASK_BACKGROUND_TASKS_KEY] == set()
+
+
+@pytest.mark.asyncio
+async def test_resume_active_task_collectors_schedules_persisted_running_once(tmp_path, monkeypatch):
+    from efp_opencode_adapter.app_keys import TASK_BACKGROUND_TASKS_KEY, TASK_STORE_KEY
+
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    monkeypatch.setenv('EFP_TASK_COMPLETION_TIMEOUT_SECONDS', '60')
+    fake = FakeTaskOpenCodeClient(no_assistant=True)
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    store = app[TASK_STORE_KEY]
+    store.save(
+        TaskRecord(
+            task_id='tresume',
+            task_type='generic_agent_task',
+            request_id='r-resume',
+            status='running',
+            portal_session_id='portal-resume',
+            opencode_session_id='opencode-resume',
+            input_payload={},
+            metadata={},
+            output_payload={},
+            artifacts={},
+            runtime_events=[],
+            error=None,
+            created_at=utc_now_iso(),
+            started_at=utc_now_iso(),
+            opencode_message_id='msg-resume',
+            opencode_prompt_id='msg-resume',
+        )
+    )
+
+    first = resume_active_task_collectors(app)
+    second = resume_active_task_collectors(app)
+
+    assert first == 1
+    assert second == 0
+    assert len(app[TASK_BACKGROUND_TASKS_KEY]) == 1
+    await cleanup_task_background_tasks(app)
+
 
 @pytest.mark.asyncio
 async def test_testclient_close_cancels_pending_task_collectors(tmp_path, monkeypatch):

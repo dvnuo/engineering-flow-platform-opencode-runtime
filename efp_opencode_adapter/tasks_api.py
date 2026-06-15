@@ -467,10 +467,28 @@ async def _mark_dispatch_error(app: web.Application, task_id: str, *, task_type:
     return store.save(record)
 
 
-def schedule_task_collector(app: web.Application, task_id: str) -> None:
-    bg = asyncio.create_task(collect_task_completion(app, task_id))
-    app[TASK_BACKGROUND_TASKS_KEY].add(bg)
-    bg.add_done_callback(app[TASK_BACKGROUND_TASKS_KEY].discard)
+def schedule_task_collector(app: web.Application, task_id: str) -> bool:
+    task_set = app[TASK_BACKGROUND_TASKS_KEY]
+    collector_name = f"efp-task-collector:{task_id}"
+    for existing in list(task_set):
+        if existing.done():
+            task_set.discard(existing)
+            continue
+        if getattr(existing, "get_name", lambda: "")() == collector_name:
+            return False
+    bg = asyncio.create_task(collect_task_completion(app, task_id), name=collector_name)
+    task_set.add(bg)
+    bg.add_done_callback(task_set.discard)
+    return True
+
+
+def resume_active_task_collectors(app: web.Application) -> int:
+    store: TaskStore = app[TASK_STORE_KEY]
+    resumed = 0
+    for record in store.list_active():
+        if schedule_task_collector(app, record.task_id):
+            resumed += 1
+    return resumed
 
 
 async def _try_read_completion_from_messages(record: TaskRecord, client: Any) -> str | None:
@@ -520,71 +538,79 @@ async def _try_read_completion_from_events(app: web.Application, record: TaskRec
 
 
 async def collect_task_completion(app: web.Application, task_id: str) -> None:
-    timeout = float(os.getenv("EFP_TASK_COMPLETION_TIMEOUT_SECONDS", "900"))
+    timeout = max(0.01, float(os.getenv("EFP_TASK_COMPLETION_TIMEOUT_SECONDS", "900")))
     poll = float(os.getenv("EFP_TASK_COMPLETION_POLL_SECONDS", "1.0"))
-    deadline = time.monotonic() + timeout
     store: TaskStore = app[TASK_STORE_KEY]
     client = app[OPENCODE_CLIENT_KEY]
     try:
-        while time.monotonic() < deadline:
+        while True:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                record = store.get(task_id)
+                if record is None or record.status in TERMINAL:
+                    return
+
+                remaining = max(0.05, min(1.0, deadline - time.monotonic()))
+                event_text, observed = await _try_read_completion_from_events(app, record, remaining)
+                pending = list(record.pending_permission_ids or [])
+                for evt in observed:
+                    action, pid = _permission_event_delta(evt)
+                    if action == "open" and pid and pid not in pending:
+                        pending.append(pid)
+                    elif action == "resolved" and pid:
+                        pending = [x for x in pending if x != pid]
+                if pending != (record.pending_permission_ids or []):
+                    record = store.update(task_id, pending_permission_ids=pending)
+
+                if event_text:
+                    status, output_payload, error = parse_task_completion(event_text, task_type=record.task_type, input_payload=record.input_payload, metadata=record.metadata)
+                    if status == "success" and not _looks_structured_terminal_text(event_text):
+                        record = store.update(task_id, status="running", output_payload={**(record.output_payload or {}), "progress_preview": event_text[:300], "completion_state": "incomplete", "incomplete_reason": "ambiguous_progress_text"})
+                        await asyncio.sleep(poll)
+                        continue
+                    record = store.update(task_id, status=status, output_payload=output_payload, error=error, finished_at=utc_now_iso(), completion_source="opencode_event")
+                    await _publish_task_event(app, record, "task.completed", status)
+                    return
+
+                message_text = await _try_read_completion_from_messages(record, client)
+                if message_text:
+                    status, output_payload, error = parse_task_completion(message_text, task_type=record.task_type, input_payload=record.input_payload, metadata=record.metadata)
+                    if status == "success" and not _looks_structured_terminal_text(message_text):
+                        record = store.update(task_id, status="running", output_payload={**(record.output_payload or {}), "progress_preview": message_text[:300], "completion_state": "incomplete", "incomplete_reason": "ambiguous_progress_text"})
+                        await asyncio.sleep(poll)
+                        continue
+                    record = store.update(task_id, status=status, output_payload=output_payload, error=error, finished_at=utc_now_iso(), completion_source="messages")
+                    await _publish_task_event(app, record, "task.completed", status)
+                    return
+                await asyncio.sleep(poll)
+
             record = store.get(task_id)
             if record is None or record.status in TERMINAL:
                 return
-
-            remaining = max(0.05, min(1.0, deadline - time.monotonic()))
-            event_text, observed = await _try_read_completion_from_events(app, record, remaining)
-            pending = list(record.pending_permission_ids or [])
-            for evt in observed:
-                action, pid = _permission_event_delta(evt)
-                if action == "open" and pid and pid not in pending:
-                    pending.append(pid)
-                elif action == "resolved" and pid:
-                    pending = [x for x in pending if x != pid]
-            if pending != (record.pending_permission_ids or []):
-                record = store.update(task_id, pending_permission_ids=pending)
-
-            if event_text:
-                status, output_payload, error = parse_task_completion(event_text, task_type=record.task_type, input_payload=record.input_payload, metadata=record.metadata)
-                if status == "success" and not _looks_structured_terminal_text(event_text):
-                    record = store.update(task_id, status="running", output_payload={**(record.output_payload or {}), "progress_preview": event_text[:300], "completion_state": "incomplete", "incomplete_reason": "ambiguous_progress_text"})
-                    await asyncio.sleep(poll)
-                    continue
-                record = store.update(task_id, status=status, output_payload=output_payload, error=error, finished_at=utc_now_iso(), completion_source="opencode_event")
-                await _publish_task_event(app, record, "task.completed", status)
+            if record.pending_permission_ids:
+                out = {
+                    "summary": "Task blocked waiting for unresolved OpenCode permission request",
+                    "error_code": "permission_request_timeout",
+                    "pending_permission_ids": record.pending_permission_ids,
+                    "artifacts": [],
+                    "blockers": ["OpenCode permission request was not resolved before task timeout"],
+                    "next_recommendation": "Resolve or pre-authorize the required tool permission, then re-dispatch the task.",
+                    "audit_trace": [],
+                    "external_actions": [],
+                }
+                record = store.update(task_id, status="blocked", output_payload=out, finished_at=utc_now_iso())
+                await _publish_task_event(app, record, "task.completed", "blocked")
                 return
 
-            message_text = await _try_read_completion_from_messages(record, client)
-            if message_text:
-                status, output_payload, error = parse_task_completion(message_text, task_type=record.task_type, input_payload=record.input_payload, metadata=record.metadata)
-                if status == "success" and not _looks_structured_terminal_text(message_text):
-                    record = store.update(task_id, status="running", output_payload={**(record.output_payload or {}), "progress_preview": message_text[:300], "completion_state": "incomplete", "incomplete_reason": "ambiguous_progress_text"})
-                    await asyncio.sleep(poll)
-                    continue
-                record = store.update(task_id, status=status, output_payload=output_payload, error=error, finished_at=utc_now_iso(), completion_source="messages")
-                await _publish_task_event(app, record, "task.completed", status)
-                return
-            await asyncio.sleep(poll)
-
-        record = store.get(task_id)
-        if record is None or record.status in TERMINAL:
-            return
-        if record.pending_permission_ids:
-            out = {
-                "summary": "Task blocked waiting for unresolved OpenCode permission request",
-                "error_code": "permission_request_timeout",
-                "pending_permission_ids": record.pending_permission_ids,
-                "artifacts": [],
-                "blockers": ["OpenCode permission request was not resolved before task timeout"],
-                "next_recommendation": "Resolve or pre-authorize the required tool permission, then re-dispatch the task.",
-                "audit_trace": [],
-                "external_actions": [],
-            }
-        else:
             out = dict(record.output_payload or {})
-            out["error_code"] = "task_completion_timeout"
-            out.setdefault("summary", "Task timed out waiting for completion")
-        record = store.update(task_id, status="blocked", output_payload=out, finished_at=utc_now_iso())
-        await _publish_task_event(app, record, "task.completed", "blocked")
+            out.pop("error_code", None)
+            out.setdefault("summary", "Task is still running; completion has not been observed yet")
+            out.setdefault("completion_state", "running")
+            out["state_code"] = "task_completion_window_elapsed"
+            out.setdefault("incomplete_reason", "task_completion_window_elapsed")
+            record = store.update(task_id, status="running", output_payload=out, finished_at=None)
+            await _publish_task_event(app, record, "task.progress", "running")
+            await asyncio.sleep(poll)
     except Exception as exc:
         record = store.get(task_id)
         if record is None:
