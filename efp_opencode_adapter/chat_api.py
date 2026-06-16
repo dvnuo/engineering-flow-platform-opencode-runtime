@@ -25,6 +25,7 @@ from .app_keys import (
     USER_DISPLAY_STORE_KEY,
 )
 from .attachment_service import build_opencode_attachment_parts
+from .chat_run_registry import chat_run_registry
 from .opencode_client import OpenCodeClientError
 from .opencode_config import normalize_opencode_provider_id
 from .opencode_ids import is_opencode_message_id, new_opencode_message_id, require_opencode_message_id
@@ -1118,6 +1119,10 @@ async def _write_runtime_event_sse(resp: web.StreamResponse, event: dict[str, An
         return
     if event_id:
         seen_ids.add(event_id)
+    event_data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    request_id = str(event.get("request_id") or event_data.get("request_id") or "")
+    if request_id:
+        chat_run_registry.record_event(request_id, event)
     await _write_sse(resp, "runtime_event", event)
 
 
@@ -1202,6 +1207,139 @@ def _http_error_payload(exc: web.HTTPException, *, session_id: str, request_id: 
     return {"error": error, "detail": detail, "session_id": session_id, "request_id": request_id}
 
 
+def _chatlog_run_status(app: web.Application, *, session_id: str, request_id: str) -> dict[str, Any] | None:
+    try:
+        chatlog = app[CHATLOG_STORE_KEY].get(session_id)
+    except Exception:
+        chatlog = None
+    if not isinstance(chatlog, dict):
+        return None
+    entries = chatlog.get("entries")
+    if not isinstance(entries, list):
+        return None
+    for entry in reversed(entries):
+        if not isinstance(entry, dict) or str(entry.get("request_id") or "") != request_id:
+            continue
+        status = str(entry.get("status") or "").strip().lower()
+        if status in {"success", "completed", "complete"}:
+            state = "completed"
+        elif status in {"cancelled", "canceled"}:
+            state = "cancelled"
+        elif status:
+            state = "failed"
+        else:
+            state = "unknown"
+        final_payload = {
+            "ok": state == "completed",
+            "completion_state": "completed" if state == "completed" else state,
+            "session_id": session_id,
+            "request_id": request_id,
+            "response": str(entry.get("response") or ""),
+            "events": entry.get("events") if isinstance(entry.get("events"), list) else [],
+            "runtime_events": entry.get("runtime_events") if isinstance(entry.get("runtime_events"), list) else [],
+            "context_state": entry.get("context_state") if isinstance(entry.get("context_state"), dict) else None,
+            "_llm_debug": entry.get("llm_debug") if isinstance(entry.get("llm_debug"), dict) else {},
+        }
+        return {
+            "ok": True,
+            "engine": "opencode",
+            "session_id": session_id,
+            "request_id": request_id,
+            "state": state,
+            "terminal": state in {"completed", "failed", "cancelled"},
+            "started_at": str(entry.get("started_at") or ""),
+            "updated_at": str(entry.get("updated_at") or chatlog.get("updated_at") or ""),
+            "latest_event_at": str(entry.get("updated_at") or chatlog.get("updated_at") or ""),
+            "latest_event_seq": 0,
+            "replay_available": False,
+            "final_payload": final_payload if state in {"completed", "failed", "cancelled"} else None,
+            "source_of_truth": "chatlog",
+        }
+    return None
+
+
+def _chat_run_status_payload(app: web.Application, *, session_id: str, request_id: str) -> dict[str, Any]:
+    record = chat_run_registry.get(request_id, session_id=session_id or None)
+    if record is not None:
+        payload = record.to_payload()
+        payload["source_of_truth"] = "run_registry"
+        return payload
+    fallback = _chatlog_run_status(app, session_id=session_id, request_id=request_id)
+    if fallback is not None:
+        return fallback
+    return {
+        "ok": False,
+        "engine": "opencode",
+        "session_id": session_id,
+        "request_id": request_id,
+        "state": "unknown",
+        "terminal": False,
+        "replay_available": False,
+        "error": "chat_run_not_found",
+    }
+
+
+async def _stream_existing_chat_run(request: web.Request, *, session_id: str, request_id: str) -> web.StreamResponse:
+    resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "close"})
+    await resp.prepare(request)
+    try:
+        await _write_sse(resp, "chat.started", {"session_id": session_id, "request_id": request_id, "completion_state": "running", "resumed": True})
+        while True:
+            payload = _chat_run_status_payload(request.app, session_id=session_id, request_id=request_id)
+            await _write_sse(resp, "run_status", payload)
+            if payload.get("terminal"):
+                final_payload = payload.get("final_payload")
+                if isinstance(final_payload, dict):
+                    await _write_sse(resp, "final", final_payload)
+                await _write_sse(resp, "done", {"ok": True, "session_id": session_id, "request_id": request_id})
+                return resp
+            if payload.get("state") == "unknown":
+                await _write_sse(resp, "done", {"ok": False, "session_id": session_id, "request_id": request_id})
+                return resp
+            await asyncio.sleep(0.5)
+    except SSEClientDisconnected:
+        chat_run_registry.mark_detached(request_id)
+        return resp
+
+
+async def chat_run_status_handler(request: web.Request) -> web.Response:
+    request_id = str(request.match_info.get("request_id") or "").strip()
+    session_id = str(request.query.get("session_id") or "").strip()
+    if not request_id:
+        return web.json_response({"ok": False, "error": "request_id_required"}, status=400)
+    payload = _chat_run_status_payload(request.app, session_id=session_id, request_id=request_id)
+    status = 404 if payload.get("error") == "chat_run_not_found" else 200
+    return web.json_response(payload, status=status)
+
+
+async def chat_run_cancel_handler(request: web.Request) -> web.Response:
+    request_id = str(request.match_info.get("request_id") or "").strip()
+    session_id = str(request.query.get("session_id") or "").strip()
+    if not request_id:
+        return web.json_response({"ok": False, "error": "request_id_required"}, status=400)
+    record = chat_run_registry.get(request_id, session_id=session_id or None)
+    if record is None:
+        return web.json_response({"ok": False, "error": "chat_run_not_found", "request_id": request_id, "session_id": session_id}, status=404)
+    remote_cancel: dict[str, Any] = {}
+    try:
+        session_record = request.app[SESSION_STORE_KEY].get(record.session_id)
+        opencode_session_id = str(getattr(session_record, "opencode_session_id", "") or "")
+        if opencode_session_id:
+            remote_cancel = await request.app[OPENCODE_CLIENT_KEY].cancel_message(opencode_session_id)
+    except Exception as exc:
+        remote_cancel = {"error": safe_preview(str(exc), 500)}
+    cancelled = chat_run_registry.cancel(request_id)
+    return web.json_response({
+        "ok": cancelled,
+        "engine": "opencode",
+        "request_id": request_id,
+        "session_id": record.session_id,
+        "state": "cancelled" if cancelled else record.state,
+        "terminal": True if cancelled else record.terminal,
+        "remote_cancel": remote_cancel,
+    })
+
+
 async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     try:
         payload = await request.json()
@@ -1217,20 +1355,39 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         return await _stream_error_response(request, "chat_failed", exc.text, session_id=str(payload.get("session_id") or ""), request_id=str(payload.get("request_id") or ""))
 
     payload = {**payload, "session_id": session_id, "request_id": request_id}
+    existing_run = chat_run_registry.get(request_id, session_id=session_id)
+    if existing_run is not None:
+        return await _stream_existing_chat_run(request, session_id=session_id, request_id=request_id)
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "close"})
     await resp.prepare(request)
     bus = request.app[EVENT_BUS_KEY]
     subscriber = bus.subscribe({"session_id": session_id, "request_id": request_id})
+    chat_run_registry.start(session_id=session_id, request_id=request_id)
     chat_task = asyncio.create_task(handle_chat_payload_for_app(request.app, payload))
+    chat_run_registry.attach_task(request_id, chat_task)
+
+    def _record_chat_task_done(task: asyncio.Task) -> None:
+        try:
+            final = task.result()
+            if isinstance(final, dict):
+                chat_run_registry.complete(request_id, final)
+        except asyncio.CancelledError:
+            chat_run_registry.fail(request_id, {"error": "chat_cancelled", "session_id": session_id, "request_id": request_id})
+        except Exception as exc:
+            chat_run_registry.fail(request_id, {"error": "chat_failed", "detail": safe_preview(str(exc), 500), "session_id": session_id, "request_id": request_id})
+
+    chat_task.add_done_callback(_record_chat_task_done)
     seen_event_ids: set[str] = set()
     try:
         await _write_sse(resp, "chat.started", {"session_id": session_id, "request_id": request_id, "chatlog_id": request_id, "completion_state": "running"})
         await _stream_runtime_events_until_done(resp, subscriber, chat_task, seen_event_ids)
         final_payload = await chat_task
         await _drain_runtime_event_queue(resp, subscriber, seen_event_ids)
+        chat_run_registry.complete(request_id, final_payload)
         await _write_sse(resp, "final", final_payload)
         await _write_sse(resp, "done", {"ok": True})
     except SSEClientDisconnected:
+        chat_run_registry.mark_detached(request_id)
         if not chat_task.done():
             chat_task.add_done_callback(_consume_background_chat_result)
         return resp
@@ -1241,6 +1398,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         error_payload = _http_error_payload(exc, session_id=session_id, request_id=request_id)
         runtime_event = _stream_failure_event(request, session_id=session_id, request_id=request_id, error_payload=error_payload)
         final_payload = _stream_error_final_payload(error_payload=error_payload, session_id=session_id, request_id=request_id, runtime_events=[runtime_event], settings=request.app.get(SETTINGS_KEY))
+        chat_run_registry.fail(request_id, error_payload)
         try:
             await _write_sse(resp, "runtime_event", runtime_event)
             await _write_sse(resp, "error", error_payload)
@@ -1255,6 +1413,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
         error_payload = {"error": "chat_failed", "detail": safe_preview(str(exc), 500), "session_id": session_id, "request_id": request_id}
         runtime_event = _stream_failure_event(request, session_id=session_id, request_id=request_id, error_payload=error_payload)
         final_payload = _stream_error_final_payload(error_payload=error_payload, session_id=session_id, request_id=request_id, runtime_events=[runtime_event], settings=request.app.get(SETTINGS_KEY))
+        chat_run_registry.fail(request_id, error_payload)
         try:
             await _write_sse(resp, "runtime_event", runtime_event)
             await _write_sse(resp, "error", error_payload)

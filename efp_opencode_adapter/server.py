@@ -28,7 +28,7 @@ from .app_keys import (
 )
 
 from .capabilities import build_capability_catalog
-from .chat_api import chat_handler, chat_stream_handler
+from .chat_api import chat_handler, chat_run_cancel_handler, chat_run_status_handler, chat_stream_handler
 from .chatlog_store import ChatLogStore
 from .compat_api import (
     git_info_handler,
@@ -569,6 +569,8 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_put("/api/agent/system-prompt/{name}", system_prompt_put_handler)
     app.router.add_post("/api/chat", chat_handler)
     app.router.add_post("/api/chat/stream", chat_stream_handler)
+    app.router.add_get("/api/chat/runs/{request_id}", chat_run_status_handler)
+    app.router.add_post("/api/chat/runs/{request_id}/cancel", chat_run_cancel_handler)
     app.router.add_post("/api/tasks/execute", execute_task_handler)
     app.router.add_get("/api/tasks/{task_id}", get_task_handler)
     app.router.add_post("/api/tasks/{task_id}/cancel", cancel_task_handler)
