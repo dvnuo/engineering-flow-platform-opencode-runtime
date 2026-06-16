@@ -1,8 +1,9 @@
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
+
+import pytest
 
 from efp_opencode_adapter.runtime_env import (
     build_runtime_env_from_config,
@@ -23,8 +24,36 @@ def _settings(tmp_path, monkeypatch):
     return Settings.from_env()
 
 
+def _fake_adfs_assume(monkeypatch):
+    calls = []
+
+    def fake_run(args, text=False, capture_output=False, check=False, env=None):
+        call = {
+            "args": list(args),
+            "text": text,
+            "capture_output": capture_output,
+            "check": check,
+            "env": dict(env or {}),
+        }
+        calls.append(call)
+        credentials_path = Path(call["env"]["AWS_SHARED_CREDENTIALS_FILE"])
+        credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        credentials_path.write_text(
+            "[prod]\n"
+            "aws_access_key_id = AKIA_ADFS\n"
+            "aws_secret_access_key = SECRET_ADFS\n"
+            "aws_session_token = TOKEN_ADFS\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("efp_opencode_adapter.runtime_env.subprocess.run", fake_run)
+    return calls
+
+
 def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
+    adfs_calls = _fake_adfs_assume(monkeypatch)
     cfg = {
         "github": {"api_token": "t", "api_base_url": "https://api.github.com"},
         "jira": {"instances": [{"enabled": True, "url": "https://j/", "username": "u", "token": "x", "project": "P"}]},
@@ -36,6 +65,9 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
             "output": "json",
             "username": "adfs-user",
             "password": "aws-password",
+            "account_no": "123456789012",
+            "role": "Engineer",
+            "session_duration_minutes": "720",
         },
         "proxy": {"enabled": True, "url": "http://h:1", "username": "a", "password": "b"},
         "git": {"author_name": "n", "author_email": "e@x"},
@@ -49,19 +81,33 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     assert "AWS_SECRET_ACCESS_KEY" not in r.env
     assert "AWS_SESSION_TOKEN" not in r.env
     aws_config = Path(r.env["AWS_CONFIG_FILE"])
-    assert "AWS_SHARED_CREDENTIALS_FILE" not in r.env
+    aws_credentials = Path(r.env["AWS_SHARED_CREDENTIALS_FILE"])
     assert aws_config.exists()
+    assert aws_credentials.exists()
     if os.name != "nt":
         assert oct(os.stat(aws_config).st_mode & 0o777) == "0o600"
     assert "[profile prod]" in aws_config.read_text(encoding="utf-8")
     assert "region = us-east-1" in aws_config.read_text(encoding="utf-8")
-    assert "credential_process =" in aws_config.read_text(encoding="utf-8")
-    auth_paths = list(aws_config.parent.glob("adfs-auth-*.json"))
-    helper_path = aws_config.parent / "aws-adfs-credential-process.py"
-    assert len(auth_paths) == 1 and helper_path.exists()
-    auth_text = auth_paths[0].read_text(encoding="utf-8")
-    assert '"username": "adfs-user"' in auth_text
-    assert '"password": "aws-password"' in auth_text
+    assert "credential_process =" not in aws_config.read_text(encoding="utf-8")
+    assert "AKIA_ADFS" in aws_credentials.read_text(encoding="utf-8")
+    assert not list(aws_config.parent.glob("adfs-auth-*.json"))
+    assert not (aws_config.parent / "aws-adfs-credential-process.py").exists()
+    assume_args = adfs_calls[0]["args"]
+    assert assume_args[0] == "adfs-assume"
+    assert "--jenkins" in assume_args
+    assert "-n" in assume_args
+    assert assume_args[assume_args.index("-u") + 1] == "adfs-user"
+    assert assume_args[assume_args.index("-p") + 1] == "prod"
+    assert assume_args[assume_args.index("-R") + 1] == "us-east-1"
+    assert assume_args[assume_args.index("-a") + 1] == "123456789012"
+    assert assume_args[assume_args.index("-r") + 1] == "Engineer"
+    assert assume_args[assume_args.index("--session-duration-minutes") + 1] == "720"
+    assert "aws-password" not in " ".join(assume_args)
+    assume_env = adfs_calls[0]["env"]
+    assert assume_env["AD_PASS"] == "aws-password"
+    assert assume_env["AWS_CONFIG_FILE"] == str(aws_config)
+    assert assume_env["AWS_SHARED_CREDENTIALS_FILE"] == str(aws_credentials)
+    assert "/app/venv/bin" in assume_env["PATH"]
     p = write_runtime_env_file(s, r.env)
     if os.name != "nt":
         assert oct(os.stat(p).st_mode & 0o777) == "0o600"
@@ -155,49 +201,37 @@ def test_runtime_env_aws_aliases_and_redacted_placeholders(tmp_path, monkeypatch
     assert "AWS_SESSION_TOKEN" not in env
 
 
-def test_runtime_env_aws_credential_process_helper_invokes_adfs_command(tmp_path, monkeypatch):
+def test_runtime_env_aws_adfs_assume_failure_redacts_password(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
-    fake_adfs = tmp_path / "fake_adfs.py"
-    fake_adfs.write_text(
-        "import json, os, sys\n"
-        "assert sys.argv[1:] == ['adfs-user', 'aws-password']\n"
-        "assert os.environ['ADFS_USERNAME'] == 'adfs-user'\n"
-        "assert os.environ['ADFS_PASSWORD'] == 'aws-password'\n"
-        "print(json.dumps({'Credentials': {'AccessKeyId': 'AKIA_ADFS', 'SecretAccessKey': 'SECRET_ADFS', 'SessionToken': 'TOKEN_ADFS'}}))\n",
-        encoding="utf-8",
-    )
-    build_runtime_env_from_config(
-        s,
-        {
-            "aws": {
-                "enabled": True,
-                "profile": "prod",
-                "username": "adfs-user",
-                "password": "aws-password",
-                "assume_command": [sys.executable, str(fake_adfs), "{username}", "{password}"],
-            }
-        },
-    )
+    captured = {}
 
-    helper_path = s.adapter_state_dir / "aws" / "aws-adfs-credential-process.py"
-    auth_paths = list((s.adapter_state_dir / "aws").glob("adfs-auth-*.json"))
-    assert helper_path.exists()
-    assert len(auth_paths) == 1
+    def fake_run(args, text=False, capture_output=False, check=False, env=None):
+        captured["args"] = list(args)
+        captured["env"] = dict(env or {})
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="login failed for aws-password")
 
-    result = subprocess.run(
-        [sys.executable, str(helper_path), str(auth_paths[0])],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
-        "Version": 1,
-        "AccessKeyId": "AKIA_ADFS",
-        "SecretAccessKey": "SECRET_ADFS",
-        "SessionToken": "TOKEN_ADFS",
-    }
-    assert "aws-password" not in result.stderr
+    monkeypatch.setattr("efp_opencode_adapter.runtime_env.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError) as exc:
+        build_runtime_env_from_config(
+            s,
+            {
+                "aws": {
+                    "enabled": True,
+                    "profile": "prod",
+                    "username": "adfs-user",
+                    "password": "aws-password",
+                    "assume_command": "custom-adfs-assume",
+                }
+            },
+        )
+
+    assert captured["args"][0] == "custom-adfs-assume"
+    assert captured["env"]["AD_PASS"] == "aws-password"
+    assert "aws-password" not in str(exc.value)
+    assert "[REDACTED_SECRET]" in str(exc.value)
+    assert not (s.adapter_state_dir / "aws" / "config").exists()
+    assert not (s.adapter_state_dir / "aws" / "credentials").exists()
 
 
 def test_runtime_env_sets_java_maven_defaults(tmp_path, monkeypatch):
