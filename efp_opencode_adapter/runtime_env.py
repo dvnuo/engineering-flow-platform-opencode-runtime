@@ -6,6 +6,8 @@ import json
 import os
 import re
 import shlex
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -14,6 +16,103 @@ from .path_utils import path_exists
 from .settings import Settings
 
 SECRET_MARKERS = ("TOKEN", "PASSWORD", "SECRET", "API_KEY", "ACCESS", "REFRESH", "AUTHORIZATION")
+AWS_ADFS_DEFAULT_COMMAND = "adfs assume"
+AWS_ADFS_HELPER = r"""#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+
+
+def _redact(text: str, secrets: list[str]) -> str:
+    value = str(text or "")
+    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+        value = value.replace(secret, "[REDACTED_SECRET]")
+    return value
+
+
+def _credentials_payload(raw: object) -> dict:
+    data = raw.get("Credentials") if isinstance(raw, dict) and isinstance(raw.get("Credentials"), dict) else raw
+    if not isinstance(data, dict):
+        raise ValueError("credential command did not return a JSON object")
+    payload = {
+        "Version": int(data.get("Version") or 1),
+        "AccessKeyId": data.get("AccessKeyId") or data.get("aws_access_key_id") or data.get("access_key_id"),
+        "SecretAccessKey": data.get("SecretAccessKey") or data.get("aws_secret_access_key") or data.get("secret_access_key"),
+        "SessionToken": data.get("SessionToken") or data.get("Token") or data.get("aws_session_token") or data.get("session_token"),
+    }
+    expiration = data.get("Expiration") or data.get("expiration")
+    if expiration:
+        payload["Expiration"] = expiration
+    missing = [key for key in ("AccessKeyId", "SecretAccessKey", "SessionToken") if not payload.get(key)]
+    if missing:
+        raise ValueError("credential command JSON missing " + ", ".join(missing))
+    return payload
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("usage: aws-adfs-credential-process.py <auth-json>", file=sys.stderr)
+        return 2
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    command = config.get("command")
+    if not isinstance(command, list) or not all(isinstance(arg, str) and arg for arg in command):
+        print("invalid ADFS credential command", file=sys.stderr)
+        return 2
+    username = str(config.get("username") or "")
+    password = str(config.get("password") or "")
+    secrets = [username, password]
+    env = os.environ.copy()
+    if username:
+        env["username"] = username
+        env["ADFS_USERNAME"] = username
+        env["AWS_ADFS_USERNAME"] = username
+    if password:
+        env["password"] = password
+        env["ADFS_PASSWORD"] = password
+        env["AWS_ADFS_PASSWORD"] = password
+    profile = str(config.get("profile") or "").strip()
+    if profile:
+        env["AWS_PROFILE"] = profile
+        env["AWS_DEFAULT_PROFILE"] = profile
+    region = str(config.get("region") or "").strip()
+    if region:
+        env["AWS_REGION"] = region
+        env["AWS_DEFAULT_REGION"] = region
+    output = str(config.get("output") or "").strip()
+    if output:
+        env["AWS_DEFAULT_OUTPUT"] = output
+    command = [
+        arg.replace("{username}", username)
+        .replace("{password}", password)
+        .replace("{profile}", profile)
+        .replace("{region}", region)
+        for arg in command
+    ]
+    stdin_text = f"{username}\n{password}\n" if "--stdin" in command else None
+    result = subprocess.run(command, input=stdin_text, text=True, capture_output=True, check=False, env=env)
+    if result.returncode != 0:
+        detail = _redact((result.stderr or result.stdout or "").strip(), secrets)
+        if detail:
+            print(detail, file=sys.stderr)
+        return result.returncode or 1
+    stdout = (result.stdout or "").strip()
+    try:
+        raw_payload = json.loads(stdout)
+        payload = _credentials_payload(raw_payload)
+    except Exception as exc:
+        print(_redact(f"invalid ADFS credential output: {exc}", secrets), file=sys.stderr)
+        return 1
+    print(json.dumps(payload, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
 MANAGED_EXTERNAL_ENV_KEYS = {
     "GITHUB_TOKEN", "GITHUB_ACCESS_TOKEN", "GITHUB_API_BASE_URL", "EFP_GITHUB_CONFIG_JSON",
     "ATLASSIAN_CONFIG",
@@ -117,29 +216,90 @@ def _write_ini_section(path: Path, section: str, values: dict[str, str]) -> None
     path.chmod(0o600)
 
 
-def _write_aws_cli_files(settings: Settings, *, profile: str, region: str, output: str, access_key_id: str, secret_access_key: str, session_token: str) -> tuple[Path, Path | None]:
+def _write_private_text(path: Path, text: str, *, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(text)
+    path.chmod(mode)
+
+
+def _shell_words(value) -> list[str]:
+    if isinstance(value, list):
+        return [_first_text(item) for item in value if _first_text(item)]
+    text = str(value or "").strip()
+    if not text:
+        return []
+    return shlex.split(text)
+
+
+def _aws_adfs_command(aws: dict) -> list[str]:
+    command = _shell_words(
+        aws.get("assume_command")
+        or aws.get("adfs_command")
+        or os.getenv("EFP_AWS_ADFS_ASSUME_COMMAND")
+        or AWS_ADFS_DEFAULT_COMMAND
+    )
+    if not command:
+        command = _shell_words(AWS_ADFS_DEFAULT_COMMAND)
+    command.extend(_shell_words(aws.get("assume_args") or aws.get("adfs_args")))
+    return command
+
+
+def _format_credential_process(args: list[str]) -> str:
+    if os.name == "nt":
+        return subprocess.list2cmdline(args)
+    return shlex.join(args)
+
+
+def _write_aws_adfs_cli_files(settings: Settings, *, profile: str, region: str, output: str, username: str, password: str, command: list[str]) -> Path:
     aws_dir = settings.adapter_state_dir / "aws"
     config_path = aws_dir / "config"
+    helper_path = aws_dir / "aws-adfs-credential-process.py"
     credentials_path = aws_dir / "credentials"
-    config_values: dict[str, str] = {}
-    if region:
-        config_values["region"] = region
-    if output:
-        config_values["output"] = output
-    _write_ini_section(config_path, _aws_config_section_name(profile), config_values)
-
-    if not access_key_id and not secret_access_key and not session_token:
-        return config_path, None
-
-    credential_values: dict[str, str] = {}
-    if access_key_id:
-        credential_values["aws_access_key_id"] = access_key_id
-    if secret_access_key:
-        credential_values["aws_secret_access_key"] = secret_access_key
-    if session_token:
-        credential_values["aws_session_token"] = session_token
-    _write_ini_section(credentials_path, profile, credential_values)
-    return config_path, credentials_path
+    config_tmp = aws_dir / "config.tmp"
+    helper_tmp = aws_dir / "aws-adfs-credential-process.py.tmp"
+    auth_text = json.dumps(
+        {
+            "command": command,
+            "username": username,
+            "password": password,
+            "profile": profile,
+            "region": region,
+            "output": output,
+        },
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+    auth_digest = hashlib.sha256(auth_text.encode("utf-8")).hexdigest()[:16]
+    auth_path = aws_dir / f"adfs-auth-{auth_digest}.json"
+    auth_tmp = aws_dir / f"adfs-auth-{auth_digest}.json.tmp"
+    try:
+        _write_private_text(helper_tmp, AWS_ADFS_HELPER, mode=0o700)
+        _write_private_text(auth_tmp, auth_text)
+        config_values: dict[str, str] = {}
+        if region:
+            config_values["region"] = region
+        if output:
+            config_values["output"] = output
+        config_values["credential_process"] = _format_credential_process([sys.executable, str(helper_path), str(auth_path)])
+        _write_ini_section(config_tmp, _aws_config_section_name(profile), config_values)
+        os.replace(helper_tmp, helper_path)
+        os.replace(auth_tmp, auth_path)
+        os.replace(config_tmp, config_path)
+        if credentials_path.exists():
+            credentials_path.unlink()
+        for old_auth_path in aws_dir.glob("adfs-auth*.json"):
+            if old_auth_path != auth_path:
+                old_auth_path.unlink()
+    except Exception:
+        for path in (config_tmp, auth_tmp, helper_tmp):
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
+        raise
+    return config_path
 
 
 def aws_status_from_env(env: dict[str, str]) -> dict[str, object]:
@@ -411,37 +571,29 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         aws_profile = _first_text(aws.get("profile"), aws.get("profile_name"), os.getenv("AWS_PROFILE"), os.getenv("AWS_DEFAULT_PROFILE"), default="default")
         aws_region = _first_text(aws.get("region"), aws.get("default_region"), os.getenv("AWS_REGION"), os.getenv("AWS_DEFAULT_REGION"))
         aws_output = _first_text(aws.get("output"), os.getenv("AWS_DEFAULT_OUTPUT"), default="json")
-        aws_access_key_id = _first_clean_secret(aws.get("access_key_id"), aws.get("aws_access_key_id"), os.getenv("AWS_ACCESS_KEY_ID"))
-        aws_secret_access_key = _first_clean_secret(aws.get("secret_access_key"), aws.get("aws_secret_access_key"), os.getenv("AWS_SECRET_ACCESS_KEY"))
-        aws_session_token = _first_clean_secret(aws.get("session_token"), aws.get("aws_session_token"), os.getenv("AWS_SESSION_TOKEN"))
-        if bool(aws_access_key_id) != bool(aws_secret_access_key):
-            warnings.append("aws enabled but access_key_id and secret_access_key must be provided together")
-        if any((aws_profile, aws_region, aws_output, aws_access_key_id, aws_secret_access_key, aws_session_token)):
-            aws_config_path, aws_credentials_path = _write_aws_cli_files(
+        aws_username = _first_text(aws.get("username"), aws.get("adfs_username"), aws.get("account"), aws.get("account_name"))
+        aws_password = _first_clean_secret(aws.get("password"), aws.get("adfs_password"))
+        if aws_username and aws_password:
+            aws_config_path = _write_aws_adfs_cli_files(
                 settings,
                 profile=aws_profile,
                 region=aws_region,
                 output=aws_output,
-                access_key_id=aws_access_key_id,
-                secret_access_key=aws_secret_access_key,
-                session_token=aws_session_token,
+                username=aws_username,
+                password=aws_password,
+                command=_aws_adfs_command(aws),
             )
             env["AWS_PROFILE"] = aws_profile
             env["AWS_DEFAULT_PROFILE"] = aws_profile
             env["AWS_CONFIG_FILE"] = str(aws_config_path)
-            if aws_credentials_path is not None:
-                env["AWS_SHARED_CREDENTIALS_FILE"] = str(aws_credentials_path)
             if aws_region:
                 env["AWS_REGION"] = aws_region
                 env["AWS_DEFAULT_REGION"] = aws_region
             if aws_output:
                 env["AWS_DEFAULT_OUTPUT"] = aws_output
-            if aws_access_key_id and aws_secret_access_key:
-                env["AWS_ACCESS_KEY_ID"] = aws_access_key_id
-                env["AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key
-            if aws_session_token:
-                env["AWS_SESSION_TOKEN"] = aws_session_token
             updated.append("aws")
+        else:
+            warnings.append("aws enabled but ADFS username and password are required")
 
     git = cfg.get("git") if isinstance(cfg.get("git"), dict) else {}
     git_user = git.get("user") if isinstance(git.get("user"), dict) else {}
