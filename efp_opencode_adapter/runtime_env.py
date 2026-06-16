@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import configparser
 import json
 import os
 import re
@@ -22,7 +21,6 @@ MANAGED_EXTERNAL_ENV_KEYS = {
     "ATLASSIAN_CONFIG",
     "JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_PASSWORD", "JIRA_TOKEN", "JIRA_PROJECT_KEY", "EFP_JIRA_INSTANCES_JSON",
     "CONFLUENCE_BASE_URL", "CONFLUENCE_USERNAME", "CONFLUENCE_EMAIL", "CONFLUENCE_API_TOKEN", "CONFLUENCE_PASSWORD", "CONFLUENCE_TOKEN", "CONFLUENCE_SPACE_KEY", "EFP_CONFLUENCE_INSTANCES_JSON",
-    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_DEFAULT_OUTPUT", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
     "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
     "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "GH_PROMPT_DISABLED", "GH_REPO",
@@ -35,6 +33,8 @@ _REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
 
 
 def _is_managed_external_env_key(key: str) -> bool:
+    if key.startswith("AWS_"):
+        return True
     if key in MANAGED_EXTERNAL_ENV_KEYS:
         return True
     return bool(_VERSIONED_JAVA_HOME_RE.match(key) and key not in {"JAVA21_HOME", "JDK21_HOME"})
@@ -101,32 +101,6 @@ def _is_github_dotcom_like(host: str) -> bool:
     return value == "github.com" or value.endswith(".ghe.com")
 
 
-def _aws_config_section_name(profile: str) -> str:
-    value = str(profile or "").strip() or "default"
-    return "default" if value == "default" else f"profile {value}"
-
-
-def _write_ini_section(path: Path, section: str, values: dict[str, str]) -> None:
-    parser = configparser.RawConfigParser()
-    parser.optionxform = str
-    parser.add_section(section)
-    for key, value in values.items():
-        text = str(value or "").strip()
-        if text:
-            parser.set(section, key, text)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        parser.write(handle)
-    path.chmod(0o600)
-
-
-def _write_private_text(path: Path, text: str, *, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        handle.write(text)
-    path.chmod(mode)
-
-
 def _read_bytes_if_exists(path: Path) -> bytes | None:
     if not path.exists():
         return None
@@ -149,70 +123,8 @@ def _restore_bytes_or_remove(path: Path, previous: bytes | None) -> None:
         pass
 
 
-def _shell_words(value) -> list[str]:
-    if isinstance(value, list):
-        return [_first_text(item) for item in value if _first_text(item)]
-    text = str(value or "").strip()
-    if not text:
-        return []
-    return shlex.split(text)
-
-
-def _aws_adfs_command(aws: dict, *, profile: str, region: str, username: str) -> list[str]:
-    command = _shell_words(
-        aws.get("assume_command")
-        or aws.get("adfs_command")
-        or os.getenv("EFP_AWS_ADFS_ASSUME_COMMAND")
-        or AWS_ADFS_DEFAULT_COMMAND
-    )
-    if not command:
-        command = _shell_words(AWS_ADFS_DEFAULT_COMMAND)
-    if _flag_enabled(aws.get("jenkins"), default=True):
-        command.append("--jenkins")
-    if _flag_enabled(aws.get("no_warning"), default=True):
-        command.append("-n")
-    _append_cli_arg(command, "-u", username)
-    _append_cli_arg(command, "-p", profile)
-    _append_cli_arg(command, "-R", region)
-    _append_cli_arg(command, "-a", _first_aws_text(aws, "account_no", "account_id", "aws_account_no"))
-    _append_cli_arg(command, "-r", _first_aws_text(aws, "role", "role_name"))
-    _append_cli_arg(command, "-d", _first_aws_text(aws, "domain"))
-    _append_cli_arg(command, "-c", _first_aws_text(aws, "config", "config_path", "adfs_config"))
-    _append_cli_arg(command, "--idp-proxy", _first_aws_text(aws, "idp_proxy", "idpProxy"))
-    _append_cli_arg(command, "--session-duration-minutes", _first_aws_text(aws, "session_duration_minutes", "sessionDurationMinutes"))
-    _append_cli_arg(command, "--log", _first_aws_text(aws, "log", "log_level"))
-    if _flag_enabled(aws.get("display_token")):
-        command.append("-t")
-    if _flag_enabled(aws.get("nossl")):
-        command.append("--nossl")
-    if _flag_enabled(aws.get("adfs3_uat")):
-        command.append("--adfs3-uat")
-    command.extend(_shell_words(aws.get("assume_args") or aws.get("adfs_args")))
-    return command
-
-
-def _append_cli_arg(command: list[str], flag: str, value) -> None:
-    text = _first_text(value)
-    if text:
-        command.extend([flag, text])
-
-
-def _first_aws_text(aws: dict, *keys: str) -> str:
-    for key in keys:
-        text = _first_text(aws.get(key))
-        if text:
-            return text
-    return ""
-
-
-def _flag_enabled(value, *, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value != 0
-    return str(value).strip().lower() in {"1", "true", "on", "yes", "y", "enabled"}
+def _aws_adfs_command(*, domain: str, username: str) -> list[str]:
+    return [AWS_ADFS_DEFAULT_COMMAND, "--jenkins", "-n", "-d", domain, "-u", username]
 
 
 def _path_with_runtime_venv_bins(path_value: str) -> str:
@@ -221,18 +133,10 @@ def _path_with_runtime_venv_bins(path_value: str) -> str:
     return os.pathsep.join(prefix + parts)
 
 
-def _adfs_assume_env(*, profile: str, region: str, output: str, password: str, config_path: Path, credentials_path: Path) -> dict[str, str]:
+def _adfs_assume_env(*, password: str, credentials_path: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["AD_PASS"] = password
-    env["AWS_PROFILE"] = profile
-    env["AWS_DEFAULT_PROFILE"] = profile
-    env["AWS_CONFIG_FILE"] = str(config_path)
     env["AWS_SHARED_CREDENTIALS_FILE"] = str(credentials_path)
-    if region:
-        env["AWS_REGION"] = region
-        env["AWS_DEFAULT_REGION"] = region
-    if output:
-        env["AWS_DEFAULT_OUTPUT"] = output
     env["PATH"] = _path_with_runtime_venv_bins(env.get("PATH", ""))
     return env
 
@@ -265,67 +169,35 @@ def _run_adfs_assume(command: list[str], *, env: dict[str, str], password: str) 
         )
 
 
-def _write_aws_adfs_cli_files(settings: Settings, *, profile: str, region: str, output: str, password: str, command: list[str]) -> tuple[Path, Path]:
+def _write_aws_adfs_cli_files(settings: Settings, *, password: str, command: list[str]) -> Path:
     aws_dir = settings.adapter_state_dir / "aws"
-    config_path = aws_dir / "config"
     credentials_path = aws_dir / "credentials"
-    config_tmp = aws_dir / "config.tmp"
-    previous_config = _read_bytes_if_exists(config_path)
     previous_credentials = _read_bytes_if_exists(credentials_path)
     try:
-        config_values: dict[str, str] = {}
-        if region:
-            config_values["region"] = region
-        if output:
-            config_values["output"] = output
-        _write_ini_section(config_tmp, _aws_config_section_name(profile), config_values)
-        os.replace(config_tmp, config_path)
         _run_adfs_assume(
             command,
             env=_adfs_assume_env(
-                profile=profile,
-                region=region,
-                output=output,
                 password=password,
-                config_path=config_path,
                 credentials_path=credentials_path,
             ),
             password=password,
         )
+        for old_path in (aws_dir / "config", aws_dir / "config.tmp"):
+            if old_path.exists():
+                old_path.unlink()
         for old_path in list(aws_dir.glob("adfs-auth*.json")) + [aws_dir / "aws-adfs-credential-process.py"]:
             if old_path.exists():
                 old_path.unlink()
     except Exception:
-        _restore_bytes_or_remove(config_path, previous_config)
         _restore_bytes_or_remove(credentials_path, previous_credentials)
-        for path in (config_tmp,):
-            try:
-                if path.exists():
-                    path.unlink()
-            except OSError:
-                pass
         raise
-    return config_path, credentials_path
+    return credentials_path
 
 
 def aws_status_from_env(env: dict[str, str]) -> dict[str, object]:
-    config_path = env.get("AWS_CONFIG_FILE")
     credentials_path = env.get("AWS_SHARED_CREDENTIALS_FILE")
-    access_key_present = bool(env.get("AWS_ACCESS_KEY_ID"))
-    secret_access_key_present = bool(env.get("AWS_SECRET_ACCESS_KEY"))
-    session_token_present = bool(env.get("AWS_SESSION_TOKEN"))
-    profile = env.get("AWS_PROFILE") or env.get("AWS_DEFAULT_PROFILE")
-    region = env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION")
     return {
-        "configured": bool(profile or region or config_path or credentials_path or access_key_present or secret_access_key_present),
-        "profile": profile,
-        "region": region,
-        "output": env.get("AWS_DEFAULT_OUTPUT"),
-        "access_key_present": access_key_present,
-        "secret_access_key_present": secret_access_key_present,
-        "session_token_present": session_token_present,
-        "config_file_present": bool(config_path and path_exists(Path(config_path))),
-        "config_path": config_path,
+        "configured": bool(credentials_path and path_exists(Path(credentials_path))),
         "credentials_file_present": bool(credentials_path and path_exists(Path(credentials_path))),
         "credentials_path": credentials_path,
     }
@@ -574,32 +446,19 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
     aws_section_present = isinstance(cfg.get("aws"), dict)
     aws_enabled = aws_section_present and _section_enabled(aws)
     if aws_enabled:
-        aws_profile = _first_text(aws.get("profile"), aws.get("profile_name"), os.getenv("AWS_PROFILE"), os.getenv("AWS_DEFAULT_PROFILE"), default="default")
-        aws_region = _first_text(aws.get("region"), aws.get("default_region"), os.getenv("AWS_REGION"), os.getenv("AWS_DEFAULT_REGION"))
-        aws_output = _first_text(aws.get("output"), os.getenv("AWS_DEFAULT_OUTPUT"), default="json")
-        aws_username = _first_text(aws.get("username"), aws.get("adfs_username"), aws.get("account"), aws.get("account_name"))
-        aws_password = _first_clean_secret(aws.get("password"), aws.get("adfs_password"))
-        if aws_username and aws_password:
-            aws_config_path, aws_credentials_path = _write_aws_adfs_cli_files(
+        aws_domain = _first_text(aws.get("domain"))
+        aws_username = _first_text(aws.get("username"))
+        aws_password = _first_clean_secret(aws.get("password"))
+        if aws_domain and aws_username and aws_password:
+            aws_credentials_path = _write_aws_adfs_cli_files(
                 settings,
-                profile=aws_profile,
-                region=aws_region,
-                output=aws_output,
                 password=aws_password,
-                command=_aws_adfs_command(aws, profile=aws_profile, region=aws_region, username=aws_username),
+                command=_aws_adfs_command(domain=aws_domain, username=aws_username),
             )
-            env["AWS_PROFILE"] = aws_profile
-            env["AWS_DEFAULT_PROFILE"] = aws_profile
-            env["AWS_CONFIG_FILE"] = str(aws_config_path)
             env["AWS_SHARED_CREDENTIALS_FILE"] = str(aws_credentials_path)
-            if aws_region:
-                env["AWS_REGION"] = aws_region
-                env["AWS_DEFAULT_REGION"] = aws_region
-            if aws_output:
-                env["AWS_DEFAULT_OUTPUT"] = aws_output
             updated.append("aws")
         else:
-            warnings.append("aws enabled but ADFS username and password are required")
+            warnings.append("aws enabled but domain, username, and password are required")
 
     git = cfg.get("git") if isinstance(cfg.get("git"), dict) else {}
     git_user = git.get("user") if isinstance(git.get("user"), dict) else {}

@@ -73,10 +73,6 @@ class ProfileOverlay:
     atlassian_jira_instances: int = 0
     atlassian_confluence_instances: int = 0
     aws_configured: bool = False
-    aws_profile: str | None = None
-    aws_region: str | None = None
-    aws_config_path: str | None = None
-    aws_credentials_path: str | None = None
 
 
 def redact_secrets(value: Any) -> Any:
@@ -148,10 +144,6 @@ class ProfileOverlayStore:
             atlassian_jira_instances=int(payload.get("atlassian_jira_instances", 0) or 0),
             atlassian_confluence_instances=int(payload.get("atlassian_confluence_instances", 0) or 0),
             aws_configured=bool(payload.get("aws_configured", False)),
-            aws_profile=(str(payload.get("aws_profile")) if payload.get("aws_profile") is not None else None),
-            aws_region=(str(payload.get("aws_region")) if payload.get("aws_region") is not None else None),
-            aws_config_path=(str(payload.get("aws_config_path")) if payload.get("aws_config_path") is not None else None),
-            aws_credentials_path=(str(payload.get("aws_credentials_path")) if payload.get("aws_credentials_path") is not None else None),
         )
 
     def save(self, overlay: ProfileOverlay) -> None:
@@ -197,8 +189,4 @@ def build_profile_status_payload(settings: Settings) -> dict[str, Any]:
         "atlassian_jira_instances": overlay.atlassian_jira_instances,
         "atlassian_confluence_instances": overlay.atlassian_confluence_instances,
         "aws_configured": overlay.aws_configured,
-        "aws_profile": overlay.aws_profile,
-        "aws_region": overlay.aws_region,
-        "aws_config_path": overlay.aws_config_path,
-        "aws_credentials_path": overlay.aws_credentials_path,
     }
