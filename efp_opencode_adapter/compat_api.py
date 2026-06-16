@@ -14,7 +14,6 @@ from .index_loader import load_skills_index, read_json_file
 from .permission_generator import default_permission_baseline, skill_permission_state
 
 SUPPORTED_SYSTEM_PROMPT_SECTION = "agents"
-UNSUPPORTED_SYSTEM_PROMPT_SECTIONS = ["soul", "user", "tools", "memory", "daily_notes"]
 
 
 def _is_supported_system_prompt_section(name: str) -> bool:
@@ -52,7 +51,6 @@ def _agents_md_config_payload(settings) -> dict:
         "runtime_type": "opencode",
         "sections": [SUPPORTED_SYSTEM_PROMPT_SECTION],
         "agents": _agents_metadata(),
-        "unsupported_sections": UNSUPPORTED_SYSTEM_PROMPT_SECTIONS,
     }
 
 # ... unchanged helper funcs

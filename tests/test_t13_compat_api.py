@@ -63,15 +63,14 @@ async def test_t13_system_prompt_agents_only_and_capabilities(tmp_path, monkeypa
     for p in (workspace / ".opencode", state, tools, skills): p.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("EFP_TOOLS_DIR", str(tools)); monkeypatch.setenv("EFP_SKILLS_DIR", str(skills)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
     client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient()))); await client.start_server()
-    cfg = await (await client.get('/api/agent/system-prompt/config')).json(); assert cfg['sections'] == ['agents'] and cfg['agents']['can_disable'] is False
+    cfg = await (await client.get('/api/agent/system-prompt/config')).json(); assert cfg['sections'] == ['agents'] and cfg['agents']['can_disable'] is False and 'unsupported_sections' not in cfg
     assert (await client.put('/api/agent/system-prompt/config', json={'agents': {'enabled': True}})).status == 200
     assert (await client.put('/api/agent/system-prompt/config', json={'agents': {'enabled': False}})).status == 422
-    assert (await client.put('/api/agent/system-prompt/config', json={'soul': {'enabled': True}})).status == 422
+    assert (await client.put('/api/agent/system-prompt/config', json={'legacy': {'enabled': True}})).status == 422
     assert (await client.put('/api/agent/system-prompt/agents', json={'content': 'X'})).status == 200
     sp = await (await client.get('/api/agent/system-prompt/agents')).json(); assert sp['enabled'] is True and sp['content'] == 'X'
-    for name in ['soul','user','tools','memory','daily_notes']:
-        assert (await client.get(f'/api/agent/system-prompt/{name}')).status == 422
-        assert (await client.put(f'/api/agent/system-prompt/{name}', json={'content':'x'})).status == 422
+    assert (await client.get('/api/agent/system-prompt/legacy')).status == 422
+    assert (await client.put('/api/agent/system-prompt/legacy', json={'content':'x'})).status == 422
     assert (await client.put('/api/agent/system-prompt/agents', json={'enabled': 'yes'})).status == 400
     cap = await (await client.get('/api/capabilities')).json(); assert cap['engine'] == 'opencode'
     await client.close()
