@@ -609,14 +609,14 @@ async def test_runtime_profile_apply_runs_aws_login_and_status(tmp_path, monkeyp
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
-    adfs_calls = []
+    aws_auth_calls = []
     real_subprocess_run = subprocess.run
 
-    def fake_adfs_assume(args, text=False, capture_output=False, check=False, env=None):
+    def fake_aws_auth(args, text=False, capture_output=False, check=False, env=None):
         call = {"args": list(args), "env": dict(env or {})}
         if "AWS_SHARED_CREDENTIALS_FILE" not in call["env"]:
             return real_subprocess_run(args, text=text, capture_output=capture_output, check=check, env=env)
-        adfs_calls.append(call)
+        aws_auth_calls.append(call)
         credentials_path = Path(call["env"]["AWS_SHARED_CREDENTIALS_FILE"])
         credentials_path.parent.mkdir(parents=True, exist_ok=True)
         credentials_path.write_text(
@@ -626,7 +626,7 @@ async def test_runtime_profile_apply_runs_aws_login_and_status(tmp_path, monkeyp
         )
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-    monkeypatch.setattr("efp_opencode_adapter.runtime_env.subprocess.run", fake_adfs_assume)
+    monkeypatch.setattr("efp_opencode_adapter.runtime_env.subprocess.run", fake_aws_auth)
 
     app = create_app(Settings.from_env(), opencode_client=FakeAuthOnlyClient())
     client = TestClient(TestServer(app))
@@ -655,11 +655,10 @@ async def test_runtime_profile_apply_runs_aws_login_and_status(tmp_path, monkeyp
     assert body["aws_configured"] is True
     assert "aws" in body["updated_sections"]
     assert "aws-password" not in encoded_body
-    assert adfs_calls[0]["args"][0] == "adfs-assume"
-    assert adfs_calls[0]["args"][adfs_calls[0]["args"].index("-d") + 1] == "HBEU"
-    assert adfs_calls[0]["args"][adfs_calls[0]["args"].index("-u") + 1] == "aws-user"
-    assert adfs_calls[0]["env"]["AD_PASS"] == "aws-password"
-    assert "aws-password" not in " ".join(adfs_calls[0]["args"])
+    assert aws_auth_calls[0]["args"] == ["aws-auth", "login", "--json"]
+    assert "AD_PASS" not in aws_auth_calls[0]["env"]
+    assert "EFP_CONFIG" in aws_auth_calls[0]["env"]
+    assert "aws-password" not in " ".join(aws_auth_calls[0]["args"])
 
     status_body = await (await client.get("/api/internal/runtime-profile/status")).json()
     assert status_body["aws_configured"] is True

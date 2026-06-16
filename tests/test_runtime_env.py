@@ -24,7 +24,7 @@ def _settings(tmp_path, monkeypatch):
     return Settings.from_env()
 
 
-def _fake_adfs_assume(monkeypatch):
+def _fake_aws_auth(monkeypatch):
     calls = []
 
     def fake_run(args, text=False, capture_output=False, check=False, env=None):
@@ -51,7 +51,7 @@ def _fake_adfs_assume(monkeypatch):
 
 def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
-    adfs_calls = _fake_adfs_assume(monkeypatch)
+    aws_auth_calls = _fake_aws_auth(monkeypatch)
     cfg = {
         "github": {"api_token": "t", "api_base_url": "https://api.github.com"},
         "jira": {"instances": [{"enabled": True, "url": "https://j/", "username": "u", "token": "x", "project": "P"}]},
@@ -74,16 +74,20 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     assert "generated = true" in aws_credentials.read_text(encoding="utf-8")
     assert not list(aws_credentials.parent.glob("adfs-auth-*.json"))
     assert not (aws_credentials.parent / "aws-adfs-credential-process.py").exists()
-    assume_args = adfs_calls[0]["args"]
-    assert assume_args[0] == "adfs-assume"
-    assert "--jenkins" in assume_args
-    assert "-n" in assume_args
-    assert assume_args[assume_args.index("-d") + 1] == "HBEU"
-    assert assume_args[assume_args.index("-u") + 1] == "aws-user"
+    assume_args = aws_auth_calls[0]["args"]
+    assert assume_args == ["aws-auth", "login", "--json"]
     assert "aws-password" not in " ".join(assume_args)
-    assume_env = adfs_calls[0]["env"]
-    assert assume_env["AD_PASS"] == "aws-password"
+    assume_env = aws_auth_calls[0]["env"]
+    assert "AD_PASS" not in assume_env
     assert assume_env["AWS_SHARED_CREDENTIALS_FILE"] == str(aws_credentials)
+    assert "EFP_CONFIG" in assume_env
+    efp_config = Path(assume_env["EFP_CONFIG"])
+    assert efp_config.exists()
+    efp_config_text = efp_config.read_text(encoding="utf-8")
+    assert "HBEU" in efp_config_text
+    assert "aws-user" in efp_config_text
+    assert "aws-password" in efp_config_text
+    assert "EFP_CONFIG" not in r.env
     assert "/opt/venv/bin" in assume_env["PATH"]
     assert ("/" + "app" + "/venv/bin") not in assume_env["PATH"]
     p = write_runtime_env_file(s, r.env)
@@ -169,7 +173,7 @@ def test_runtime_env_aws_requires_all_portal_fields(tmp_path, monkeypatch):
     assert "AWS_SHARED_CREDENTIALS_FILE" not in env
 
 
-def test_runtime_env_aws_adfs_assume_failure_redacts_password(tmp_path, monkeypatch):
+def test_runtime_env_aws_auth_failure_redacts_password(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     captured = {}
 
@@ -193,12 +197,13 @@ def test_runtime_env_aws_adfs_assume_failure_redacts_password(tmp_path, monkeypa
             },
         )
 
-    assert captured["args"][0] == "adfs-assume"
-    assert captured["env"]["AD_PASS"] == "aws-password"
+    assert captured["args"] == ["aws-auth", "login", "--json"]
+    assert "AD_PASS" not in captured["env"]
     assert "aws-password" not in str(exc.value)
     assert "[REDACTED_SECRET]" in str(exc.value)
     assert not (s.adapter_state_dir / "aws" / "config").exists()
     assert not (s.adapter_state_dir / "aws" / "credentials").exists()
+    assert not (s.adapter_state_dir / "efp" / "config.yaml").exists()
 
 
 def test_runtime_env_sets_java_maven_defaults(tmp_path, monkeypatch):

@@ -14,7 +14,7 @@ from .path_utils import path_exists
 from .settings import Settings
 
 SECRET_MARKERS = ("TOKEN", "PASSWORD", "SECRET", "API_KEY", "ACCESS", "REFRESH", "AUTHORIZATION")
-AWS_ADFS_DEFAULT_COMMAND = "adfs-assume"
+AWS_AUTH_DEFAULT_COMMAND = "aws-auth"
 RUNTIME_VENV_BIN_DIRS = ("/opt/venv/bin",)
 MANAGED_EXTERNAL_ENV_KEYS = {
     "GITHUB_TOKEN", "GITHUB_ACCESS_TOKEN", "GITHUB_API_BASE_URL", "EFP_GITHUB_CONFIG_JSON",
@@ -123,8 +123,8 @@ def _restore_bytes_or_remove(path: Path, previous: bytes | None) -> None:
         pass
 
 
-def _aws_adfs_command(*, domain: str, username: str) -> list[str]:
-    return [AWS_ADFS_DEFAULT_COMMAND, "--jenkins", "-n", "-d", domain, "-u", username]
+def _aws_auth_command() -> list[str]:
+    return [AWS_AUTH_DEFAULT_COMMAND, "login", "--json"]
 
 
 def _path_with_runtime_venv_bins(path_value: str) -> str:
@@ -133,9 +133,11 @@ def _path_with_runtime_venv_bins(path_value: str) -> str:
     return os.pathsep.join(prefix + parts)
 
 
-def _adfs_assume_env(*, password: str, credentials_path: Path) -> dict[str, str]:
+def _aws_auth_env(*, config_path: Path, credentials_path: Path) -> dict[str, str]:
     env = os.environ.copy()
-    env["AD_PASS"] = password
+    for key in ("AD_PASS", "password"):
+        env.pop(key, None)
+    env["EFP_CONFIG"] = str(config_path)
     env["AWS_SHARED_CREDENTIALS_FILE"] = str(credentials_path)
     env["PATH"] = _path_with_runtime_venv_bins(env.get("PATH", ""))
     return env
@@ -152,32 +154,61 @@ def _format_command(args: list[str], secrets: tuple[str, ...]) -> str:
     return " ".join(shlex.quote(_redact_text(str(arg), secrets)) for arg in args)
 
 
-def _run_adfs_assume(command: list[str], *, env: dict[str, str], password: str) -> None:
+def _run_aws_auth(command: list[str], *, env: dict[str, str], password: str) -> None:
     try:
         result = subprocess.run(command, text=True, capture_output=True, check=False, env=env)
     except OSError as exc:
         raise RuntimeError(
-            "Failed to run AWS ADFS assume command: "
+            "Failed to run AWS auth command: "
             f"{_format_command(command, (password,))}: {_redact_text(str(exc), (password,))}"
         ) from exc
     if result.returncode != 0:
         detail = _redact_text((result.stderr or result.stdout or "").strip(), (password,))
         suffix = f": {detail}" if detail else ""
         raise RuntimeError(
-            "AWS ADFS assume command failed: "
+            "AWS auth command failed: "
             f"{_format_command(command, (password,))} exited with {result.returncode}{suffix}"
         )
 
 
-def _write_aws_adfs_cli_files(settings: Settings, *, password: str, command: list[str]) -> Path:
+def _write_private_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _write_aws_auth_config(settings: Settings, *, domain: str, username: str, password: str) -> Path:
+    config_path = settings.adapter_state_dir / "efp" / "config.yaml"
+    _write_private_json(
+        config_path,
+        {
+            "version": 1,
+            "aws": {
+                "enabled": True,
+                "domain": domain,
+                "username": username,
+                "password": password,
+            },
+        },
+    )
+    return config_path
+
+
+def _write_aws_auth_cli_files(settings: Settings, *, domain: str, username: str, password: str, command: list[str]) -> Path:
     aws_dir = settings.adapter_state_dir / "aws"
     credentials_path = aws_dir / "credentials"
     previous_credentials = _read_bytes_if_exists(credentials_path)
+    config_path = settings.adapter_state_dir / "efp" / "config.yaml"
+    previous_config = _read_bytes_if_exists(config_path)
     try:
-        _run_adfs_assume(
+        config_path = _write_aws_auth_config(settings, domain=domain, username=username, password=password)
+        _run_aws_auth(
             command,
-            env=_adfs_assume_env(
-                password=password,
+            env=_aws_auth_env(
+                config_path=config_path,
                 credentials_path=credentials_path,
             ),
             password=password,
@@ -190,6 +221,7 @@ def _write_aws_adfs_cli_files(settings: Settings, *, password: str, command: lis
                 old_path.unlink()
     except Exception:
         _restore_bytes_or_remove(credentials_path, previous_credentials)
+        _restore_bytes_or_remove(config_path, previous_config)
         raise
     return credentials_path
 
@@ -450,10 +482,12 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         aws_username = _first_text(aws.get("username"))
         aws_password = _first_clean_secret(aws.get("password"))
         if aws_domain and aws_username and aws_password:
-            aws_credentials_path = _write_aws_adfs_cli_files(
+            aws_credentials_path = _write_aws_auth_cli_files(
                 settings,
+                domain=aws_domain,
+                username=aws_username,
                 password=aws_password,
-                command=_aws_adfs_command(domain=aws_domain, username=aws_username),
+                command=_aws_auth_command(),
             )
             env["AWS_SHARED_CREDENTIALS_FILE"] = str(aws_credentials_path)
             updated.append("aws")
