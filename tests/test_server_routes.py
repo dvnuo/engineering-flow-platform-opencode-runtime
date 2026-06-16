@@ -8,7 +8,7 @@ from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
 
 
-def test_long_run_routes_are_not_registered(tmp_path, monkeypatch):
+def test_chat_run_recovery_routes_are_registered_without_removed_long_run_controls(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
     routes = {(route.method, route.resource.canonical) for route in app.router.routes()}
@@ -16,7 +16,8 @@ def test_long_run_routes_are_not_registered(tmp_path, monkeypatch):
     assert ("POST", "/api/chat") in routes
     assert ("POST", "/api/chat/stream") in routes
     assert ("GET", "/api/chat/runs") not in routes
-    assert ("GET", "/api/chat/runs/{request_id}") not in routes
+    assert ("GET", "/api/chat/runs/{request_id}") in routes
+    assert ("POST", "/api/chat/runs/{request_id}/cancel") in routes
     assert ("POST", "/api/chat/runs/{request_id}/abort") not in routes
     assert ("GET", "/api/sessions/{session_id}/active-run") not in routes
     assert ("POST", "/api/sessions/{session_id}/abort") not in routes

@@ -5,7 +5,7 @@ FORBIDDEN = [
     "ChatRunStore",
     "CHAT_RUN_STORE_KEY",
     "chat_run_already_active",
-    "/api/chat/runs",
+    "/api/chat/runs/{request_id}/abort",
     "active-run",
     "hard-reset",
     "stream_detached",
