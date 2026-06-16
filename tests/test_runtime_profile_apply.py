@@ -604,7 +604,7 @@ async def test_runtime_profile_status_includes_git_auth_fields(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_runtime_profile_apply_runs_aws_login_and_status(tmp_path, monkeypatch):
+async def test_runtime_profile_apply_configures_aws_auth_and_status(tmp_path, monkeypatch):
     workspace, state = tmp_path / "workspace", tmp_path / "state"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
@@ -612,16 +612,20 @@ async def test_runtime_profile_apply_runs_aws_login_and_status(tmp_path, monkeyp
     aws_auth_calls = []
     real_subprocess_run = subprocess.run
 
-    def fake_aws_auth(args, text=False, capture_output=False, check=False, env=None):
-        call = {"args": list(args), "env": dict(env or {})}
+    def fake_aws_auth(args, input=None, text=False, capture_output=False, check=False, env=None):
+        call = {"args": list(args), "input": input, "env": dict(env or {})}
         if "AWS_SHARED_CREDENTIALS_FILE" not in call["env"]:
             return real_subprocess_run(args, text=text, capture_output=capture_output, check=check, env=env)
         aws_auth_calls.append(call)
-        credentials_path = Path(call["env"]["AWS_SHARED_CREDENTIALS_FILE"])
-        credentials_path.parent.mkdir(parents=True, exist_ok=True)
-        credentials_path.write_text(
-            "[default]\n"
-            "generated = true\n",
+        config_path = Path(call["env"]["EFP_CONFIG"])
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            "version: 1\n"
+            "aws:\n"
+            "  enabled: true\n"
+            "  domain: HBEU\n"
+            "  username: aws-user\n"
+            "  password: aws-password\n",
             encoding="utf-8",
         )
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
@@ -655,9 +659,21 @@ async def test_runtime_profile_apply_runs_aws_login_and_status(tmp_path, monkeyp
     assert body["aws_configured"] is True
     assert "aws" in body["updated_sections"]
     assert "aws-password" not in encoded_body
-    assert aws_auth_calls[0]["args"] == ["aws-auth", "login", "--json"]
+    assert aws_auth_calls[0]["args"] == [
+        "aws-auth",
+        "auth",
+        "login",
+        "--domain",
+        "HBEU",
+        "--username",
+        "aws-user",
+        "--password-stdin",
+        "--json",
+    ]
+    assert aws_auth_calls[0]["input"] == "aws-password\n"
     assert "AD_PASS" not in aws_auth_calls[0]["env"]
     assert "EFP_CONFIG" in aws_auth_calls[0]["env"]
+    assert "AWS_SHARED_CREDENTIALS_FILE" in aws_auth_calls[0]["env"]
     assert "aws-password" not in " ".join(aws_auth_calls[0]["args"])
 
     status_body = await (await client.get("/api/internal/runtime-profile/status")).json()

@@ -27,6 +27,7 @@ MANAGED_EXTERNAL_ENV_KEYS = {
     "GIT_USERNAME", "GIT_PASSWORD", "GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_EDITOR",
     "JAVA_HOME", "JAVA21_HOME", "JDK21_HOME",
     "MAVEN_HOME", "M2_HOME", "MAVEN_CONFIG", "MAVEN_SETTINGS_PATH",
+    "EFP_CONFIG",
 }
 _VERSIONED_JAVA_HOME_RE = re.compile(r"^(JAVA|JDK)\d+_HOME$")
 _REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
@@ -123,8 +124,18 @@ def _restore_bytes_or_remove(path: Path, previous: bytes | None) -> None:
         pass
 
 
-def _aws_auth_command() -> list[str]:
-    return [AWS_AUTH_DEFAULT_COMMAND, "login", "--json"]
+def _aws_auth_configure_command(*, domain: str, username: str) -> list[str]:
+    return [
+        AWS_AUTH_DEFAULT_COMMAND,
+        "auth",
+        "login",
+        "--domain",
+        domain,
+        "--username",
+        username,
+        "--password-stdin",
+        "--json",
+    ]
 
 
 def _path_with_runtime_venv_bins(path_value: str) -> str:
@@ -154,9 +165,9 @@ def _format_command(args: list[str], secrets: tuple[str, ...]) -> str:
     return " ".join(shlex.quote(_redact_text(str(arg), secrets)) for arg in args)
 
 
-def _run_aws_auth(command: list[str], *, env: dict[str, str], password: str) -> None:
+def _run_aws_auth(command: list[str], *, env: dict[str, str], password: str, input_text: str | None = None) -> None:
     try:
-        result = subprocess.run(command, text=True, capture_output=True, check=False, env=env)
+        result = subprocess.run(command, input=input_text, text=True, capture_output=True, check=False, env=env)
     except OSError as exc:
         raise RuntimeError(
             "Failed to run AWS auth command: "
@@ -171,48 +182,26 @@ def _run_aws_auth(command: list[str], *, env: dict[str, str], password: str) -> 
         )
 
 
-def _write_private_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-
-
-def _write_aws_auth_config(settings: Settings, *, domain: str, username: str, password: str) -> Path:
-    config_path = settings.adapter_state_dir / "efp" / "config.yaml"
-    _write_private_json(
-        config_path,
-        {
-            "version": 1,
-            "aws": {
-                "enabled": True,
-                "domain": domain,
-                "username": username,
-                "password": password,
-            },
-        },
-    )
-    return config_path
-
-
-def _write_aws_auth_cli_files(settings: Settings, *, domain: str, username: str, password: str, command: list[str]) -> Path:
+def _write_aws_auth_cli_files(settings: Settings, *, domain: str, username: str, password: str) -> tuple[Path, Path]:
     aws_dir = settings.adapter_state_dir / "aws"
+    aws_dir.mkdir(parents=True, exist_ok=True)
     credentials_path = aws_dir / "credentials"
     previous_credentials = _read_bytes_if_exists(credentials_path)
     config_path = settings.adapter_state_dir / "efp" / "config.yaml"
     previous_config = _read_bytes_if_exists(config_path)
+    auth_env = _aws_auth_env(
+        config_path=config_path,
+        credentials_path=credentials_path,
+    )
     try:
-        config_path = _write_aws_auth_config(settings, domain=domain, username=username, password=password)
         _run_aws_auth(
-            command,
-            env=_aws_auth_env(
-                config_path=config_path,
-                credentials_path=credentials_path,
-            ),
+            _aws_auth_configure_command(domain=domain, username=username),
+            env=auth_env,
             password=password,
+            input_text=password + "\n",
         )
+        if credentials_path.exists():
+            credentials_path.unlink()
         for old_path in (aws_dir / "config", aws_dir / "config.tmp"):
             if old_path.exists():
                 old_path.unlink()
@@ -223,14 +212,19 @@ def _write_aws_auth_cli_files(settings: Settings, *, domain: str, username: str,
         _restore_bytes_or_remove(credentials_path, previous_credentials)
         _restore_bytes_or_remove(config_path, previous_config)
         raise
-    return credentials_path
+    return config_path, credentials_path
 
 
 def aws_status_from_env(env: dict[str, str]) -> dict[str, object]:
+    config_path = env.get("EFP_CONFIG")
     credentials_path = env.get("AWS_SHARED_CREDENTIALS_FILE")
+    config_present = bool(config_path and path_exists(Path(config_path)))
+    credentials_present = bool(credentials_path and path_exists(Path(credentials_path)))
     return {
-        "configured": bool(credentials_path and path_exists(Path(credentials_path))),
-        "credentials_file_present": bool(credentials_path and path_exists(Path(credentials_path))),
+        "configured": config_present or credentials_present,
+        "config_file_present": config_present,
+        "credentials_file_present": credentials_present,
+        "config_path": config_path,
         "credentials_path": credentials_path,
     }
 
@@ -482,13 +476,13 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         aws_username = _first_text(aws.get("username"))
         aws_password = _first_clean_secret(aws.get("password"))
         if aws_domain and aws_username and aws_password:
-            aws_credentials_path = _write_aws_auth_cli_files(
+            aws_config_path, aws_credentials_path = _write_aws_auth_cli_files(
                 settings,
                 domain=aws_domain,
                 username=aws_username,
                 password=aws_password,
-                command=_aws_auth_command(),
             )
+            env["EFP_CONFIG"] = str(aws_config_path)
             env["AWS_SHARED_CREDENTIALS_FILE"] = str(aws_credentials_path)
             updated.append("aws")
         else:

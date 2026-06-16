@@ -27,22 +27,28 @@ def _settings(tmp_path, monkeypatch):
 def _fake_aws_auth(monkeypatch):
     calls = []
 
-    def fake_run(args, text=False, capture_output=False, check=False, env=None):
+    def fake_run(args, input=None, text=False, capture_output=False, check=False, env=None):
         call = {
             "args": list(args),
+            "input": input,
             "text": text,
             "capture_output": capture_output,
             "check": check,
             "env": dict(env or {}),
         }
         calls.append(call)
-        credentials_path = Path(call["env"]["AWS_SHARED_CREDENTIALS_FILE"])
-        credentials_path.parent.mkdir(parents=True, exist_ok=True)
-        credentials_path.write_text(
-            "[default]\n"
-            "generated = true\n",
-            encoding="utf-8",
-        )
+        if call["args"][:3] == ["aws-auth", "auth", "login"]:
+            config_path = Path(call["env"]["EFP_CONFIG"])
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                "version: 1\n"
+                "aws:\n"
+                "  enabled: true\n"
+                "  domain: HBEU\n"
+                "  username: aws-user\n"
+                "  password: aws-password\n",
+                encoding="utf-8",
+            )
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr("efp_opencode_adapter.runtime_env.subprocess.run", fake_run)
@@ -69,27 +75,38 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     r = build_runtime_env_from_config(s, cfg)
     assert r.env["JIRA_EMAIL"] == "u" and r.env["JIRA_API_TOKEN"] == "x" and "JIRA_TOKEN" not in r.env
     aws_credentials = Path(r.env["AWS_SHARED_CREDENTIALS_FILE"])
+    efp_config = Path(r.env["EFP_CONFIG"])
     assert "AWS_CONFIG_FILE" not in r.env
-    assert aws_credentials.exists()
-    assert "generated = true" in aws_credentials.read_text(encoding="utf-8")
+    assert aws_credentials.parent.exists()
+    assert not aws_credentials.exists()
     assert not list(aws_credentials.parent.glob("adfs-auth-*.json"))
     assert not (aws_credentials.parent / "aws-adfs-credential-process.py").exists()
-    assume_args = aws_auth_calls[0]["args"]
-    assert assume_args == ["aws-auth", "login", "--json"]
-    assert "aws-password" not in " ".join(assume_args)
-    assume_env = aws_auth_calls[0]["env"]
-    assert "AD_PASS" not in assume_env
-    assert assume_env["AWS_SHARED_CREDENTIALS_FILE"] == str(aws_credentials)
-    assert "EFP_CONFIG" in assume_env
-    efp_config = Path(assume_env["EFP_CONFIG"])
     assert efp_config.exists()
+    configure_args = aws_auth_calls[0]["args"]
+    assert configure_args == [
+        "aws-auth",
+        "auth",
+        "login",
+        "--domain",
+        "HBEU",
+        "--username",
+        "aws-user",
+        "--password-stdin",
+        "--json",
+    ]
+    assert aws_auth_calls[0]["input"] == "aws-password\n"
+    assert "aws-password" not in " ".join(configure_args)
+    assert len(aws_auth_calls) == 1
+    configure_env = aws_auth_calls[0]["env"]
+    assert "AD_PASS" not in configure_env
+    assert configure_env["AWS_SHARED_CREDENTIALS_FILE"] == str(aws_credentials)
+    assert configure_env["EFP_CONFIG"] == str(efp_config)
     efp_config_text = efp_config.read_text(encoding="utf-8")
     assert "HBEU" in efp_config_text
     assert "aws-user" in efp_config_text
     assert "aws-password" in efp_config_text
-    assert "EFP_CONFIG" not in r.env
-    assert "/opt/venv/bin" in assume_env["PATH"]
-    assert ("/" + "app" + "/venv/bin") not in assume_env["PATH"]
+    assert "/opt/venv/bin" in configure_env["PATH"]
+    assert ("/" + "app" + "/venv/bin") not in configure_env["PATH"]
     p = write_runtime_env_file(s, r.env)
     if os.name != "nt":
         assert oct(os.stat(p).st_mode & 0o777) == "0o600"
@@ -122,7 +139,7 @@ def test_runtime_env_respects_disabled_external_sections(tmp_path, monkeypatch):
         "aws": {"enabled": False, "domain": "HBEU", "username": "aws-user", "password": "aws-password"},
     }
     env = build_runtime_env_from_config(s, cfg).env
-    for key in ("GITHUB_TOKEN", "EFP_GITHUB_CONFIG_JSON", "JIRA_BASE_URL", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_BASE_URL", "EFP_CONFLUENCE_INSTANCES_JSON", "AWS_SHARED_CREDENTIALS_FILE"):
+    for key in ("GITHUB_TOKEN", "EFP_GITHUB_CONFIG_JSON", "JIRA_BASE_URL", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_BASE_URL", "EFP_CONFLUENCE_INSTANCES_JSON", "EFP_CONFIG", "AWS_SHARED_CREDENTIALS_FILE"):
         assert key not in env
 
 
@@ -157,6 +174,7 @@ def test_empty_config_does_not_emit_external_json(tmp_path, monkeypatch):
     assert "GITHUB_API_BASE_URL" not in env
     assert "EFP_JIRA_INSTANCES_JSON" not in env
     assert "EFP_CONFLUENCE_INSTANCES_JSON" not in env
+    assert "EFP_CONFIG" not in env
     assert "AWS_CONFIG_FILE" not in env
 
 
@@ -170,6 +188,7 @@ def test_runtime_env_aws_requires_all_portal_fields(tmp_path, monkeypatch):
             "password": "***REDACTED***",
         }
     }).env
+    assert "EFP_CONFIG" not in env
     assert "AWS_SHARED_CREDENTIALS_FILE" not in env
 
 
@@ -177,7 +196,7 @@ def test_runtime_env_aws_auth_failure_redacts_password(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     captured = {}
 
-    def fake_run(args, text=False, capture_output=False, check=False, env=None):
+    def fake_run(args, input=None, text=False, capture_output=False, check=False, env=None):
         captured["args"] = list(args)
         captured["env"] = dict(env or {})
         return subprocess.CompletedProcess(args, 1, stdout="", stderr="login failed for aws-password")
@@ -197,7 +216,7 @@ def test_runtime_env_aws_auth_failure_redacts_password(tmp_path, monkeypatch):
             },
         )
 
-    assert captured["args"] == ["aws-auth", "login", "--json"]
+    assert captured["args"][:3] == ["aws-auth", "auth", "login"]
     assert "AD_PASS" not in captured["env"]
     assert "aws-password" not in str(exc.value)
     assert "[REDACTED_SECRET]" in str(exc.value)
