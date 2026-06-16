@@ -107,7 +107,8 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     assert assume_env["AD_PASS"] == "aws-password"
     assert assume_env["AWS_CONFIG_FILE"] == str(aws_config)
     assert assume_env["AWS_SHARED_CREDENTIALS_FILE"] == str(aws_credentials)
-    assert "/app/venv/bin" in assume_env["PATH"]
+    assert "/opt/venv/bin" in assume_env["PATH"]
+    assert "/app/venv/bin" not in assume_env["PATH"]
     p = write_runtime_env_file(s, r.env)
     if os.name != "nt":
         assert oct(os.stat(p).st_mode & 0o777) == "0o600"
