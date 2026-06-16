@@ -624,9 +624,8 @@ async def test_runtime_profile_apply_writes_aws_cli_config_and_status(tmp_path, 
                     "enabled": True,
                     "profile": "prod",
                     "region": "us-east-1",
-                    "access_key_id": "AKIA_TEST",
-                    "secret_access_key": "aws-secret",
-                    "session_token": "aws-session",
+                    "username": "adfs-user",
+                    "password": "aws-password",
                 }
             },
         },
@@ -639,17 +638,19 @@ async def test_runtime_profile_apply_writes_aws_cli_config_and_status(tmp_path, 
     assert body["aws_profile"] == "prod"
     assert body["aws_region"] == "us-east-1"
     assert "aws" in body["updated_sections"]
-    assert "aws-secret" not in encoded_body
-    assert "aws-session" not in encoded_body
+    assert "aws-password" not in encoded_body
     assert Path(body["aws_config_path"]).exists()
-    assert Path(body["aws_credentials_path"]).exists()
-    assert "aws_secret_access_key = aws-secret" in Path(body["aws_credentials_path"]).read_text(encoding="utf-8")
+    assert body["aws_credentials_path"] is None
+    config_text = Path(body["aws_config_path"]).read_text(encoding="utf-8")
+    assert "credential_process =" in config_text
+    assert "aws-adfs-credential-process.py" in config_text
 
     status_body = await (await client.get("/api/internal/runtime-profile/status")).json()
     assert status_body["aws_configured"] is True
     assert status_body["aws_profile"] == "prod"
     assert status_body["aws_region"] == "us-east-1"
-    assert "aws-secret" not in json.dumps(status_body)
+    assert status_body["aws_credentials_path"] is None
+    assert "aws-password" not in json.dumps(status_body)
 
     await client.close()
 
