@@ -604,31 +604,29 @@ async def test_runtime_profile_status_includes_git_auth_fields(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_runtime_profile_apply_writes_aws_cli_config_and_status(tmp_path, monkeypatch):
+async def test_runtime_profile_apply_runs_aws_login_and_status(tmp_path, monkeypatch):
     workspace, state = tmp_path / "workspace", tmp_path / "state"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
-    adfs_calls = []
+    aws_auth_calls = []
     real_subprocess_run = subprocess.run
 
-    def fake_adfs_assume(args, text=False, capture_output=False, check=False, env=None):
+    def fake_aws_auth(args, text=False, capture_output=False, check=False, env=None):
         call = {"args": list(args), "env": dict(env or {})}
         if "AWS_SHARED_CREDENTIALS_FILE" not in call["env"]:
             return real_subprocess_run(args, text=text, capture_output=capture_output, check=check, env=env)
-        adfs_calls.append(call)
+        aws_auth_calls.append(call)
         credentials_path = Path(call["env"]["AWS_SHARED_CREDENTIALS_FILE"])
         credentials_path.parent.mkdir(parents=True, exist_ok=True)
         credentials_path.write_text(
-            "[prod]\n"
-            "aws_access_key_id = AKIA_ADFS\n"
-            "aws_secret_access_key = SECRET_ADFS\n"
-            "aws_session_token = TOKEN_ADFS\n",
+            "[default]\n"
+            "generated = true\n",
             encoding="utf-8",
         )
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-    monkeypatch.setattr("efp_opencode_adapter.runtime_env.subprocess.run", fake_adfs_assume)
+    monkeypatch.setattr("efp_opencode_adapter.runtime_env.subprocess.run", fake_aws_auth)
 
     app = create_app(Settings.from_env(), opencode_client=FakeAuthOnlyClient())
     client = TestClient(TestServer(app))
@@ -643,12 +641,9 @@ async def test_runtime_profile_apply_writes_aws_cli_config_and_status(tmp_path, 
             "config": {
                 "aws": {
                     "enabled": True,
-                    "profile": "prod",
-                    "region": "us-east-1",
-                    "username": "adfs-user",
+                    "domain": "HBEU",
+                    "username": "aws-user",
                     "password": "aws-password",
-                    "account_no": "123456789012",
-                    "role": "Engineer",
                 }
             },
         },
@@ -658,27 +653,15 @@ async def test_runtime_profile_apply_writes_aws_cli_config_and_status(tmp_path, 
 
     assert resp.status == 200
     assert body["aws_configured"] is True
-    assert body["aws_profile"] == "prod"
-    assert body["aws_region"] == "us-east-1"
     assert "aws" in body["updated_sections"]
     assert "aws-password" not in encoded_body
-    assert Path(body["aws_config_path"]).exists()
-    assert Path(body["aws_credentials_path"]).exists()
-    config_text = Path(body["aws_config_path"]).read_text(encoding="utf-8")
-    assert "credential_process =" not in config_text
-    assert "AKIA_ADFS" in Path(body["aws_credentials_path"]).read_text(encoding="utf-8")
-    assert adfs_calls[0]["args"][0] == "adfs-assume"
-    assert adfs_calls[0]["args"][adfs_calls[0]["args"].index("-u") + 1] == "adfs-user"
-    assert adfs_calls[0]["args"][adfs_calls[0]["args"].index("-a") + 1] == "123456789012"
-    assert adfs_calls[0]["args"][adfs_calls[0]["args"].index("-r") + 1] == "Engineer"
-    assert adfs_calls[0]["env"]["AD_PASS"] == "aws-password"
-    assert "aws-password" not in " ".join(adfs_calls[0]["args"])
+    assert aws_auth_calls[0]["args"] == ["aws-auth", "login", "--json"]
+    assert "AD_PASS" not in aws_auth_calls[0]["env"]
+    assert "EFP_CONFIG" in aws_auth_calls[0]["env"]
+    assert "aws-password" not in " ".join(aws_auth_calls[0]["args"])
 
     status_body = await (await client.get("/api/internal/runtime-profile/status")).json()
     assert status_body["aws_configured"] is True
-    assert status_body["aws_profile"] == "prod"
-    assert status_body["aws_region"] == "us-east-1"
-    assert Path(status_body["aws_credentials_path"]).exists()
     assert "aws-password" not in json.dumps(status_body)
 
     await client.close()

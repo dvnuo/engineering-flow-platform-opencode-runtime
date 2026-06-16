@@ -212,11 +212,14 @@ RUN set -eux; \
 
 COPY ${CUSTOM_TOOLS_DIR}/jira /usr/local/bin/jira
 COPY ${CUSTOM_TOOLS_DIR}/confluence /usr/local/bin/confluence
+COPY ${CUSTOM_TOOLS_DIR}/aws-auth /usr/local/bin/aws-auth
 RUN set -eux; \
-  chmod 0755 /usr/local/bin/jira /usr/local/bin/confluence; \
+  chmod 0755 /usr/local/bin/jira /usr/local/bin/confluence /usr/local/bin/aws-auth; \
   jira version --json >/dev/null; \
   confluence version --json >/dev/null; \
+  aws-auth version --json >/dev/null; \
   jira commands --json >/dev/null; \
+  aws-auth commands --json >/dev/null; \
   jira schema issue.map-csv --json >/dev/null; \
   jira schema issue.bulk-create --json >/dev/null
 

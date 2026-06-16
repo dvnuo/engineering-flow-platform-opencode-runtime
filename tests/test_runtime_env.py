@@ -24,7 +24,7 @@ def _settings(tmp_path, monkeypatch):
     return Settings.from_env()
 
 
-def _fake_adfs_assume(monkeypatch):
+def _fake_aws_auth(monkeypatch):
     calls = []
 
     def fake_run(args, text=False, capture_output=False, check=False, env=None):
@@ -39,10 +39,8 @@ def _fake_adfs_assume(monkeypatch):
         credentials_path = Path(call["env"]["AWS_SHARED_CREDENTIALS_FILE"])
         credentials_path.parent.mkdir(parents=True, exist_ok=True)
         credentials_path.write_text(
-            "[prod]\n"
-            "aws_access_key_id = AKIA_ADFS\n"
-            "aws_secret_access_key = SECRET_ADFS\n"
-            "aws_session_token = TOKEN_ADFS\n",
+            "[default]\n"
+            "generated = true\n",
             encoding="utf-8",
         )
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
@@ -53,21 +51,16 @@ def _fake_adfs_assume(monkeypatch):
 
 def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
-    adfs_calls = _fake_adfs_assume(monkeypatch)
+    aws_auth_calls = _fake_aws_auth(monkeypatch)
     cfg = {
         "github": {"api_token": "t", "api_base_url": "https://api.github.com"},
         "jira": {"instances": [{"enabled": True, "url": "https://j/", "username": "u", "token": "x", "project": "P"}]},
         "confluence": {"instances": [{"enabled": True, "url": "https://c/", "token": "y"}]},
         "aws": {
             "enabled": True,
-            "profile": "prod",
-            "region": "us-east-1",
-            "output": "json",
-            "username": "adfs-user",
+            "domain": "HBEU",
+            "username": "aws-user",
             "password": "aws-password",
-            "account_no": "123456789012",
-            "role": "Engineer",
-            "session_duration_minutes": "720",
         },
         "proxy": {"enabled": True, "url": "http://h:1", "username": "a", "password": "b"},
         "git": {"author_name": "n", "author_email": "e@x"},
@@ -75,49 +68,34 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     }
     r = build_runtime_env_from_config(s, cfg)
     assert r.env["JIRA_EMAIL"] == "u" and r.env["JIRA_API_TOKEN"] == "x" and "JIRA_TOKEN" not in r.env
-    assert r.env["AWS_PROFILE"] == "prod"
-    assert r.env["AWS_REGION"] == "us-east-1"
-    assert "AWS_ACCESS_KEY_ID" not in r.env
-    assert "AWS_SECRET_ACCESS_KEY" not in r.env
-    assert "AWS_SESSION_TOKEN" not in r.env
-    aws_config = Path(r.env["AWS_CONFIG_FILE"])
     aws_credentials = Path(r.env["AWS_SHARED_CREDENTIALS_FILE"])
-    assert aws_config.exists()
+    assert "AWS_CONFIG_FILE" not in r.env
     assert aws_credentials.exists()
-    if os.name != "nt":
-        assert oct(os.stat(aws_config).st_mode & 0o777) == "0o600"
-    assert "[profile prod]" in aws_config.read_text(encoding="utf-8")
-    assert "region = us-east-1" in aws_config.read_text(encoding="utf-8")
-    assert "credential_process =" not in aws_config.read_text(encoding="utf-8")
-    assert "AKIA_ADFS" in aws_credentials.read_text(encoding="utf-8")
-    assert not list(aws_config.parent.glob("adfs-auth-*.json"))
-    assert not (aws_config.parent / "aws-adfs-credential-process.py").exists()
-    assume_args = adfs_calls[0]["args"]
-    assert assume_args[0] == "adfs-assume"
-    assert "--jenkins" in assume_args
-    assert "-n" in assume_args
-    assert assume_args[assume_args.index("-u") + 1] == "adfs-user"
-    assert assume_args[assume_args.index("-p") + 1] == "prod"
-    assert assume_args[assume_args.index("-R") + 1] == "us-east-1"
-    assert assume_args[assume_args.index("-a") + 1] == "123456789012"
-    assert assume_args[assume_args.index("-r") + 1] == "Engineer"
-    assert assume_args[assume_args.index("--session-duration-minutes") + 1] == "720"
+    assert "generated = true" in aws_credentials.read_text(encoding="utf-8")
+    assert not list(aws_credentials.parent.glob("adfs-auth-*.json"))
+    assert not (aws_credentials.parent / "aws-adfs-credential-process.py").exists()
+    assume_args = aws_auth_calls[0]["args"]
+    assert assume_args == ["aws-auth", "login", "--json"]
     assert "aws-password" not in " ".join(assume_args)
-    assume_env = adfs_calls[0]["env"]
-    assert assume_env["AD_PASS"] == "aws-password"
-    assert assume_env["AWS_CONFIG_FILE"] == str(aws_config)
+    assume_env = aws_auth_calls[0]["env"]
+    assert "AD_PASS" not in assume_env
     assert assume_env["AWS_SHARED_CREDENTIALS_FILE"] == str(aws_credentials)
+    assert "EFP_CONFIG" in assume_env
+    efp_config = Path(assume_env["EFP_CONFIG"])
+    assert efp_config.exists()
+    efp_config_text = efp_config.read_text(encoding="utf-8")
+    assert "HBEU" in efp_config_text
+    assert "aws-user" in efp_config_text
+    assert "aws-password" in efp_config_text
+    assert "EFP_CONFIG" not in r.env
     assert "/opt/venv/bin" in assume_env["PATH"]
-    assert "/app/venv/bin" not in assume_env["PATH"]
+    assert ("/" + "app" + "/venv/bin") not in assume_env["PATH"]
     p = write_runtime_env_file(s, r.env)
     if os.name != "nt":
         assert oct(os.stat(p).st_mode & 0o777) == "0o600"
     redacted = redact_env_for_status(r.env)
     assert redacted["GITHUB_TOKEN"] is True
     assert redacted["HTTPS_PROXY"] == "http://[redacted]@h:1"
-    assert "AWS_ACCESS_KEY_ID" not in redacted
-    assert "AWS_SECRET_ACCESS_KEY" not in redacted
-    assert "AWS_SESSION_TOKEN" not in redacted
     assert "aws-password" not in json.dumps(redacted)
 
 
@@ -141,10 +119,10 @@ def test_runtime_env_respects_disabled_external_sections(tmp_path, monkeypatch):
         "github": {"enabled": False, "api_token": "t"},
         "jira": {"enabled": False, "instances": [{"url": "https://j", "token": "x"}]},
         "confluence": {"enabled": False, "instances": [{"url": "https://c", "token": "y"}]},
-        "aws": {"enabled": False, "access_key_id": "AKIA_TEST", "secret_access_key": "aws-secret", "region": "us-east-1"},
+        "aws": {"enabled": False, "domain": "HBEU", "username": "aws-user", "password": "aws-password"},
     }
     env = build_runtime_env_from_config(s, cfg).env
-    for key in ("GITHUB_TOKEN", "EFP_GITHUB_CONFIG_JSON", "JIRA_BASE_URL", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_BASE_URL", "EFP_CONFLUENCE_INSTANCES_JSON", "AWS_ACCESS_KEY_ID", "AWS_CONFIG_FILE"):
+    for key in ("GITHUB_TOKEN", "EFP_GITHUB_CONFIG_JSON", "JIRA_BASE_URL", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_BASE_URL", "EFP_CONFLUENCE_INSTANCES_JSON", "AWS_SHARED_CREDENTIALS_FILE"):
         assert key not in env
 
 
@@ -180,29 +158,22 @@ def test_empty_config_does_not_emit_external_json(tmp_path, monkeypatch):
     assert "EFP_JIRA_INSTANCES_JSON" not in env
     assert "EFP_CONFLUENCE_INSTANCES_JSON" not in env
     assert "AWS_CONFIG_FILE" not in env
-    assert "AWS_ACCESS_KEY_ID" not in env
 
 
-def test_runtime_env_aws_aliases_and_redacted_placeholders(tmp_path, monkeypatch):
+def test_runtime_env_aws_requires_all_portal_fields(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     env = build_runtime_env_from_config(s, {
         "aws": {
             "enabled": True,
-            "profile_name": "ops",
-            "default_region": "ap-southeast-1",
-            "adfs_username": "alice",
-            "adfs_password": "***REDACTED***",
+            "domain": "HBEU",
+            "username": "alice",
+            "password": "***REDACTED***",
         }
     }).env
-    assert "AWS_PROFILE" not in env
-    assert "AWS_REGION" not in env
     assert "AWS_SHARED_CREDENTIALS_FILE" not in env
-    assert "AWS_ACCESS_KEY_ID" not in env
-    assert "AWS_SECRET_ACCESS_KEY" not in env
-    assert "AWS_SESSION_TOKEN" not in env
 
 
-def test_runtime_env_aws_adfs_assume_failure_redacts_password(tmp_path, monkeypatch):
+def test_runtime_env_aws_auth_failure_redacts_password(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     captured = {}
 
@@ -219,20 +190,20 @@ def test_runtime_env_aws_adfs_assume_failure_redacts_password(tmp_path, monkeypa
             {
                 "aws": {
                     "enabled": True,
-                    "profile": "prod",
-                    "username": "adfs-user",
+                    "domain": "HBEU",
+                    "username": "aws-user",
                     "password": "aws-password",
-                    "assume_command": "custom-adfs-assume",
                 }
             },
         )
 
-    assert captured["args"][0] == "custom-adfs-assume"
-    assert captured["env"]["AD_PASS"] == "aws-password"
+    assert captured["args"] == ["aws-auth", "login", "--json"]
+    assert "AD_PASS" not in captured["env"]
     assert "aws-password" not in str(exc.value)
     assert "[REDACTED_SECRET]" in str(exc.value)
     assert not (s.adapter_state_dir / "aws" / "config").exists()
     assert not (s.adapter_state_dir / "aws" / "credentials").exists()
+    assert not (s.adapter_state_dir / "efp" / "config.yaml").exists()
 
 
 def test_runtime_env_sets_java_maven_defaults(tmp_path, monkeypatch):

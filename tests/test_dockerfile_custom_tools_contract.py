@@ -31,6 +31,9 @@ def test_dockerfile_consumes_prebuilt_custom_tools_without_builder_stage():
         "ARG CUSTOM_TOOLS_DIR=runtime-tools",
         "COPY ${CUSTOM_TOOLS_DIR}/jira /usr/local/bin/jira",
         "COPY ${CUSTOM_TOOLS_DIR}/confluence /usr/local/bin/confluence",
+        "COPY ${CUSTOM_TOOLS_DIR}/aws-auth /usr/local/bin/aws-auth",
+        "aws-auth version --json",
+        "aws-auth commands --json",
         "jira schema issue.map-csv --json",
         "jira schema issue.bulk-create --json",
     ]
@@ -43,6 +46,7 @@ def test_runtime_tools_context_contract_is_documented_and_ignored():
     for token in [
         "runtime-tools/jira",
         "runtime-tools/confluence",
+        "runtime-tools/aws-auth",
         "engineering-flow-platform-tools",
         "scripts/build.sh --snapshot",
     ]:
@@ -59,6 +63,7 @@ def test_smoke_requires_runtime_tools_without_preparing_them():
     for token in [
         "require_runtime_tool jira",
         "require_runtime_tool confluence",
+        "require_runtime_tool aws-auth",
         "Missing runtime-tools/${tool}",
         "docs/CUSTOM_TOOLS_IMAGE.md",
         "jira schema issue.map-csv --json",

@@ -9,14 +9,14 @@ def test_profile_store_env_metadata(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
     monkeypatch.setenv('OPENCODE_CONFIG', str(tmp_path/'ws/.opencode/opencode.json'))
     s=Settings.from_env()
-    o=ProfileOverlay(runtime_profile_id='r',revision=1,config={},applied_at='t',generated_config_hash='h',status='applied',applied=True,env_hash='eh',env_path='/x/opencode.env',restart_performed=True,opencode_pid=123,health_ok=True,aws_configured=True,aws_profile='prod',aws_region='us-east-1',aws_config_path='/x/aws/config',aws_credentials_path='/x/aws/credentials')
+    o=ProfileOverlay(runtime_profile_id='r',revision=1,config={},applied_at='t',generated_config_hash='h',status='applied',applied=True,env_hash='eh',env_path='/x/opencode.env',restart_performed=True,opencode_pid=123,health_ok=True,aws_configured=True)
     store=ProfileOverlayStore(s); store.save(o)
     loaded=store.load()
     assert loaded and loaded.env_hash=='eh' and loaded.opencode_pid==123
-    assert loaded.aws_configured is True and loaded.aws_profile == 'prod'
+    assert loaded.aws_configured is True
     st=build_profile_status_payload(s)
     assert st['env_hash']=='eh' and st['restart_performed'] is True
-    assert st['aws_configured'] is True and st['aws_region'] == 'us-east-1'
+    assert st['aws_configured'] is True
 
 
 def test_profile_store_load_treats_inaccessible_overlay_as_missing(tmp_path, monkeypatch):

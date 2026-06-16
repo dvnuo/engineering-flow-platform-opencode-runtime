@@ -77,7 +77,25 @@ jobs:
               ;;
           esac
           SH
-          chmod 0755 runtime-tools/jira runtime-tools/confluence
+          cat > runtime-tools/aws-auth <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          case "${1:-}" in
+            version)
+              echo '{"ok":true,"version":"stub"}'
+              ;;
+            commands)
+              echo '{"ok":true,"commands":[]}'
+              ;;
+            schema)
+              echo '{"ok":true,"schema":{"type":"object"}}'
+              ;;
+            *)
+              echo '{"ok":true,"stub":true}'
+              ;;
+          esac
+          SH
+          chmod 0755 runtime-tools/jira runtime-tools/confluence runtime-tools/aws-auth
           runtime-tools/jira version --json >/dev/null
           runtime-tools/jira commands --json >/dev/null
           runtime-tools/jira schema issue.map-csv --json >/dev/null
@@ -85,6 +103,8 @@ jobs:
           runtime-tools/confluence version --json >/dev/null
           runtime-tools/confluence commands --json >/dev/null
           runtime-tools/confluence schema anything --json >/dev/null
+          runtime-tools/aws-auth version --json >/dev/null
+          runtime-tools/aws-auth commands --json >/dev/null
           cat > runtime-maven/settings.xml <<'XML'
           <?xml version="1.0" encoding="UTF-8"?>
           <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
