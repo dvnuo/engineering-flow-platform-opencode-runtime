@@ -1,6 +1,6 @@
 import json
 
-from efp_opencode_adapter.opencode_config import build_opencode_config, model_from_runtime_profile, normalize_opencode_provider_id, provider_config_from_runtime_profile, write_opencode_config
+from efp_opencode_adapter.opencode_config import EFP_WORKSPACE_INSTRUCTIONS_GLOB, build_opencode_config, model_from_runtime_profile, normalize_opencode_provider_id, provider_config_from_runtime_profile, write_opencode_config
 from efp_opencode_adapter.settings import Settings
 
 
@@ -14,10 +14,7 @@ def test_build_opencode_config_defaults(tmp_path, monkeypatch):
     assert cfg["share"] == "disabled"
     assert cfg["server"] == {"hostname": "127.0.0.1", "port": 4096}
     assert "permission" in cfg and "efp-main" in cfg["agent"]
-    assert cfg["instructions"] == [
-        str(settings.atlassian_instructions_path),
-        str(settings.java_maven_instructions_path),
-    ]
+    assert cfg["instructions"] == [EFP_WORKSPACE_INSTRUCTIONS_GLOB]
     assert "model" not in cfg["agent"]["efp-main"]
     assert "prompt" not in cfg["agent"]["efp-main"]
     assert cfg["agent"]["efp-main"]["permission"] == {}
@@ -191,23 +188,7 @@ def test_config_hash_deterministic(tmp_path, monkeypatch):
     assert h1 == h2
 
 
-def test_write_opencode_config_writes_generic_atlassian_instructions(tmp_path, monkeypatch):
-    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
-    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "workspace/.opencode/opencode.json"))
-    settings = Settings.from_env()
-    cfg, _, _ = build_opencode_config(settings, None)
-
-    write_opencode_config(settings, cfg)
-
-    content = settings.atlassian_instructions_path.read_text(encoding="utf-8")
-    assert "jira" in content
-    assert "confluence" in content
-    assert "--json" in content
-    assert "EFP" not in content
-
-
-def test_write_opencode_config_writes_java_maven_instructions(tmp_path, monkeypatch):
+def test_write_opencode_config_uses_workspace_instruction_glob_only(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "workspace/.opencode/opencode.json"))
@@ -217,20 +198,5 @@ def test_write_opencode_config_writes_java_maven_instructions(tmp_path, monkeypa
     write_opencode_config(settings, cfg)
 
     written = json.loads(settings.opencode_config_path.read_text(encoding="utf-8"))
-    assert str(settings.atlassian_instructions_path) in written["instructions"]
-    assert str(settings.java_maven_instructions_path) in written["instructions"]
-    content = settings.java_maven_instructions_path.read_text(encoding="utf-8")
-    assert "Zulu JDK 21" in content
-    assert "JAVA_HOME=/opt/jdks/zulu21" in content
-    assert "mvn-jdk" in content
-    assert "mvn -B -ntp" in content
-    assert "/root/.m2/settings.xml" in content
-    assert "/root/.m2/toolchains.xml" in content
-    assert "/workspace" in content
-    assert "Zulu JDK 8" not in content
-    assert "Zulu JDK 17" not in content
-    assert "Zulu JDK 25" not in content
-    assert "jdk 17" not in content
-    assert "mvn-jdk 8" not in content
-    assert "mvn-jdk 17" not in content
-    assert "mvn-jdk 25" not in content
+    assert written["instructions"] == [EFP_WORKSPACE_INSTRUCTIONS_GLOB]
+    assert not (settings.workspace_dir / ".opencode" / "instructions").exists()

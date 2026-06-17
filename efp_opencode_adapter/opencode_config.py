@@ -10,59 +10,7 @@ from .permission_generator import build_permission
 from .settings import Settings
 
 MANAGED_TOP_LEVEL_KEYS = {"permission", "agent", "server", "autoupdate", "share", "provider", "instructions", "_efp_managed"}
-
-ATLASSIAN_INSTRUCTIONS_CONTENT = """# Atlassian CLI
-
-Available Bash commands: `jira`, `confluence`.
-
-- Always use `--json` for command output.
-- Inspect Jira capabilities with `jira commands --json`, `jira schema issue.map-csv --json`, and `jira schema issue.bulk-create --json`.
-- Inspect Confluence capabilities with `confluence commands --json`; for schema details use `confluence schema <command> --json` for the specific command you intend to run.
-- For CSV bulk-create work, never create issues immediately. Inspect the CSV, an example Jira issue, the field catalog, and createmeta. Run `jira issue map-csv`, run `jira issue bulk-create --dry-run`, ask for confirmation, then run `jira issue bulk-create --yes`.
-- Use Confluence commands similarly for documentation operations, inspecting schemas and target pages or spaces before writing.
-"""
-
-JAVA_MAVEN_INSTRUCTIONS_CONTENT = """# Java and Maven
-
-This runtime includes Azul Zulu JDK 21 and Apache Maven.
-
-Available JDK:
-- Azul Zulu JDK 21: /opt/jdks/zulu21
-
-Default:
-- JAVA_HOME=/opt/jdks/zulu21
-- java, javac, jar, Maven, and direct JDK tools use Zulu JDK 21.
-
-Available commands:
-- java
-- javac
-- jar
-- mvn
-- jdk
-- mvn-jdk
-
-Maven:
-- Maven settings.xml is /root/.m2/settings.xml.
-- Maven toolchains.xml is /root/.m2/toolchains.xml.
-- Prefer mvn -B -ntp for automated agent work.
-
-Usage:
-- java -version
-- javac -version
-- mvn -v
-- jdk list
-- jdk current
-- jdk 21 java -version
-- mvn-jdk -v
-- mvn-jdk 21 -B -ntp test
-- jdeps --version
-- jlink --version
-- jcmd -h
-
-Rules:
-- Work under /workspace or /workspace/repos/.
-- Only Zulu JDK 21 is installed in this runtime.
-"""
+EFP_WORKSPACE_INSTRUCTIONS_GLOB = ".efp/instructions/*.instructions.md"
 
 COPILOT_RESPONSES_PROVIDER_NPM = "@ai-sdk/openai"
 COPILOT_PROXY_API_KEY_PLACEHOLDER = "efp-copilot-proxy"
@@ -161,10 +109,7 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
         "share": "disabled",
         "server": {"hostname": "127.0.0.1", "port": 4096},
         "permission": permission,
-        "instructions": [
-            str(settings.atlassian_instructions_path),
-            str(settings.java_maven_instructions_path),
-        ],
+        "instructions": [EFP_WORKSPACE_INSTRUCTIONS_GLOB],
         "agent": {
             "efp-main": {
                 "description": "Portal managed OpenCode primary agent",
@@ -188,31 +133,11 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
 
 
 def write_opencode_config(settings: Settings, config: dict) -> None:
-    write_atlassian_instructions(settings)
-    write_java_maven_instructions(settings)
     path = settings.opencode_config_path
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = Path(f"{path}.tmp")
     tmp_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp_path.replace(path)
-
-
-def write_atlassian_instructions(settings: Settings) -> Path:
-    path = settings.atlassian_instructions_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = Path(f"{path}.tmp")
-    tmp_path.write_text(ATLASSIAN_INSTRUCTIONS_CONTENT, encoding="utf-8")
-    tmp_path.replace(path)
-    return path
-
-
-def write_java_maven_instructions(settings: Settings) -> Path:
-    path = settings.java_maven_instructions_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = Path(f"{path}.tmp")
-    tmp_path.write_text(JAVA_MAVEN_INSTRUCTIONS_CONTENT, encoding="utf-8")
-    tmp_path.replace(path)
-    return path
 
 
 def _hash_index_payload(payload: dict) -> str:
