@@ -34,8 +34,6 @@ class Settings:
     opencode_version: str | None
     ready_timeout_seconds: int
     atlassian_config_path: Path = field(default_factory=lambda: Path(os.getenv("ATLASSIAN_CONFIG") or (Path(os.getenv("HOME", "/root")) / ".config" / "atlassian" / "config.json")))
-    atlassian_instructions_path: Path = field(default_factory=lambda: Path("/workspace/.opencode/instructions/atlassian-cli.md"))
-    java_maven_instructions_path: Path = field(default_factory=lambda: Path("/workspace/.opencode/instructions/java-maven.md"))
     event_bridge_enabled: bool = True
     event_bridge_initial_backoff_seconds: float = 1.0
     event_bridge_max_backoff_seconds: float = 30.0
@@ -74,8 +72,6 @@ class Settings:
             opencode_version=(os.getenv("OPENCODE_VERSION") or None),
             ready_timeout_seconds=int(os.getenv("EFP_OPENCODE_READY_TIMEOUT_SECONDS", "60")),
             atlassian_config_path=Path(os.getenv("ATLASSIAN_CONFIG") or (home_dir / ".config" / "atlassian" / "config.json")),
-            atlassian_instructions_path=Path(os.getenv("ATLASSIAN_INSTRUCTIONS_PATH", str(workspace_dir / ".opencode" / "instructions" / "atlassian-cli.md"))),
-            java_maven_instructions_path=Path(os.getenv("JAVA_MAVEN_INSTRUCTIONS_PATH", str(workspace_dir / ".opencode" / "instructions" / "java-maven.md"))),
             event_bridge_enabled=_env_bool("EFP_OPENCODE_EVENT_BRIDGE_ENABLED", True),
             event_bridge_initial_backoff_seconds=float(os.getenv("EFP_OPENCODE_EVENT_BRIDGE_INITIAL_BACKOFF_SECONDS", "1.0")),
             event_bridge_max_backoff_seconds=float(os.getenv("EFP_OPENCODE_EVENT_BRIDGE_MAX_BACKOFF_SECONDS", "30.0")),
