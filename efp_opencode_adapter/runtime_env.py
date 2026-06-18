@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
-import yaml
-
 from .path_utils import path_exists
 from .settings import Settings
 
@@ -29,6 +27,7 @@ MANAGED_EXTERNAL_ENV_KEYS = {
     "GIT_USERNAME", "GIT_PASSWORD", "GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_EDITOR",
     "JAVA_HOME", "JAVA21_HOME", "JDK21_HOME",
     "MAVEN_HOME", "M2_HOME", "MAVEN_CONFIG", "MAVEN_SETTINGS_PATH",
+    "EFP_JENKINS_USERNAME", "EFP_JENKINS_PASSWORD", "JENKINS_USERNAME", "JENKINS_PASSWORD",
     "EFP_CONFIG",
 }
 _VERSIONED_JAVA_HOME_RE = re.compile(r"^(JAVA|JDK)\d+_HOME$")
@@ -215,73 +214,6 @@ def _write_aws_auth_cli_files(settings: Settings, *, domain: str, username: str,
         _restore_bytes_or_remove(config_path, previous_config)
         raise
     return config_path, credentials_path
-
-
-def _efp_config_path(settings: Settings) -> Path:
-    return settings.adapter_state_dir / "efp" / "config.yaml"
-
-
-def _read_yaml_mapping(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
-def _write_private_yaml(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-
-
-def _build_jenkins_cli_config(jenkins: dict) -> dict | None:
-    instances_source = jenkins.get("instances") if isinstance(jenkins.get("instances"), list) else []
-    instances: list[dict] = []
-    for item in instances_source:
-        if not isinstance(item, dict) or item.get("enabled") is False:
-            continue
-        raw_url = _first_text(item.get("url"), item.get("base_url"), item.get("baseUrl"), item.get("uri"))
-        username = _first_text(item.get("username"), item.get("email"))
-        password = _first_clean_secret(item.get("password"))
-        if not (raw_url and username and password):
-            continue
-        fallback_name = "default" if not instances else f"jenkins-{len(instances) + 1}"
-        name = _first_text(item.get("name"), default=fallback_name)
-        instances.append(
-            {
-                "name": name,
-                "base_url": _trim_url(raw_url),
-                "crumb_mode": "auto",
-                "auth": {
-                    "type": "basic_password",
-                    "username": username,
-                    "password": password,
-                },
-            }
-        )
-    if not instances:
-        return None
-    names = {str(item.get("name") or "") for item in instances}
-    default_instance = _first_text(jenkins.get("default_instance"), jenkins.get("defaultInstance"))
-    if default_instance not in names:
-        default_instance = str(instances[0].get("name") or "")
-    return {
-        "default_instance": default_instance,
-        "instances": instances,
-    }
-
-
-def _write_jenkins_cli_config(config_path: Path, jenkins_config: dict) -> None:
-    payload = _read_yaml_mapping(config_path)
-    payload.setdefault("version", 1)
-    payload["jenkins"] = jenkins_config
-    _write_private_yaml(config_path, payload)
 
 
 def aws_status_from_env(env: dict[str, str]) -> dict[str, object]:
@@ -561,14 +493,16 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
     jenkins_section_present = isinstance(cfg.get("jenkins"), dict)
     jenkins_enabled = jenkins_section_present and _section_enabled(jenkins)
     if jenkins_enabled:
-        jenkins_config = _build_jenkins_cli_config(jenkins)
-        if jenkins_config:
-            jenkins_config_path = Path(env.get("EFP_CONFIG") or _efp_config_path(settings))
-            _write_jenkins_cli_config(jenkins_config_path, jenkins_config)
-            env["EFP_CONFIG"] = str(jenkins_config_path)
+        jenkins_username = _first_text(jenkins.get("username"))
+        jenkins_password = _first_clean_secret(jenkins.get("password"))
+        if jenkins_username and jenkins_password:
+            env["EFP_JENKINS_USERNAME"] = jenkins_username
+            env["EFP_JENKINS_PASSWORD"] = jenkins_password
+            env["JENKINS_USERNAME"] = jenkins_username
+            env["JENKINS_PASSWORD"] = jenkins_password
             updated.append("jenkins")
         else:
-            warnings.append("jenkins enabled but url, username, and password are required")
+            warnings.append("jenkins enabled but username and password are required")
 
     git = cfg.get("git") if isinstance(cfg.get("git"), dict) else {}
     git_user = git.get("user") if isinstance(git.get("user"), dict) else {}
