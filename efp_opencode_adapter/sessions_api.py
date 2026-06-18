@@ -453,6 +453,7 @@ async def list_sessions_handler(request: web.Request) -> web.Response:
 
 
 _FAILED_CHATLOG_STATUSES = {"failed", "error"}
+_RUNNING_CHATLOG_STATUSES = {"running", "accepted", "queued", "in_progress"}
 _FAILED_EVENT_TYPES = {"edit.failed", "chat.failed", "execution.failed", "error"}
 
 
@@ -504,10 +505,11 @@ def _latest_session_runtime_status_metadata(chatlog_store, sid: str) -> dict[str
         return {}
 
     status = str(latest.get("status") or "")
+    normalized_status = status.lower().strip()
     request_id = str(latest.get("request_id") or "")
     latest_event = _latest_runtime_event(latest.get("runtime_events"))
     latest_event_type = _event_type(latest_event)
-    failed = status.lower() in _FAILED_CHATLOG_STATUSES or latest_event_type in _FAILED_EVENT_TYPES
+    failed = normalized_status in _FAILED_CHATLOG_STATUSES or latest_event_type in _FAILED_EVENT_TYPES
     timestamp = str(latest.get("finished_at") or latest.get("created_at") or "")
 
     if not failed:
@@ -518,6 +520,14 @@ def _latest_session_runtime_status_metadata(chatlog_store, sid: str) -> dict[str
             out["request_id"] = safe_preview(request_id, 200)
         if timestamp:
             out["latest_chatlog_at"] = safe_preview(timestamp, 100)
+        if normalized_status in _RUNNING_CHATLOG_STATUSES:
+            runtime_events = latest.get("runtime_events") if isinstance(latest.get("runtime_events"), list) else []
+            out["latest_event_type"] = safe_preview(latest_event_type or "chat.started", 100)
+            out["latest_event_state"] = "running"
+            out["completion_state"] = "running"
+            out["last_execution_id"] = safe_preview(request_id, 200) if request_id else ""
+            out["latest_request_id"] = safe_preview(request_id, 200) if request_id else ""
+            out["runtime_events"] = [safe_preview(event, 1000) for event in runtime_events[-50:]]
         return out
 
     error = _latest_entry_error(latest, latest_event)

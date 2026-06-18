@@ -3,8 +3,11 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from efp_opencode_adapter.app_keys import CHATLOG_STORE_KEY, SESSION_STORE_KEY
 from efp_opencode_adapter.server import create_app
+from efp_opencode_adapter.session_store import SessionRecord
 from efp_opencode_adapter.settings import Settings
+from efp_opencode_adapter.thinking_events import utc_now_iso
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -35,5 +38,37 @@ async def test_sessions_endpoints_keep_basic_opencode_contract(tmp_path, monkeyp
         deleted = await (await client.delete("/api/sessions/s1")).json()
         assert deleted["success"] is True
         assert "chat_runs_deleted" not in deleted
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_exposes_running_chatlog_for_portal_recovery(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    now = utc_now_iso()
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord("s-running", "oc-running", "Running", None, None, now, now, "", 0)
+    )
+    app[CHATLOG_STORE_KEY].start_entry(
+        "s-running",
+        request_id="req-running",
+        message="hello",
+        runtime_events=[{"type": "llm_thinking", "summary": "Thinking"}],
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        detail = await (await client.get("/api/sessions/s-running")).json()
+
+        assert detail["success"] is True
+        metadata = detail["metadata"]
+        assert metadata["chatlog_status"] == "running"
+        assert metadata["latest_event_state"] == "running"
+        assert metadata["completion_state"] == "running"
+        assert metadata["request_id"] == "req-running"
+        assert metadata["last_execution_id"] == "req-running"
+        assert metadata["latest_request_id"] == "req-running"
+        assert metadata["runtime_events"][-1]["type"] == "llm_thinking"
     finally:
         await client.close()

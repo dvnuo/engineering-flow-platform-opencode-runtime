@@ -53,6 +53,7 @@ FINAL_RESPONSE_CONTRACT_SUFFIX = (
 
 DATA_URL_RE = re.compile(r"data:[A-Za-z0-9.+/_-]+(?:;[A-Za-z0-9.+/_=-]+)*;base64,[A-Za-z0-9+/=]+")
 TERMINAL_ASSISTANT_COMPLETION_STATES = {"completed", "blocked", "error", "empty_final"}
+RUNNING_CHATLOG_STATUSES = {"running", "accepted", "queued", "in_progress"}
 
 
 def _stable_runtime_event_id(*, event_type: str, session_id: str, request_id: str, opencode_session_id: str, data: dict[str, Any] | None) -> str:
@@ -1223,6 +1224,8 @@ def _chatlog_run_status(app: web.Application, *, session_id: str, request_id: st
         status = str(entry.get("status") or "").strip().lower()
         if status in {"success", "completed", "complete"}:
             state = "completed"
+        elif status in RUNNING_CHATLOG_STATUSES:
+            state = "running"
         elif status in {"cancelled", "canceled"}:
             state = "cancelled"
         elif status:
@@ -1251,7 +1254,7 @@ def _chatlog_run_status(app: web.Application, *, session_id: str, request_id: st
             "updated_at": str(entry.get("updated_at") or chatlog.get("updated_at") or ""),
             "latest_event_at": str(entry.get("updated_at") or chatlog.get("updated_at") or ""),
             "latest_event_seq": 0,
-            "replay_available": False,
+            "replay_available": bool(final_payload["runtime_events"]),
             "final_payload": final_payload if state in {"completed", "failed", "cancelled"} else None,
             "source_of_truth": "chatlog",
         }
@@ -1356,7 +1359,7 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
 
     payload = {**payload, "session_id": session_id, "request_id": request_id}
     existing_run = chat_run_registry.get(request_id, session_id=session_id)
-    if existing_run is not None:
+    if existing_run is not None or payload.get("reconnect") is True:
         return await _stream_existing_chat_run(request, session_id=session_id, request_id=request_id)
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", "Connection": "close"})
     await resp.prepare(request)
