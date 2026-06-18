@@ -1,8 +1,10 @@
 import json
 
+import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from efp_opencode_adapter.opencode_client import OpenCodeTransportDisconnected
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
@@ -35,6 +37,22 @@ class DelayedAssistantClient(FakeOpenCodeClient):
                 )
                 self._assistant_added.add(session_id)
         return list(self.messages.get(session_id, []))
+
+
+class AcceptedThenDisconnectedClient(FakeOpenCodeClient):
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        user = {"id": message_id or "u-accepted-stream", "role": "user", "parts": parts}
+        assistant = {
+            "id": "a-accepted-stream",
+            "role": "assistant",
+            "parts": [{"type": "text", "text": "accepted stream final"}],
+        }
+        self.messages[session_id].extend([user, assistant])
+        raise OpenCodeTransportDisconnected(
+            "POST",
+            f"/session/{session_id}/message",
+            aiohttp.client_exceptions.ServerDisconnectedError("Server disconnected"),
+        )
 
 
 def _sse_events(body):
@@ -106,5 +124,28 @@ async def test_chat_stream_waits_for_delayed_assistant_visible_response(tmp_path
         final_payload = dict(events)["final"]
         assert final_payload["completion_state"] == "completed"
         assert final_payload["response"] == "delayed stream final"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_recovers_when_send_disconnects_after_message_is_accepted(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.1")
+    client = TestClient(TestServer(create_app(Settings.from_env(), opencode_client=AcceptedThenDisconnectedClient())))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/chat/stream", json={"message": "hello stream", "session_id": "s-stream-accepted", "request_id": "r-stream-accepted"})
+        body = await resp.text()
+        events = _sse_events(body)
+        names = [name for name, _payload in events]
+
+        assert resp.status == 200
+        assert "event: error" not in body
+        assert names[-2:] == ["final", "done"]
+        final_payload = dict(events)["final"]
+        assert final_payload["completion_state"] == "completed"
+        assert final_payload["response"] == "accepted stream final"
     finally:
         await client.close()

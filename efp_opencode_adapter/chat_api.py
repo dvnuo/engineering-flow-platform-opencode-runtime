@@ -36,6 +36,7 @@ from .opencode_message_adapter import (
     find_latest_assistant_completion,
     message_id as adapter_message_id,
     message_role as adapter_message_role,
+    message_to_visible_text,
 )
 from .repository_workspace import ensure_repo_checkout, parse_create_pr_repo_request
 from .session_store import SessionDeletedError, SessionRecord
@@ -54,6 +55,7 @@ FINAL_RESPONSE_CONTRACT_SUFFIX = (
 DATA_URL_RE = re.compile(r"data:[A-Za-z0-9.+/_-]+(?:;[A-Za-z0-9.+/_=-]+)*;base64,[A-Za-z0-9+/=]+")
 TERMINAL_ASSISTANT_COMPLETION_STATES = {"completed", "blocked", "error", "empty_final"}
 RUNNING_CHATLOG_STATUSES = {"running", "accepted", "queued", "in_progress"}
+RECOVERABLE_SEND_ACCEPTANCE_PROBE_SECONDS = 5.0
 
 
 def _stable_runtime_event_id(*, event_type: str, session_id: str, request_id: str, opencode_session_id: str, data: dict[str, Any] | None) -> str:
@@ -272,6 +274,159 @@ async def _send_message(
         return await client.prompt_async(session_id, payload)
 
     raise OpenCodeClientError("OpenCode client does not support send_message")
+
+
+def _message_recovery_key(message: Any) -> str:
+    mid = adapter_message_id(message)
+    if mid:
+        return f"id:{mid}"
+    role = adapter_message_role(message).lower()
+    text = message_to_visible_text(message).strip()
+    if role or text:
+        return f"{role}:{text}"
+    return ""
+
+
+def _is_recoverable_send_disconnect(exc: OpenCodeClientError, opencode_session_id: str) -> bool:
+    if not getattr(exc, "is_recoverable_transport_error", False):
+        return False
+    method = str(getattr(exc, "method", "") or "").upper()
+    if method and method != "POST":
+        return False
+    path = str(getattr(exc, "path", "") or "")
+    if path:
+        normalized_path = path.split("?", 1)[0].rstrip("/")
+        expected_path = f"/session/{opencode_session_id}/message"
+        if normalized_path != expected_path:
+            return False
+    return True
+
+
+def _detect_recovered_send_acceptance(
+    *,
+    before_messages: list[dict[str, Any]],
+    after_messages: list[dict[str, Any]],
+    user_message_id: str,
+    expected_user_text: str,
+) -> str:
+    before_keys = {key for message in before_messages if (key := _message_recovery_key(message))}
+    expected_text = expected_user_text.strip()
+    for message in after_messages:
+        mid = adapter_message_id(message)
+        if user_message_id and mid == user_message_id:
+            return "user_message_id"
+        key = _message_recovery_key(message)
+        if key and key in before_keys:
+            continue
+        role = adapter_message_role(message).lower()
+        if role == "user" and expected_text and message_to_visible_text(message).strip() == expected_text:
+            return "matching_user_text"
+    return ""
+
+
+async def _probe_recoverable_send_acceptance(
+    *,
+    client: Any,
+    opencode_session_id: str,
+    before_messages: list[dict[str, Any]],
+    user_message_id: str,
+    expected_user_text: str,
+    timeout_seconds: float,
+    poll_seconds: float,
+) -> dict[str, Any]:
+    timeout = max(0.0, min(RECOVERABLE_SEND_ACCEPTANCE_PROBE_SECONDS, timeout_seconds))
+    poll_interval = max(0.05, min(max(0.05, poll_seconds), 0.5))
+    deadline = time.monotonic() + timeout
+    attempts = 0
+    last_messages: list[dict[str, Any]] = []
+    last_error = ""
+    while True:
+        attempts += 1
+        try:
+            last_messages = await client.list_messages(opencode_session_id)
+            last_error = ""
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_error = str(safe_preview(str(exc) or exc.__class__.__name__, 500))
+            last_messages = []
+        else:
+            detected_by = _detect_recovered_send_acceptance(
+                before_messages=before_messages,
+                after_messages=last_messages,
+                user_message_id=user_message_id,
+                expected_user_text=expected_user_text,
+            )
+            if detected_by:
+                return {
+                    "accepted": True,
+                    "detected_by": detected_by,
+                    "attempts": attempts,
+                    "messages": last_messages,
+                }
+
+        now = time.monotonic()
+        if now >= deadline:
+            return {
+                "accepted": False,
+                "detected_by": "",
+                "attempts": attempts,
+                "messages": last_messages,
+                "probe_error": last_error,
+                "timeout_seconds": timeout,
+            }
+        await asyncio.sleep(min(poll_interval, max(0.0, deadline - now)))
+
+
+async def _send_message_with_recoverable_transport_probe(
+    *,
+    client: Any,
+    opencode_session_id: str,
+    parts: list[dict[str, Any]],
+    model: str | None,
+    agent: str | None,
+    system: str | None,
+    message_id: str,
+    before_messages: list[dict[str, Any]],
+    expected_user_text: str,
+    settings: Any,
+) -> tuple[Any, dict[str, Any] | None]:
+    try:
+        return (
+            await _send_message(
+                client,
+                opencode_session_id,
+                parts=parts,
+                model=model,
+                agent=agent,
+                system=system,
+                message_id=message_id,
+            ),
+            None,
+        )
+    except OpenCodeClientError as exc:
+        if not _is_recoverable_send_disconnect(exc, opencode_session_id):
+            raise
+        recovery = await _probe_recoverable_send_acceptance(
+            client=client,
+            opencode_session_id=opencode_session_id,
+            before_messages=before_messages,
+            user_message_id=message_id,
+            expected_user_text=expected_user_text,
+            timeout_seconds=float(getattr(settings, "chat_completion_timeout_seconds", RECOVERABLE_SEND_ACCEPTANCE_PROBE_SECONDS)),
+            poll_seconds=float(getattr(settings, "chat_completion_poll_seconds", 1.0)),
+        )
+        debug = {
+            "accepted": bool(recovery.get("accepted")),
+            "detected_by": str(recovery.get("detected_by") or ""),
+            "attempts": int(recovery.get("attempts") or 0),
+            "original_error": safe_preview(str(exc), 500),
+        }
+        if recovery.get("probe_error"):
+            debug["probe_error"] = recovery.get("probe_error")
+        if not recovery.get("accepted"):
+            raise
+        return {"messages": recovery.get("messages") or []}, debug
 
 
 def _is_terminal_assistant_completion(probe: dict[str, Any]) -> bool:
@@ -757,6 +912,7 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             except Exception:
                 logger.warning("failed to save user display message", exc_info=True)
 
+        send_recovery_debug: dict[str, Any] | None = None
         skill_handled, response_payload, synthetic_response, skill_debug = await _maybe_apply_skill_invocation(
             app=app,
             client=client,
@@ -773,14 +929,17 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             request_id=request_id,
         )
         if not skill_handled:
-            response_payload = await _send_message(
-                client,
-                record.opencode_session_id,
+            response_payload, send_recovery_debug = await _send_message_with_recoverable_transport_probe(
+                client=client,
+                opencode_session_id=record.opencode_session_id,
                 parts=parts,
                 model=model,
                 agent=agent,
                 system=system,
                 message_id=initial_user_message_id,
+                before_messages=before_messages,
+                expected_user_text=message,
+                settings=settings,
             )
 
         if synthetic_response is not None:
@@ -933,6 +1092,8 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         }
         if skill_debug:
             llm_debug["skill_invocation"] = skill_debug
+        if send_recovery_debug:
+            llm_debug["send_disconnect_probe"] = send_recovery_debug
         if partial_recovery or getattr(updated, "partial_recovery", False):
             llm_debug["partial_recovery"] = True
         chatlog_store.finish_entry(

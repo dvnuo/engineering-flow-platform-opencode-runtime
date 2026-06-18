@@ -1,9 +1,11 @@
 import json
 
+import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from efp_opencode_adapter.app_keys import CHATLOG_STORE_KEY, SESSION_STORE_KEY
+from efp_opencode_adapter.opencode_client import OpenCodeTransportDisconnected
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
@@ -51,6 +53,31 @@ class NoAssistantClient(FakeOpenCodeClient):
         user = {"id": message_id or "u-timeout", "role": "user", "parts": parts}
         self.messages[session_id].append(user)
         return {"message": user}
+
+
+class AcceptedThenDisconnectedClient(FakeOpenCodeClient):
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        user = {"id": message_id or "u-accepted", "role": "user", "parts": parts}
+        assistant = {
+            "id": "a-accepted",
+            "role": "assistant",
+            "parts": [{"type": "text", "text": "accepted final"}],
+        }
+        self.messages[session_id].extend([user, assistant])
+        raise OpenCodeTransportDisconnected(
+            "POST",
+            f"/session/{session_id}/message",
+            aiohttp.client_exceptions.ServerDisconnectedError("Server disconnected"),
+        )
+
+
+class NotAcceptedDisconnectedClient(FakeOpenCodeClient):
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        raise OpenCodeTransportDisconnected(
+            "POST",
+            f"/session/{session_id}/message",
+            aiohttp.client_exceptions.ServerDisconnectedError("Server disconnected"),
+        )
 
 
 def _event_types(payload):
@@ -123,6 +150,48 @@ async def test_chat_waits_for_delayed_assistant_visible_response(tmp_path, monke
         assert payload["ok"] is True
         assert payload["completion_state"] == "completed"
         assert payload["response"] == "delayed final"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_recovers_when_send_disconnects_after_message_is_accepted(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.1")
+    app = create_app(Settings.from_env(), opencode_client=AcceptedThenDisconnectedClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/chat", json={"message": "accepted", "session_id": "s-accepted", "request_id": "r-accepted"})
+        payload = await resp.json()
+
+        assert resp.status == 200
+        assert payload["ok"] is True
+        assert payload["completion_state"] == "completed"
+        assert payload["response"] == "accepted final"
+        assert "chat.failed" not in _event_types(payload)
+        assert "execution.failed" not in _event_types(payload)
+        assert payload["_llm_debug"]["send_disconnect_probe"]["accepted"] is True
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_does_not_recover_unaccepted_send_disconnect(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "0.2")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.1")
+    app = create_app(Settings.from_env(), opencode_client=NotAcceptedDisconnectedClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/chat", json={"message": "not accepted", "session_id": "s-not-accepted", "request_id": "r-not-accepted"})
+        payload = await resp.json()
+
+        assert resp.status == 502
+        assert payload["error"] == "opencode_error"
+        assert "transport disconnected" in payload["detail"]
     finally:
         await client.close()
 
