@@ -3,7 +3,7 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from efp_opencode_adapter.app_keys import SESSION_STORE_KEY
+from efp_opencode_adapter.app_keys import CHATLOG_STORE_KEY, SESSION_STORE_KEY
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
@@ -77,6 +77,32 @@ async def test_chat_short_request_completes_without_long_task_metadata(tmp_path,
         encoded = json.dumps(payload)
         for forbidden in ("continuation.", "timeout_recovery", "transport_recovery", "stream_detached", "chat_run"):
             assert forbidden not in encoded
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_run_status_reports_running_chatlog_as_running(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    app[CHATLOG_STORE_KEY].start_entry(
+        "s-running-status",
+        request_id="req-running-status",
+        message="hello",
+        runtime_events=[{"type": "chat.started"}],
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/api/chat/runs/req-running-status?session_id=s-running-status")
+        payload = await resp.json()
+
+        assert resp.status == 200
+        assert payload["source_of_truth"] == "chatlog"
+        assert payload["state"] == "running"
+        assert payload["terminal"] is False
+        assert payload["replay_available"] is True
+        assert payload["final_payload"] is None
     finally:
         await client.close()
 
