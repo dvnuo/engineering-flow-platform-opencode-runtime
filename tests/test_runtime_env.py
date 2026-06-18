@@ -70,14 +70,8 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
         },
         "jenkins": {
             "enabled": True,
-            "instances": [
-                {
-                    "name": "ci",
-                    "url": "https://jenkins.example.com/",
-                    "username": "jenkins-user",
-                    "password": "jenkins-password",
-                }
-            ],
+            "username": "jenkins-user",
+            "password": "jenkins-password",
         },
         "proxy": {"enabled": True, "url": "http://h:1", "username": "a", "password": "b"},
         "git": {"author_name": "n", "author_email": "e@x"},
@@ -116,11 +110,11 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     assert "HBEU" in efp_config_text
     assert "aws-user" in efp_config_text
     assert "aws-password" in efp_config_text
-    assert "jenkins:" in efp_config_text
-    assert "default_instance: ci" in efp_config_text
-    assert "base_url: https://jenkins.example.com" in efp_config_text
-    assert "username: jenkins-user" in efp_config_text
-    assert "password: jenkins-password" in efp_config_text
+    assert "jenkins:" not in efp_config_text
+    assert r.env["EFP_JENKINS_USERNAME"] == "jenkins-user"
+    assert r.env["EFP_JENKINS_PASSWORD"] == "jenkins-password"
+    assert r.env["JENKINS_USERNAME"] == "jenkins-user"
+    assert r.env["JENKINS_PASSWORD"] == "jenkins-password"
     assert "/opt/venv/bin" in configure_env["PATH"]
     assert ("/" + "app" + "/venv/bin") not in configure_env["PATH"]
     p = write_runtime_env_file(s, r.env)
@@ -128,8 +122,11 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
         assert oct(os.stat(p).st_mode & 0o777) == "0o600"
     redacted = redact_env_for_status(r.env)
     assert redacted["GITHUB_TOKEN"] is True
+    assert redacted["EFP_JENKINS_PASSWORD"] is True
+    assert redacted["JENKINS_PASSWORD"] is True
     assert redacted["HTTPS_PROXY"] == "http://[redacted]@h:1"
     assert "aws-password" not in json.dumps(redacted)
+    assert "jenkins-password" not in json.dumps(redacted)
 
 
 def test_read_runtime_env_file_treats_permission_denied_path_as_missing(tmp_path, monkeypatch):
@@ -153,10 +150,10 @@ def test_runtime_env_respects_disabled_external_sections(tmp_path, monkeypatch):
         "jira": {"enabled": False, "instances": [{"url": "https://j", "token": "x"}]},
         "confluence": {"enabled": False, "instances": [{"url": "https://c", "token": "y"}]},
         "aws": {"enabled": False, "domain": "HBEU", "username": "aws-user", "password": "aws-password"},
-        "jenkins": {"enabled": False, "instances": [{"url": "https://jenkins", "username": "u", "password": "p"}]},
+        "jenkins": {"enabled": False, "username": "u", "password": "p"},
     }
     env = build_runtime_env_from_config(s, cfg).env
-    for key in ("GITHUB_TOKEN", "EFP_GITHUB_CONFIG_JSON", "JIRA_BASE_URL", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_BASE_URL", "EFP_CONFLUENCE_INSTANCES_JSON", "EFP_CONFIG", "AWS_SHARED_CREDENTIALS_FILE"):
+    for key in ("GITHUB_TOKEN", "EFP_GITHUB_CONFIG_JSON", "JIRA_BASE_URL", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_BASE_URL", "EFP_CONFLUENCE_INSTANCES_JSON", "EFP_CONFIG", "AWS_SHARED_CREDENTIALS_FILE", "EFP_JENKINS_USERNAME", "EFP_JENKINS_PASSWORD", "JENKINS_USERNAME", "JENKINS_PASSWORD"):
         assert key not in env
 
 
@@ -209,19 +206,19 @@ def test_runtime_env_aws_requires_all_portal_fields(tmp_path, monkeypatch):
     assert "AWS_SHARED_CREDENTIALS_FILE" not in env
 
 
-def test_runtime_env_jenkins_requires_url_username_and_password(tmp_path, monkeypatch):
+def test_runtime_env_jenkins_requires_username_and_password(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     result = build_runtime_env_from_config(
         s,
         {
             "jenkins": {
                 "enabled": True,
-                "instances": [{"url": "https://jenkins.example.com", "username": "alice"}],
+                "username": "alice",
             }
         },
     )
     assert "EFP_CONFIG" not in result.env
-    assert "jenkins enabled but url, username, and password are required" in result.warnings
+    assert "jenkins enabled but username and password are required" in result.warnings
 
 
 def test_runtime_env_aws_auth_failure_redacts_password(tmp_path, monkeypatch):
