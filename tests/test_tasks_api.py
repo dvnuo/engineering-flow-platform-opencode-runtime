@@ -68,6 +68,27 @@ class FakeTaskOpenCodeClient(FakeOpenCodeClient):
         return {"success": False, "supported": False, "reason": "cancel_endpoint_unsupported"}
 
 
+def _write_skills_index(state, *names):
+    state.mkdir(parents=True, exist_ok=True)
+    skills = [
+        {
+            "efp_name": name,
+            "opencode_name": name.replace("_", "-"),
+            "description": f"Skill {name}",
+            "opencode_supported": True,
+            "runtime_equivalence": True,
+            "programmatic": False,
+            "missing_tools": [],
+            "missing_opencode_tools": [],
+        }
+        for name in names
+    ]
+    (state / "skills-index.json").write_text(
+        json.dumps({"generated_at": "now", "skills": skills}),
+        encoding="utf-8",
+    )
+
+
 async def _wait_terminal(client, task_id, tries=80):
     payload = None
     for _ in range(tries):
@@ -612,7 +633,9 @@ async def test_task_prompt_message_id_is_msg_prefixed_and_imported(tmp_path, mon
 
 @pytest.mark.asyncio
 async def test_agent_async_task_without_metadata_system_prompt_sends_default_system(tmp_path, monkeypatch):
-    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    state = tmp_path / "state"
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    _write_skills_index(state, "runtime-review")
     fake = FakeTaskOpenCodeClient()
     app = create_app(Settings.from_env(), opencode_client=fake)
     c = TestClient(TestServer(app)); await c.start_server()
@@ -640,7 +663,9 @@ async def test_agent_async_task_without_metadata_system_prompt_sends_default_sys
 
 @pytest.mark.asyncio
 async def test_agent_async_task_same_portal_session_reuses_opencode_session(tmp_path, monkeypatch):
-    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    state = tmp_path / "state"
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    _write_skills_index(state, "runtime-review")
     fake = FakeTaskOpenCodeClient()
     app = create_app(Settings.from_env(), opencode_client=fake)
     c = TestClient(TestServer(app)); await c.start_server()
@@ -669,7 +694,9 @@ async def test_agent_async_task_same_portal_session_reuses_opencode_session(tmp_
 
 @pytest.mark.asyncio
 async def test_agent_async_task_prompt_includes_selected_skill_and_user_task(tmp_path, monkeypatch):
-    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    state = tmp_path / "state"
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
+    _write_skills_index(state, "migration-planner")
     fake = FakeTaskOpenCodeClient()
     app = create_app(Settings.from_env(), opencode_client=fake)
     c = TestClient(TestServer(app)); await c.start_server()
@@ -689,6 +716,36 @@ async def test_agent_async_task_prompt_includes_selected_skill_and_user_task(tmp
     assert resp.status == 202
     prompt = fake.prompt_async_calls[0][1]["parts"][0]["text"]
     assert "migration-planner" in prompt
+    assert "Run the OpenCode agent skill `migration-planner`" in prompt
     assert "Build a concise migration checklist." in prompt
     assert ".opencode/skills/migration-planner/SKILL.md" in prompt
+    await c.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_async_task_unknown_skill_blocks_without_dispatch(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    c = TestClient(TestServer(app))
+    await c.start_server()
+
+    resp = await c.post("/api/tasks/execute", json={
+        "task_id": "agent-unknown-skill-1",
+        "task_type": "agent_async_task",
+        "session_id": "agent-task:unknown-skill",
+        "input_payload": {
+            "schema": "agent_async_task.v1",
+            "user_task": "Use a missing skill.",
+            "skill_name": "missing-skill",
+        },
+        "metadata": {"portal_task_mode": "agent_async_task"},
+    })
+
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["status"] == "blocked"
+    assert body["output_payload"]["error_code"] == "skill_unknown_skill"
+    assert fake.prompt_async_calls == []
+    assert any(event["type"] == "skill.blocked" for event in body["runtime_events"])
     await c.close()

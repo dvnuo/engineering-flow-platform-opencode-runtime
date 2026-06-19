@@ -21,6 +21,7 @@ from .chat_api import extract_assistant_text
 from .opencode_client import OpenCodeClientError
 from .opencode_ids import new_opencode_message_id
 from .session_store import SessionRecord
+from .skill_invocation import build_skill_prompt, evaluate_skill_invocation, parse_slash_invocation
 from .task_completion_parser import parse_task_completion
 from .task_prompts import build_task_prompt
 from .task_store import TaskRecord, TaskStore, is_valid_task_id, utc_now_iso
@@ -339,6 +340,138 @@ async def _publish_task_event(app: web.Application, record: TaskRecord, event_ty
     await app[EVENT_BUS_KEY].publish(event)
 
 
+async def _publish_task_runtime_event(
+    app: web.Application,
+    record: TaskRecord,
+    event_type: str,
+    *,
+    state: str,
+    summary: str,
+    data: dict[str, Any] | None = None,
+) -> None:
+    event = {
+        "type": event_type,
+        "engine": "opencode",
+        "task_id": record.task_id,
+        "request_id": record.request_id,
+        "state": state,
+        "status": state,
+        "summary": summary,
+        "data": data or {},
+        "session_id": record.portal_session_id,
+        "opencode_session_id": record.opencode_session_id,
+        "timestamp": utc_now_iso(),
+    }
+    md = record.metadata or {}
+    runtime_profile = md.get("runtime_profile") if isinstance(md.get("runtime_profile"), dict) else {}
+    profile_version, runtime_profile_id = profile_version_from_metadata(md if isinstance(md, dict) else {}, runtime_profile)
+    gid = md.get("group_id") or md.get("portal_group_id")
+    cid = md.get("coordination_run_id") or md.get("portal_coordination_run_id")
+    if gid:
+        event["group_id"] = gid
+    if cid:
+        event["coordination_run_id"] = cid
+    trace_context = build_trace_context(
+        app[SETTINGS_KEY],
+        request_id=record.request_id,
+        session_id=record.portal_session_id,
+        task_id=record.task_id,
+        opencode_session_id=record.opencode_session_id,
+        group_id=gid or "",
+        coordination_run_id=cid or "",
+        profile_version=profile_version,
+        runtime_profile_id=runtime_profile_id,
+    )
+    add_trace_context(event, trace_context)
+    store: TaskStore = app[TASK_STORE_KEY]
+    store.append_event(record.task_id, event)
+    await app[EVENT_BUS_KEY].publish(event)
+
+
+def _first_task_text(*values: Any) -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _agent_async_task_skill_name(input_payload: dict[str, Any], metadata: dict[str, Any]) -> str:
+    return _first_task_text(input_payload.get("skill_name"), metadata.get("portal_skill_name"))
+
+
+def _blocked_skill_payload(skill_name: str, reason: str, permission_state: str = "unknown") -> dict[str, Any]:
+    summary = f"Selected skill `{skill_name}` cannot run in OpenCode runtime: {reason}."
+    return {
+        "status": "blocked",
+        "summary": summary,
+        "final_response": summary,
+        "needs_user_input": True,
+        "blockers": [summary],
+        "next_recommendation": "Verify the skills repository was synced and the runtime profile permits this skill, then re-dispatch the task.",
+        "artifacts": [],
+        "audit_trace": [
+            {
+                "event": "skill.blocked",
+                "skill_name": skill_name,
+                "reason": reason,
+                "permission_state": permission_state,
+            }
+        ],
+        "external_actions": [],
+        "error_code": f"skill_{reason}",
+    }
+
+
+def _agent_async_task_prompt_with_skill(
+    settings: Any,
+    task_prompt: str,
+    input_payload: dict[str, Any],
+    metadata: dict[str, Any],
+) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+    skill_name = _agent_async_task_skill_name(input_payload, metadata)
+    if not skill_name:
+        return task_prompt, None, None
+    invocation = parse_slash_invocation(f"/{skill_name}")
+    if invocation is None:
+        debug = {
+            "kind": "skill",
+            "raw_name": skill_name,
+            "skill_name": skill_name,
+            "reason": "invalid_skill_name",
+            "permission_state": "unknown",
+            "blocked": True,
+            "used_skill_prompt": False,
+        }
+        return task_prompt, debug, _blocked_skill_payload(skill_name, "invalid_skill_name")
+
+    decision = evaluate_skill_invocation(settings, invocation)
+    debug = {
+        "kind": "skill",
+        "raw_name": invocation.raw_name,
+        "skill_name": invocation.skill_name,
+        "arguments": invocation.arguments,
+        "reason": decision.reason,
+        "permission_state": decision.permission_state,
+        "blocked": False,
+        "used_skill_prompt": False,
+    }
+    if not decision.allowed:
+        debug["blocked"] = True
+        return (
+            task_prompt,
+            debug,
+            _blocked_skill_payload(invocation.skill_name, decision.reason, decision.permission_state),
+        )
+
+    skill_prompt = build_skill_prompt(decision.skill or {}, invocation)
+    debug["used_skill_prompt"] = True
+    return (
+        f"{skill_prompt}\n\nPortal background task instructions:\n{task_prompt}",
+        debug,
+        None,
+    )
+
+
 async def _ensure_session(request: web.Request, portal_session_id: str, task_type: str, task_id: str) -> SessionRecord:
     store = request.app[SESSION_STORE_KEY]
     client = request.app[OPENCODE_CLIENT_KEY]
@@ -405,10 +538,58 @@ async def execute_task_handler(request: web.Request) -> web.Response:
     client = request.app[OPENCODE_CLIENT_KEY]
     try:
         session_record = await _ensure_session(request, portal_session_id, task_type, task_id)
+        settings = request.app[SETTINGS_KEY]
         prompt = build_task_prompt(task_id=task_id, task_type=task_type, input_payload=input_payload, metadata=metadata, source=source, shared_context_ref=shared_context_ref, context_ref=context_ref)
+        skill_debug: dict[str, Any] | None = None
+        skill_blocked_payload: dict[str, Any] | None = None
+        if task_type == "agent_async_task":
+            prompt, skill_debug, skill_blocked_payload = _agent_async_task_prompt_with_skill(
+                settings,
+                prompt,
+                input_payload,
+                metadata,
+            )
         record = TaskRecord(task_id=task_id, task_type=task_type, request_id=request_id, status="accepted", portal_session_id=portal_session_id, opencode_session_id=session_record.opencode_session_id, input_payload=input_payload, metadata=metadata, output_payload={}, artifacts={}, runtime_events=[], error=None, created_at=utc_now_iso(), source=source, shared_context_ref=shared_context_ref, context_ref=context_ref)
         task_store.save(record)
         await _publish_task_event(request.app, record, "task.accepted", "accepted")
+        if skill_debug is not None:
+            await _publish_task_runtime_event(
+                request.app,
+                record,
+                "skill.detected",
+                state="running",
+                summary="Skill invocation detected for agent task.",
+                data=skill_debug,
+            )
+        if skill_blocked_payload is not None:
+            record = task_store.update(
+                task_id,
+                status="blocked",
+                output_payload=skill_blocked_payload,
+                error=None,
+                finished_at=utc_now_iso(),
+                completion_source="skill_validation",
+            )
+            await _publish_task_runtime_event(
+                request.app,
+                record,
+                "skill.blocked",
+                state="blocked",
+                summary=str(skill_blocked_payload.get("summary") or "Skill blocked."),
+                data=skill_debug or {},
+            )
+            await _publish_task_event(request.app, record, "task.completed", "blocked")
+            latest = task_store.get(task_id) or record
+            return web.json_response(_to_public(latest), status=200)
+        if skill_debug is not None and skill_debug.get("used_skill_prompt"):
+            await _publish_task_runtime_event(
+                request.app,
+                record,
+                "skill.prompt_applied",
+                state="running",
+                summary="Skill prompt applied to agent task.",
+                data=skill_debug,
+            )
 
         msgs = await client.list_messages(record.opencode_session_id)
         record = task_store.update(task_id, message_cursor=len(msgs) if isinstance(msgs, list) else None)
