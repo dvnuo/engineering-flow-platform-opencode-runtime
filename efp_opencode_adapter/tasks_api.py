@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from typing import Any
 from uuid import uuid4
@@ -28,6 +29,13 @@ from .task_store import TaskRecord, TaskStore, is_valid_task_id, utc_now_iso
 from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
 
 TERMINAL = {"success", "error", "blocked", "cancelled"}
+TASK_STATUS_EVENT_TAIL_ITEMS = 10
+TASK_STATUS_MAX_TEXT_CHARS = 20_000
+TASK_STATUS_MAX_LIST_ITEMS = 50
+TASK_STATUS_MAX_DICT_ITEMS = 100
+TASK_STATUS_MAX_DEPTH = 6
+TASK_STATUS_EVENT_KEYS = frozenset({"runtime_events", "events", "thinking_events"})
+TASK_STATUS_OMIT_KEYS = frozenset({"result", "raw_agent_payload", "_llm_debug"})
 AGENT_ASYNC_TASK_DEFAULT_SYSTEM_PROMPT = (
     "You are executing an EFP Portal agent_async_task as an autonomous background runtime task. "
     "Do not ask the user for more information during execution. Make reasonable assumptions, "
@@ -36,6 +44,68 @@ AGENT_ASYNC_TASK_DEFAULT_SYSTEM_PROMPT = (
     "Preserve secrets: never output tokens, credentials, API keys, or raw authorization values. "
     "Return exactly one JSON object matching the requested task schema."
 )
+
+
+def _truncate_task_status_text(value: str, *, limit: int = TASK_STATUS_MAX_TEXT_CHARS) -> str:
+    if len(value) <= limit:
+        return value
+    omitted = len(value) - limit
+    return f"{value[:limit]}...[truncated {omitted} chars; full JSON is available from the task result download]"
+
+
+def _compact_task_status_value(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
+    if key in TASK_STATUS_OMIT_KEYS:
+        return {"_omitted": True, "reason": "available_in_full_task_json_download"}
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _truncate_task_status_text(value)
+    if depth >= TASK_STATUS_MAX_DEPTH:
+        return _truncate_task_status_text(str(value))
+    if isinstance(value, dict):
+        items = list(value.items())
+        compact: dict[str, Any] = {}
+        for item_key, item_value in items[:TASK_STATUS_MAX_DICT_ITEMS]:
+            normalized_key = str(item_key)
+            compact[normalized_key] = _compact_task_status_value(
+                item_value,
+                key=normalized_key,
+                depth=depth + 1,
+            )
+        if len(items) > TASK_STATUS_MAX_DICT_ITEMS:
+            compact["_truncated_keys_count"] = len(items) - TASK_STATUS_MAX_DICT_ITEMS
+        return compact
+    if isinstance(value, list):
+        selected = value[-TASK_STATUS_EVENT_TAIL_ITEMS:] if key in TASK_STATUS_EVENT_KEYS else value[:TASK_STATUS_MAX_LIST_ITEMS]
+        compact_list = [
+            _compact_task_status_value(item, depth=depth + 1)
+            for item in selected
+        ]
+        if key not in TASK_STATUS_EVENT_KEYS and len(value) > TASK_STATUS_MAX_LIST_ITEMS:
+            compact_list.append({"_truncated_items_count": len(value) - TASK_STATUS_MAX_LIST_ITEMS})
+        return compact_list
+    return _truncate_task_status_text(str(value))
+
+
+def _compact_public_task_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, value in payload.items():
+        normalized_key = str(key)
+        if normalized_key in TASK_STATUS_EVENT_KEYS and isinstance(value, list):
+            compact[normalized_key] = _compact_task_status_value(value, key=normalized_key)
+            compact[f"{normalized_key}_count"] = len(value)
+            compact[f"{normalized_key}_truncated"] = len(value) > TASK_STATUS_EVENT_TAIL_ITEMS
+            continue
+        compact[normalized_key] = _compact_task_status_value(value, key=normalized_key)
+    compact["full_payload_available"] = True
+    return compact
+
+
+def _safe_task_result_filename(task_id: str) -> str:
+    safe_task_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(task_id or "task")).strip(".-")
+    if not safe_task_id:
+        safe_task_id = "task"
+    return f"task-{safe_task_id}-full.json"
 
 
 def _looks_structured_terminal_text(text: str) -> bool:
@@ -302,7 +372,7 @@ def _public_status_and_payload(record: TaskRecord) -> tuple[str, dict[str, Any] 
     return record.status, record.output_payload
 
 
-def _to_public(record: TaskRecord) -> dict[str, Any]:
+def _to_public_full(record: TaskRecord) -> dict[str, Any]:
     status, output_payload = _public_status_and_payload(record)
     return {
         "ok": status not in {"error", "blocked", "cancelled"},
@@ -319,6 +389,10 @@ def _to_public(record: TaskRecord) -> dict[str, Any]:
         "engine": "opencode",
         "metadata": {"portal_session_id": record.portal_session_id, "opencode_session_id": record.opencode_session_id, "task_type": record.task_type},
     }
+
+
+def _to_public(record: TaskRecord) -> dict[str, Any]:
+    return _compact_public_task_payload(_to_public_full(record))
 
 
 async def _publish_task_event(app: web.Application, record: TaskRecord, event_type: str, state: str) -> None:
@@ -821,6 +895,21 @@ async def get_task_handler(request: web.Request) -> web.Response:
     if record is None:
         return web.json_response({"error": "task_not_found"}, status=404)
     return web.json_response(_to_public(record))
+
+
+async def get_task_full_handler(request: web.Request) -> web.Response:
+    task_id = request.match_info["task_id"]
+    if not is_valid_task_id(task_id):
+        return web.json_response({"error": "invalid_task_id"}, status=400)
+    store: TaskStore = request.app[TASK_STORE_KEY]
+    record = store.get(task_id)
+    if record is None:
+        return web.json_response({"error": "task_not_found"}, status=404)
+    filename = _safe_task_result_filename(task_id)
+    return web.json_response(
+        _to_public_full(record),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 async def cancel_task_handler(request: web.Request) -> web.Response:
