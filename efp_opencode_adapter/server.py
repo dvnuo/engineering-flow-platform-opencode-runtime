@@ -64,7 +64,7 @@ from .opencode_process import OpenCodeProcessManager
 from .session_store import SessionStore
 from .skill_sync import sync_runtime_skills
 from .task_store import TaskStore
-from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_handler, resume_active_task_collectors
+from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_full_handler, get_task_handler, resume_active_task_collectors
 from .request_bindings import RequestBindingStore
 from .user_display_store import UserDisplayStore
 from .sessions_api import (
@@ -572,6 +572,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/api/chat/runs/{request_id}", chat_run_status_handler)
     app.router.add_post("/api/chat/runs/{request_id}/cancel", chat_run_cancel_handler)
     app.router.add_post("/api/tasks/execute", execute_task_handler)
+    app.router.add_get("/api/tasks/{task_id}/full", get_task_full_handler)
     app.router.add_get("/api/tasks/{task_id}", get_task_handler)
     app.router.add_post("/api/tasks/{task_id}/cancel", cancel_task_handler)
     app.router.add_get("/api/events", events_ws_handler)

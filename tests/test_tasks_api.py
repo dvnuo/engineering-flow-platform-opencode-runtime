@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 from efp_opencode_adapter.task_store import TaskRecord, utc_now_iso
-from efp_opencode_adapter.tasks_api import _assistant_text_from_event, _assistant_text_from_messages, _permission_event_delta, cleanup_task_background_tasks, resume_active_task_collectors
+from efp_opencode_adapter.tasks_api import _assistant_text_from_event, _assistant_text_from_messages, _permission_event_delta, _to_public, _to_public_full, cleanup_task_background_tasks, resume_active_task_collectors
 from test_t06_helpers import FakeOpenCodeClient
 
 
@@ -97,6 +97,44 @@ async def _wait_terminal(client, task_id, tries=80):
             return payload
         await asyncio.sleep(0.02)
     return payload
+
+
+def test_public_task_status_is_compact_and_full_payload_is_available():
+    runtime_events = [{"type": "step", "idx": idx, "message": "x" * 200} for idx in range(25)]
+    record = TaskRecord(
+        task_id="task-large-result",
+        task_type="generic_agent_task",
+        request_id="req-large-result",
+        status="success",
+        portal_session_id="portal-session",
+        opencode_session_id="opencode-session",
+        input_payload={},
+        metadata={},
+        output_payload={
+            "summary": "done",
+            "result": {"events": runtime_events, "raw": "y" * 1000},
+            "raw_agent_payload": {"debug": "z" * 1000},
+        },
+        artifacts={},
+        runtime_events=runtime_events,
+        error=None,
+        created_at=utc_now_iso(),
+        finished_at=utc_now_iso(),
+    )
+
+    compact = _to_public(record)
+    assert compact["status"] == "success"
+    assert compact["full_payload_available"] is True
+    assert compact["runtime_events_count"] == 25
+    assert compact["runtime_events_truncated"] is True
+    assert len(compact["runtime_events"]) == 10
+    assert compact["runtime_events"][0]["idx"] == 15
+    assert compact["output_payload"]["result"]["_omitted"] is True
+    assert compact["output_payload"]["raw_agent_payload"]["_omitted"] is True
+
+    full = _to_public_full(record)
+    assert len(full["runtime_events"]) == 25
+    assert full["output_payload"]["result"]["raw"] == "y" * 1000
 
 
 @pytest.mark.asyncio
