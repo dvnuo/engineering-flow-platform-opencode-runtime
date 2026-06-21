@@ -432,9 +432,40 @@ async def _fork_session_preserving_prefix(
     )
 
 
+TASK_SESSION_ID_PREFIXES = (
+    "agent-task:",
+    "agent-task-",
+    "generic-task:",
+    "generic-task-",
+    "delegation:",
+    "delegation-",
+    "task-",
+)
+
+
+def _session_id_is_task_session(session_id: object) -> bool:
+    if not isinstance(session_id, str):
+        return False
+    return session_id.strip().startswith(TASK_SESSION_ID_PREFIXES)
+
+
+def _request_includes_task_sessions(request: web.Request) -> bool:
+    raw = str(request.query.get("include_task_sessions", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 async def list_sessions_handler(request: web.Request) -> web.Response:
     store = request.app[SESSION_STORE_KEY]
-    records = sorted(store.list_active(), key=lambda x: x.updated_at, reverse=True)
+    include_task_sessions = _request_includes_task_sessions(request)
+    records = sorted(
+        (
+            record
+            for record in store.list_active()
+            if include_task_sessions or not _session_id_is_task_session(record.portal_session_id)
+        ),
+        key=lambda x: x.updated_at,
+        reverse=True,
+    )
     return web.json_response(
         {
             "sessions": [

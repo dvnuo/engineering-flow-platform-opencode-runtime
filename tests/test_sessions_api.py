@@ -72,3 +72,51 @@ async def test_session_detail_exposes_running_chatlog_for_portal_recovery(tmp_pa
         assert metadata["runtime_events"][-1]["type"] == "llm_thinking"
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_sessions_listing_hides_task_sessions_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    now = utc_now_iso()
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord("s-human", "oc-human", "Human", None, None, now, "2026-06-21T00:03:00+00:00", "hello", 2)
+    )
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord("agent-task:task-1", "oc-task-1", "Task", None, None, now, "2026-06-21T00:04:00+00:00", "task", 1)
+    )
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord("agent-task-task-2", "oc-task-2", "Native Task", None, None, now, "2026-06-21T00:05:00+00:00", "task", 1)
+    )
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord("task-task-3", "oc-task-3", "Fallback Task", None, None, now, "2026-06-21T00:06:00+00:00", "task", 1)
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        listing = await (await client.get("/api/sessions")).json()
+
+        assert [item["session_id"] for item in listing["sessions"]] == ["s-human"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_sessions_listing_can_include_task_sessions_for_debug(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    now = utc_now_iso()
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord("s-human", "oc-human", "Human", None, None, now, "2026-06-21T00:03:00+00:00", "hello", 2)
+    )
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord("agent-task:task-1", "oc-task-1", "Task", None, None, now, "2026-06-21T00:04:00+00:00", "task", 1)
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        listing = await (await client.get("/api/sessions?include_task_sessions=1")).json()
+
+        assert [item["session_id"] for item in listing["sessions"]] == ["agent-task:task-1", "s-human"]
+    finally:
+        await client.close()
