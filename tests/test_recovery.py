@@ -81,3 +81,19 @@ async def test_recovery_marks_oversized_active_task_blocked_without_loading_full
     got = TaskStore(paths.tasks_dir).get('oversized-active')
     assert got.status == 'blocked'
     assert got.output_payload['error_code'] == 'adapter_restarted_task_recovery_required'
+
+
+@pytest.mark.asyncio
+async def test_recovery_does_not_count_task_when_blocked_record_is_not_persisted(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
+    st = Settings.from_env(); paths = ensure_state_dirs(st)
+    store = TaskStore(paths.tasks_dir)
+    record = TaskRecord(task_id='cannot-persist-blocked', task_type='generic_agent_task', request_id='req-cannot-persist', status='running', portal_session_id='portal-cannot-persist', opencode_session_id='oc-cannot-persist', input_payload={}, metadata={}, output_payload={}, artifacts={}, runtime_events=[], error=None, created_at=utc_now_iso())
+    store.save(record)
+    monkeypatch.setenv('EFP_OPENCODE_TASKS_PERSIST_MAX_FILE_BYTES', '1')
+
+    rm = RecoveryManager(settings=st,state_paths=paths,session_store=SessionStore(paths.sessions_dir),chatlog_store=ChatLogStore(paths.chatlogs_dir),opencode_client=FakeOpenCodeClient())
+    summary = await rm.recover()
+
+    assert summary['tasks_marked_blocked'] == 0
+    assert TaskStore(paths.tasks_dir).get('cannot-persist-blocked').status == 'running'

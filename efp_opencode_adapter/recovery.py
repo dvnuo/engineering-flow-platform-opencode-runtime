@@ -82,6 +82,11 @@ def _blocked_after_restart_record(record: TaskRecord) -> TaskRecord:
     )
 
 
+def _save_blocked_after_restart(task_store: TaskStore, record: TaskRecord) -> bool:
+    saved = task_store.save(_blocked_after_restart_record(record))
+    return saved.status == "blocked"
+
+
 class RecoveryManager:
     def __init__(self, *, settings, state_paths, session_store, chatlog_store, opencode_client):
         self.settings = settings
@@ -111,16 +116,16 @@ class RecoveryManager:
         task_store = TaskStore(self.state_paths.tasks_dir)
         blocked_task_ids = set()
         for record in task_store.iter_active(max_records=None, max_scan_records=None, use_default_limits=False):
-            task_store.save(_blocked_after_restart_record(record))
-            blocked_task_ids.add(record.task_id)
-            summary["tasks_marked_blocked"] += 1
+            if _save_blocked_after_restart(task_store, record):
+                blocked_task_ids.add(record.task_id)
+                summary["tasks_marked_blocked"] += 1
         for path in self.state_paths.tasks_dir.glob("*.json"):
             if path.stem in blocked_task_ids:
                 continue
             record = _active_record_from_task_file_prefix(path)
             if record is None:
                 continue
-            task_store.save(_blocked_after_restart_record(record))
-            blocked_task_ids.add(record.task_id)
-            summary["tasks_marked_blocked"] += 1
+            if _save_blocked_after_restart(task_store, record):
+                blocked_task_ids.add(record.task_id)
+                summary["tasks_marked_blocked"] += 1
         return summary
