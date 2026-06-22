@@ -25,7 +25,14 @@ from .session_store import SessionRecord
 from .skill_invocation import build_skill_prompt, evaluate_skill_invocation, parse_slash_invocation
 from .task_completion_parser import parse_task_completion
 from .task_prompts import build_task_prompt
-from .task_store import TaskRecord, TaskStore, is_valid_task_id, utc_now_iso
+from .task_store import (
+    TaskRecord,
+    TaskRecordLoadLimitExceeded,
+    TaskRecordPersistenceLimitExceeded,
+    TaskStore,
+    is_valid_task_id,
+    utc_now_iso,
+)
 from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
 
 TERMINAL = {"success", "error", "blocked", "cancelled"}
@@ -106,6 +113,33 @@ def _safe_task_result_filename(task_id: str) -> str:
     if not safe_task_id:
         safe_task_id = "task"
     return f"task-{safe_task_id}-full.json"
+
+
+def _task_record_load_limit_response(exc: TaskRecordLoadLimitExceeded) -> web.Response:
+    return web.json_response(
+        {
+            "error": exc.code,
+            "task_id": exc.task_id,
+            "message": str(exc),
+            "limit_bytes": exc.limit_bytes,
+            "file_size_bytes": exc.file_size_bytes,
+            "recommendation": "Increase EFP_OPENCODE_TASKS_LOAD_MAX_FILE_BYTES or archive the oversized task record.",
+        },
+        status=413,
+    )
+
+
+def _task_record_persistence_limit_response(exc: TaskRecordPersistenceLimitExceeded) -> web.Response:
+    return web.json_response(
+        {
+            "error": exc.code,
+            "task_id": exc.task_id,
+            "message": str(exc),
+            "limit_bytes": exc.limit_bytes,
+            "recommendation": "Increase EFP_OPENCODE_TASKS_PERSIST_MAX_FILE_BYTES so task records can be stored.",
+        },
+        status=507,
+    )
 
 
 def _looks_structured_terminal_text(text: str) -> bool:
@@ -603,7 +637,10 @@ async def execute_task_handler(request: web.Request) -> web.Response:
     request_id = payload.get("request_id") or f"task-{uuid4()}"
 
     task_store: TaskStore = request.app[TASK_STORE_KEY]
-    existing = task_store.get(task_id)
+    try:
+        existing = task_store.get(task_id)
+    except TaskRecordLoadLimitExceeded as exc:
+        return _task_record_load_limit_response(exc)
     if existing:
         if existing.status in {"accepted", "running"}:
             return web.json_response({"ok": True, "status": "accepted", "task_id": task_id, "request_id": existing.request_id}, status=202)
@@ -694,6 +731,10 @@ async def execute_task_handler(request: web.Request) -> web.Response:
         if prompt_id != opencode_message_id:
             record = task_store.update(task_id, opencode_prompt_id=prompt_id)
         return web.json_response({"ok": True, "status": "accepted", "task_id": task_id, "request_id": request_id}, status=202)
+    except TaskRecordLoadLimitExceeded as exc:
+        return _task_record_load_limit_response(exc)
+    except TaskRecordPersistenceLimitExceeded as exc:
+        return _task_record_persistence_limit_response(exc)
     except OpenCodeClientError as exc:
         record = await _mark_dispatch_error(request.app, task_id, task_type=task_type, request_id=request_id, portal_session_id=portal_session_id, input_payload=input_payload, metadata=metadata, source=source, shared_context_ref=shared_context_ref, context_ref=context_ref, exc=exc)
         await _publish_task_event(request.app, record, "task.completed", "error")
@@ -866,6 +907,8 @@ async def collect_task_completion(app: web.Application, task_id: str) -> None:
             record = store.update(task_id, status="running", output_payload=out, finished_at=None)
             await _publish_task_event(app, record, "task.progress", "running")
             await asyncio.sleep(poll)
+    except TaskRecordLoadLimitExceeded:
+        return
     except Exception as exc:
         record = store.get(task_id)
         if record is None:
@@ -891,7 +934,10 @@ async def get_task_handler(request: web.Request) -> web.Response:
     if not is_valid_task_id(task_id):
         return web.json_response({"error": "invalid_task_id"}, status=400)
     store: TaskStore = request.app[TASK_STORE_KEY]
-    record = store.get(task_id)
+    try:
+        record = store.get(task_id)
+    except TaskRecordLoadLimitExceeded as exc:
+        return _task_record_load_limit_response(exc)
     if record is None:
         return web.json_response({"error": "task_not_found"}, status=404)
     return web.json_response(_to_public(record))
@@ -902,7 +948,10 @@ async def get_task_full_handler(request: web.Request) -> web.Response:
     if not is_valid_task_id(task_id):
         return web.json_response({"error": "invalid_task_id"}, status=400)
     store: TaskStore = request.app[TASK_STORE_KEY]
-    record = store.get(task_id)
+    try:
+        record = store.get(task_id)
+    except TaskRecordLoadLimitExceeded as exc:
+        return _task_record_load_limit_response(exc)
     if record is None:
         return web.json_response({"error": "task_not_found"}, status=404)
     filename = _safe_task_result_filename(task_id)
@@ -917,7 +966,10 @@ async def cancel_task_handler(request: web.Request) -> web.Response:
     if not is_valid_task_id(task_id):
         return web.json_response({"error": "invalid_task_id"}, status=400)
     store: TaskStore = request.app[TASK_STORE_KEY]
-    record = store.get(task_id)
+    try:
+        record = store.get(task_id)
+    except TaskRecordLoadLimitExceeded as exc:
+        return _task_record_load_limit_response(exc)
     if record is None:
         return web.json_response({"error": "task_not_found"}, status=404)
     if record.status in TERMINAL:

@@ -17,6 +17,34 @@ DEFAULT_TASK_PERSIST_MAX_FILE_BYTES = 2_000_000
 DEFAULT_TASK_PERSIST_EVENT_TAIL = 50
 
 
+class TaskRecordStoreError(RuntimeError):
+    def __init__(self, code: str, *, task_id: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.task_id = task_id
+
+
+class TaskRecordLoadLimitExceeded(TaskRecordStoreError):
+    def __init__(self, *, task_id: str, limit_bytes: int, file_size_bytes: int):
+        super().__init__(
+            "task_record_exceeds_load_limit",
+            task_id=task_id,
+            message=f"Task record {task_id} is {file_size_bytes} bytes and exceeds load limit {limit_bytes} bytes",
+        )
+        self.limit_bytes = limit_bytes
+        self.file_size_bytes = file_size_bytes
+
+
+class TaskRecordPersistenceLimitExceeded(TaskRecordStoreError):
+    def __init__(self, *, task_id: str, limit_bytes: int):
+        super().__init__(
+            "task_record_exceeds_persistence_limit",
+            task_id=task_id,
+            message=f"Task record {task_id} cannot be encoded within persistence limit {limit_bytes} bytes",
+        )
+        self.limit_bytes = limit_bytes
+
+
 def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -68,6 +96,8 @@ class TaskStore:
             return None
         try:
             return self._read_record(path)
+        except TaskRecordLoadLimitExceeded:
+            raise
         except Exception:
             return None
 
@@ -77,7 +107,13 @@ class TaskStore:
         encoded = _encode_record_for_persistence(record)
         if encoded is None:
             tmp.unlink(missing_ok=True)
-            return record
+            existing = self.get(record.task_id) if path.exists() else None
+            if existing is not None:
+                return existing
+            raise TaskRecordPersistenceLimitExceeded(
+                task_id=record.task_id,
+                limit_bytes=task_store_limits()["persist_max_file_bytes"],
+            )
         tmp.write_text(encoded, encoding="utf-8")
         tmp.replace(path)
         return record
@@ -222,8 +258,14 @@ class TaskStore:
         file_size_limit = _coerce_non_negative_int(
             max_file_bytes if max_file_bytes is not None else task_store_limits()["load_max_file_bytes"]
         )
-        if file_size_limit is not None and path.stat().st_size > file_size_limit:
-            raise ValueError("task_record_exceeds_load_limit")
+        if file_size_limit is not None:
+            file_size = path.stat().st_size
+            if file_size > file_size_limit:
+                raise TaskRecordLoadLimitExceeded(
+                    task_id=path.stem,
+                    limit_bytes=file_size_limit,
+                    file_size_bytes=file_size,
+                )
         payload = json.loads(path.read_text(encoding="utf-8"))
         return TaskRecord(**payload)
 

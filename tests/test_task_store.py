@@ -1,7 +1,13 @@
 import pytest
 import json
 
-from efp_opencode_adapter.task_store import TaskRecord, TaskStore, utc_now_iso
+from efp_opencode_adapter.task_store import (
+    TaskRecord,
+    TaskRecordLoadLimitExceeded,
+    TaskRecordPersistenceLimitExceeded,
+    TaskStore,
+    utc_now_iso,
+)
 
 
 def _record(task_id='t1'):
@@ -47,7 +53,9 @@ def test_list_all_and_get_honor_load_limits(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("EFP_OPENCODE_TASKS_LOAD_MAX_FILE_BYTES", "100")
-    assert store.get("large") is None
+    with pytest.raises(TaskRecordLoadLimitExceeded) as exc_info:
+        store.get("large")
+    assert exc_info.value.task_id == "large"
 
 
 def test_oversized_files_count_toward_scan_limit(tmp_path, monkeypatch):
@@ -113,10 +121,22 @@ def test_save_preserves_existing_file_when_encoding_is_impossible(tmp_path, monk
     monkeypatch.setenv("EFP_OPENCODE_TASKS_PERSIST_MAX_FILE_BYTES", "1")
     record.status = "success"
     record.output_payload = {"summary": "x" * 5000}
-    store.save(record)
+    returned = store.save(record)
 
     assert (tmp_path / "preserve.json").read_text(encoding="utf-8") == original
+    assert returned.status == "accepted"
     assert store.get("preserve").status == "accepted"
+
+
+def test_save_raises_when_new_record_cannot_be_encoded(tmp_path, monkeypatch):
+    store = TaskStore(tmp_path)
+    monkeypatch.setenv("EFP_OPENCODE_TASKS_PERSIST_MAX_FILE_BYTES", "1")
+
+    with pytest.raises(TaskRecordPersistenceLimitExceeded) as exc_info:
+        store.save(_record("impossible"))
+
+    assert exc_info.value.task_id == "impossible"
+    assert not (tmp_path / "impossible.json").exists()
 
 
 def test_find_for_opencode_event_uses_message_or_single_active_match(tmp_path):
