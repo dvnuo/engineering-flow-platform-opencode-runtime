@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -125,7 +126,7 @@ class TaskStore:
             return []
         records = []
         scanned = 0
-        for path in sorted(self.tasks_dir.glob("*.json")):
+        for path in _iter_task_paths(self.tasks_dir, scan_limit):
             if record_limit is not None and len(records) >= record_limit:
                 break
             if scan_limit is not None and scanned >= scan_limit:
@@ -180,7 +181,7 @@ class TaskStore:
             return
         yielded = 0
         scanned = 0
-        for path in sorted(self.tasks_dir.glob("*.json")):
+        for path in _iter_task_paths(self.tasks_dir, scan_limit):
             if record_limit is not None and yielded >= record_limit:
                 break
             if scan_limit is not None and scanned >= scan_limit:
@@ -301,6 +302,16 @@ def _task_file_count_exceeds(tasks_dir: Path, limit: int | None) -> bool:
         if seen > limit:
             return True
     return False
+
+
+def _iter_task_paths(tasks_dir: Path, scan_limit: int | None) -> Iterator[Path]:
+    paths = tasks_dir.glob("*.json")
+    if scan_limit is None:
+        yield from paths
+        return
+    if scan_limit <= 0:
+        return
+    yield from heapq.nsmallest(scan_limit, paths)
 
 
 def _json_dumps(payload: Any) -> str:
