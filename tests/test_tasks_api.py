@@ -207,7 +207,7 @@ async def test_oversized_task_record_returns_413_and_is_not_overwritten(tmp_path
         task_id="oversized",
         task_type="generic_agent_task",
         request_id="req-existing",
-        status="running",
+        status="success",
         portal_session_id="portal-existing",
         opencode_session_id="opencode-existing",
         input_payload={},

@@ -759,13 +759,42 @@ async def execute_task_handler(request: web.Request) -> web.Response:
     except TaskRecordStoreError as exc:
         return _task_store_error_response(exc)
     except OpenCodeClientError as exc:
-        record = await _mark_dispatch_error(request.app, task_id, task_type=task_type, request_id=request_id, portal_session_id=portal_session_id, input_payload=input_payload, metadata=metadata, source=source, shared_context_ref=shared_context_ref, context_ref=context_ref, exc=exc)
-        await _publish_task_event(request.app, record, "task.completed", "error")
-        return web.json_response({"error": "opencode_error"}, status=502)
+        return await _dispatch_error_response(
+            request,
+            task_id,
+            task_type=task_type,
+            request_id=request_id,
+            portal_session_id=portal_session_id,
+            input_payload=input_payload,
+            metadata=metadata,
+            source=source,
+            shared_context_ref=shared_context_ref,
+            context_ref=context_ref,
+            exc=exc,
+        )
     except Exception as exc:
+        return await _dispatch_error_response(
+            request,
+            task_id,
+            task_type=task_type,
+            request_id=request_id,
+            portal_session_id=portal_session_id,
+            input_payload=input_payload,
+            metadata=metadata,
+            source=source,
+            shared_context_ref=shared_context_ref,
+            context_ref=context_ref,
+            exc=exc,
+        )
+
+
+async def _dispatch_error_response(request: web.Request, task_id: str, *, task_type: str, request_id: str, portal_session_id: str, input_payload: dict[str, Any], metadata: dict[str, Any], source: str | None, shared_context_ref: str | None, context_ref: Any, exc: Exception) -> web.Response:
+    try:
         record = await _mark_dispatch_error(request.app, task_id, task_type=task_type, request_id=request_id, portal_session_id=portal_session_id, input_payload=input_payload, metadata=metadata, source=source, shared_context_ref=shared_context_ref, context_ref=context_ref, exc=exc)
-        await _publish_task_event(request.app, record, "task.completed", "error")
-        return web.json_response({"error": "opencode_error"}, status=502)
+    except TaskRecordStoreError as store_exc:
+        return _task_store_error_response(store_exc)
+    await _publish_task_event(request.app, record, "task.completed", "error")
+    return web.json_response({"error": "opencode_error"}, status=502)
 
 
 async def _mark_dispatch_error(app: web.Application, task_id: str, *, task_type: str, request_id: str, portal_session_id: str, input_payload: dict[str, Any], metadata: dict[str, Any], source: str | None, shared_context_ref: str | None, context_ref: Any, exc: Exception) -> TaskRecord:

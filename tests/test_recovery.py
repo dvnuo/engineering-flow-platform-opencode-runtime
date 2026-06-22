@@ -59,3 +59,25 @@ async def test_recovery_marks_all_active_tasks_without_list_cap(tmp_path, monkey
 
     assert summary['tasks_marked_blocked'] == 3
     assert [store.get(f't{idx}').status for idx in range(3)] == ['blocked', 'blocked', 'blocked']
+
+
+@pytest.mark.asyncio
+async def test_recovery_marks_oversized_active_task_blocked_without_loading_full_record(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
+    st = Settings.from_env(); paths = ensure_state_dirs(st)
+    store = TaskStore(paths.tasks_dir)
+    record = TaskRecord(task_id='oversized-active', task_type='generic_agent_task', request_id='req-big', status='running', portal_session_id='portal-big', opencode_session_id='oc-big', input_payload={}, metadata={}, output_payload={'raw': 'x' * 5000}, artifacts={}, runtime_events=[], error=None, created_at=utc_now_iso())
+    store.save(record)
+    path = paths.tasks_dir / 'oversized-active.json'
+    original_size = path.stat().st_size
+    monkeypatch.setenv('EFP_OPENCODE_TASKS_LOAD_MAX_FILE_BYTES', '100')
+
+    rm = RecoveryManager(settings=st,state_paths=paths,session_store=SessionStore(paths.sessions_dir),chatlog_store=ChatLogStore(paths.chatlogs_dir),opencode_client=FakeOpenCodeClient())
+    summary = await rm.recover()
+
+    assert summary['tasks_marked_blocked'] == 1
+    assert path.stat().st_size < original_size
+    monkeypatch.setenv('EFP_OPENCODE_TASKS_LOAD_MAX_FILE_BYTES', '5000')
+    got = TaskStore(paths.tasks_dir).get('oversized-active')
+    assert got.status == 'blocked'
+    assert got.output_payload['error_code'] == 'adapter_restarted_task_recovery_required'
