@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import heapq
 import json
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -363,7 +363,7 @@ def _iter_task_paths(tasks_dir: Path, scan_limit: int | None) -> Iterator[Path]:
         return
     if scan_limit <= 0:
         return
-    yield from heapq.nsmallest(scan_limit, paths)
+    yield from sorted(islice(paths, scan_limit))
 
 
 def _json_dumps(payload: Any) -> str:
