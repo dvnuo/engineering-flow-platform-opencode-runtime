@@ -136,16 +136,9 @@ def _message_text(canonical: dict[str, Any], values: dict[str, str]) -> str:
 def _map_task_id(task_store, opencode_session_id: str, message_ids: set[str]) -> str | None:
     if not opencode_session_id:
         return None
-    matched = []
-    for rec in task_store.list_all():
-        if rec.opencode_session_id != opencode_session_id:
-            continue
-        if message_ids and (rec.opencode_message_id in message_ids or rec.opencode_prompt_id in message_ids):
-            return rec.task_id
-        if rec.status in {"running", "accepted"}:
-            matched.append(rec)
-    if not message_ids and len(matched) == 1:
-        return matched[0].task_id
+    if hasattr(task_store, "find_for_opencode_event"):
+        record = task_store.find_for_opencode_event(opencode_session_id, message_ids)
+        return record.task_id if record is not None else None
     return None
 
 

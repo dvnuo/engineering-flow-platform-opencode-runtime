@@ -199,6 +199,88 @@ async def test_tasks_execute_get_events_and_idempotent(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_oversized_task_record_returns_413_and_is_not_overwritten(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    tasks_dir = state_dir / "tasks"
+    tasks_dir.mkdir(parents=True)
+    record = TaskRecord(
+        task_id="oversized",
+        task_type="generic_agent_task",
+        request_id="req-existing",
+        status="success",
+        portal_session_id="portal-existing",
+        opencode_session_id="opencode-existing",
+        input_payload={},
+        metadata={},
+        output_payload={"raw": "x" * 1000},
+        artifacts={},
+        runtime_events=[],
+        error=None,
+        created_at=utc_now_iso(),
+    )
+    path = tasks_dir / "oversized.json"
+    path.write_text(json.dumps(record.__dict__), encoding="utf-8")
+    original = path.read_text(encoding="utf-8")
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("EFP_OPENCODE_TASKS_LOAD_MAX_FILE_BYTES", "100")
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    get_response = await client.get("/api/tasks/oversized")
+    get_body = await get_response.json()
+    execute_response = await client.post(
+        "/api/tasks/execute",
+        json={"task_id": "oversized", "task_type": "generic_agent_task", "input_payload": {}, "metadata": {}},
+    )
+    execute_body = await execute_response.json()
+
+    assert get_response.status == 413
+    assert get_body["error"] == "task_record_exceeds_load_limit"
+    assert execute_response.status == 413
+    assert execute_body["error"] == "task_record_exceeds_load_limit"
+    assert fake.prompt_async_calls == []
+    assert path.read_text(encoding="utf-8") == original
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_unreadable_task_record_returns_422_and_is_not_overwritten(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    tasks_dir = state_dir / "tasks"
+    tasks_dir.mkdir(parents=True)
+    path = tasks_dir / "broken.json"
+    path.write_text("{not-json", encoding="utf-8")
+    original = path.read_text(encoding="utf-8")
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state_dir))
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    get_response = await client.get("/api/tasks/broken")
+    get_body = await get_response.json()
+    execute_response = await client.post(
+        "/api/tasks/execute",
+        json={"task_id": "broken", "task_type": "generic_agent_task", "input_payload": {}, "metadata": {}},
+    )
+    execute_body = await execute_response.json()
+
+    assert get_response.status == 422
+    assert get_body["error"] == "task_record_unreadable"
+    assert execute_response.status == 422
+    assert execute_body["error"] == "task_record_unreadable"
+    assert fake.prompt_async_calls == []
+    assert path.read_text(encoding="utf-8") == original
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_real_shape_and_prompt_id_persisted(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
     monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')
@@ -603,6 +685,14 @@ async def test_resume_active_task_collectors_schedules_persisted_running_once(tm
     assert second == 0
     assert len(app[TASK_BACKGROUND_TASKS_KEY]) == 1
     await cleanup_task_background_tasks(app)
+
+
+def test_create_app_does_not_resume_task_collectors_on_startup(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    fake = FakeTaskOpenCodeClient(no_assistant=True)
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    startup_names = {getattr(handler, "__name__", "") for handler in app.on_startup}
+    assert "_resume_task_collectors" not in startup_names
 
 
 @pytest.mark.asyncio

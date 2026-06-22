@@ -72,6 +72,28 @@ Persisted state directories:
 
 State should survive runtime restarts when mounted persistently.
 
+## Task restart contract
+The adapter follows upstream OpenCode's recovery boundary: durable
+session/history state may be reused, but in-flight provider/tool activity from a
+previous process is not automatically replayed on adapter startup. Active task
+records found during startup are marked `blocked` with
+`adapter_restarted_task_recovery_required`; callers should re-dispatch the task
+when the work is still required.
+
+Task state loading and persistence are bounded:
+- `EFP_OPENCODE_TASKS_LIST_MAX_RECORDS` limits task records returned by store
+  list operations. The default is `512`.
+- `EFP_OPENCODE_TASKS_SCAN_MAX_RECORDS` limits candidate task files scanned
+  while listing. The default is `1024`.
+- `EFP_OPENCODE_TASKS_LOAD_MAX_FILE_BYTES` skips individual task files larger
+  than the configured byte limit. The default is `2000000`.
+- `EFP_OPENCODE_TASKS_PERSIST_MAX_FILE_BYTES` caps each persisted task record.
+  Large payloads are replaced with a diagnostic omission marker while identity,
+  status, error, and bounded event context remain available. The default is
+  `2000000`.
+- `EFP_OPENCODE_TASKS_PERSIST_EVENT_TAIL` limits runtime events retained when a
+  task record must be minimized. The default is `50`.
+
 ## Runtime profile apply/status contract
 - Apply endpoint updates runtime profile and OpenCode config.
 - Status endpoint reports apply status, revision, and restart/health-related state.

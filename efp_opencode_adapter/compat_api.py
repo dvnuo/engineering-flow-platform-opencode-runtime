@@ -12,6 +12,7 @@ from .agents_md import AGENTS_MD_FILENAME, ensure_default_agents_md, read_agents
 from .app_keys import SETTINGS_KEY, SESSION_STORE_KEY, TASK_STORE_KEY
 from .index_loader import load_skills_index, read_json_file
 from .permission_generator import default_permission_baseline, skill_permission_state
+from .task_store import task_store_limits
 
 SUPPORTED_SYSTEM_PROMPT_SECTION = "agents"
 
@@ -111,11 +112,28 @@ async def skills_handler(request: web.Request) -> web.Response:
 
 async def queue_status_handler(request: web.Request) -> web.Response:
     records = request.app[TASK_STORE_KEY].list_all()
+    limits = task_store_limits()
     counts = {"accepted": 0, "running": 0, "success": 0, "error": 0, "blocked": 0, "cancelled": 0}
     for rec in records:
         if rec.status in counts:
             counts[rec.status] += 1
-    return web.json_response({"status": "ok", "engine": "opencode", "queues": {"default": {"total": len(records), **counts}}, "active_sessions": len(request.app[SESSION_STORE_KEY].list_active())})
+    return web.json_response({
+        "status": "ok",
+        "engine": "opencode",
+        "queues": {
+            "default": {
+                "total": len(records),
+                "possibly_truncated": request.app[TASK_STORE_KEY].possibly_truncated(),
+                **counts,
+            }
+        },
+        "task_store_limits": {
+            "list_max_records": limits["list_max_records"],
+            "scan_max_records": limits["scan_max_records"],
+            "load_max_file_bytes": limits["load_max_file_bytes"],
+        },
+        "active_sessions": len(request.app[SESSION_STORE_KEY].list_active()),
+    })
 
 
 async def git_info_handler(request: web.Request) -> web.Response:
