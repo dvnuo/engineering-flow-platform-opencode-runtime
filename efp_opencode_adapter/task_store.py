@@ -132,13 +132,13 @@ class TaskStore:
                 break
             if scan_limit is not None and scanned >= scan_limit:
                 break
+            scanned += 1
             if file_size_limit is not None:
                 try:
                     if path.stat().st_size > file_size_limit:
                         continue
                 except OSError:
                     continue
-            scanned += 1
             try:
                 records.append(self._read_record(path, max_file_bytes=file_size_limit))
             except Exception:
@@ -171,13 +171,13 @@ class TaskStore:
                 break
             if scan_limit is not None and scanned >= scan_limit:
                 break
+            scanned += 1
             if file_size_limit is not None:
                 try:
                     if path.stat().st_size > file_size_limit:
                         continue
                 except OSError:
                     continue
-            scanned += 1
             try:
                 record = self._read_record(path, max_file_bytes=file_size_limit)
             except Exception:
@@ -284,6 +284,9 @@ def _encode_record_for_persistence(record: TaskRecord) -> str | None:
     encoded = _json_dumps(_minimal_record_for_persistence(record, keep_event_tail=False))
     if len(encoded.encode("utf-8")) <= max_bytes:
         return encoded
+    encoded = _json_dumps(_ultra_minimal_record_for_persistence(record))
+    if len(encoded.encode("utf-8")) <= max_bytes:
+        return encoded
     return None
 
 
@@ -347,6 +350,29 @@ def _minimal_output_payload(record: TaskRecord) -> dict[str, Any]:
         if key in source:
             payload[key] = source[key]
     return payload
+
+
+def _ultra_minimal_record_for_persistence(record: TaskRecord) -> dict[str, Any]:
+    return {
+        "task_id": record.task_id,
+        "task_type": record.task_type,
+        "request_id": record.request_id,
+        "status": record.status,
+        "portal_session_id": record.portal_session_id,
+        "opencode_session_id": record.opencode_session_id,
+        "input_payload": {},
+        "metadata": {},
+        "output_payload": {
+            "status": record.status,
+            "payload_omitted_from_persistence": True,
+            "record_minimized_from_persistence": True,
+            "reason": "task_record_exceeded_persistence_limit",
+        },
+        "artifacts": {},
+        "runtime_events": [],
+        "error": record.error,
+        "created_at": record.created_at,
+    }
 
 
 def _minimal_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:

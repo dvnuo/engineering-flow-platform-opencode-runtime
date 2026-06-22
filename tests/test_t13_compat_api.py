@@ -43,6 +43,22 @@ async def test_t13_queue_status_reports_task_counts(tmp_path, monkeypatch):
     body = await (await client.get('/api/queue/status')).json()
     assert body['status'] == 'ok' and body['engine'] == 'opencode'
     assert body['queues']['default']['running'] == 1 and body['queues']['default']['blocked'] == 1 and body['queues']['default']['total'] == 2
+    assert body['queues']['default']['possibly_truncated'] is False
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_t13_queue_status_limit_zero_is_not_reported_truncated(tmp_path, monkeypatch):
+    workspace, state, tools, skills = tmp_path / "workspace", tmp_path / "state", tmp_path / "tools", tmp_path / "skills"
+    for p in (workspace / ".opencode", state, tools, skills): p.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace)); monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state)); monkeypatch.setenv("EFP_TOOLS_DIR", str(tools)); monkeypatch.setenv("EFP_SKILLS_DIR", str(skills)); monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
+    monkeypatch.setenv("EFP_OPENCODE_TASKS_LIST_MAX_RECORDS", "0")
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app)); await client.start_server()
+    app[TASK_STORE_KEY].save(TaskRecord(task_id='t1', task_type='x', request_id='r1', status='running', portal_session_id='p', opencode_session_id='o', input_payload={}, metadata={}, output_payload=None, artifacts={}, runtime_events=[], error=None, created_at='now'))
+    body = await (await client.get('/api/queue/status')).json()
+    assert body['queues']['default']['total'] == 0
+    assert body['queues']['default']['possibly_truncated'] is False
     await client.close()
 
 

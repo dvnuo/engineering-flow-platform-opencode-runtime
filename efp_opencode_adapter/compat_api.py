@@ -123,7 +123,7 @@ async def queue_status_handler(request: web.Request) -> web.Response:
         "queues": {
             "default": {
                 "total": len(records),
-                "possibly_truncated": len(records) >= limits["list_max_records"],
+                "possibly_truncated": limits["list_max_records"] > 0 and len(records) >= limits["list_max_records"],
                 **counts,
             }
         },

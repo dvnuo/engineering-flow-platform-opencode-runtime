@@ -50,6 +50,23 @@ def test_list_all_and_get_honor_load_limits(tmp_path, monkeypatch):
     assert store.get("large") is None
 
 
+def test_oversized_files_count_toward_scan_limit(tmp_path, monkeypatch):
+    store = TaskStore(tmp_path)
+    big = _record("big")
+    valid = _record("valid")
+    for name in ("a-big", "b-big"):
+        (tmp_path / f"{name}.json").write_text(
+            json.dumps({**big.__dict__, "task_id": name, "output_payload": {"raw": "x" * 1000}}),
+            encoding="utf-8",
+        )
+    store.save(valid)
+
+    monkeypatch.setenv("EFP_OPENCODE_TASKS_SCAN_MAX_RECORDS", "2")
+    monkeypatch.setenv("EFP_OPENCODE_TASKS_LOAD_MAX_FILE_BYTES", "100")
+    assert store.list_all() == []
+    assert store.list_active() == []
+
+
 def test_save_minimizes_oversized_record(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_OPENCODE_TASKS_PERSIST_MAX_FILE_BYTES", "1600")
     store = TaskStore(tmp_path)
@@ -65,6 +82,26 @@ def test_save_minimizes_oversized_record(tmp_path, monkeypatch):
     assert raw["output_payload"]["payload_omitted_from_persistence"] is True
     assert raw["output_payload"]["summary"] == "large output"
     assert len((tmp_path / "huge.json").read_bytes()) <= 1600
+
+
+def test_save_uses_ultra_minimal_record_before_giving_up(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_OPENCODE_TASKS_PERSIST_MAX_FILE_BYTES", "520")
+    store = TaskStore(tmp_path)
+    record = _record("tiny")
+    record.input_payload = {"prompt": "p" * 5000}
+    record.metadata = {"task_id": "tiny", "extra": "m" * 5000}
+    record.output_payload = {"summary": "s" * 1000, "raw": "x" * 5000}
+    record.runtime_events = [{"type": "step", "value": "y" * 200} for _ in range(20)]
+    record.pending_permission_ids = ["perm-" + ("z" * 200)]
+
+    store.save(record)
+
+    raw = json.loads((tmp_path / "tiny.json").read_text(encoding="utf-8"))
+    assert raw["input_payload"] == {}
+    assert raw["metadata"] == {}
+    assert raw["runtime_events"] == []
+    assert raw["output_payload"]["record_minimized_from_persistence"] is True
+    assert store.get("tiny") is not None
 
 
 def test_find_for_opencode_event_uses_message_or_single_active_match(tmp_path):
