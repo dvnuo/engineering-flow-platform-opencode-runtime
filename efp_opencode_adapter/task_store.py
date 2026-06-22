@@ -5,7 +5,7 @@ import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 UTC = timezone.utc
 ACTIVE_TASK_STATUSES = frozenset({"accepted", "running"})
@@ -76,8 +76,6 @@ class TaskStore:
         encoded = _encode_record_for_persistence(record)
         if encoded is None:
             tmp.unlink(missing_ok=True)
-            if record.status not in ACTIVE_TASK_STATUSES:
-                path.unlink(missing_ok=True)
             return record
         tmp.write_text(encoded, encoding="utf-8")
         tmp.replace(path)
@@ -152,22 +150,38 @@ class TaskStore:
         max_scan_records: int | None = None,
         max_file_bytes: int | None = None,
     ) -> list[TaskRecord]:
+        return list(
+            self.iter_active(
+                max_records=max_records,
+                max_scan_records=max_scan_records,
+                max_file_bytes=max_file_bytes,
+            )
+        )
+
+    def iter_active(
+        self,
+        *,
+        max_records: int | None = None,
+        max_scan_records: int | None = None,
+        max_file_bytes: int | None = None,
+        use_default_limits: bool = True,
+    ) -> Iterator[TaskRecord]:
         limits = task_store_limits()
         record_limit = _coerce_non_negative_int(
-            max_records if max_records is not None else limits["list_max_records"]
+            max_records if max_records is not None or not use_default_limits else limits["list_max_records"]
         )
         scan_limit = _coerce_non_negative_int(
-            max_scan_records if max_scan_records is not None else limits["scan_max_records"]
+            max_scan_records if max_scan_records is not None or not use_default_limits else limits["scan_max_records"]
         )
         file_size_limit = _coerce_non_negative_int(
             max_file_bytes if max_file_bytes is not None else limits["load_max_file_bytes"]
         )
         if record_limit == 0 or scan_limit == 0:
-            return []
-        records = []
+            return
+        yielded = 0
         scanned = 0
         for path in sorted(self.tasks_dir.glob("*.json")):
-            if record_limit is not None and len(records) >= record_limit:
+            if record_limit is not None and yielded >= record_limit:
                 break
             if scan_limit is not None and scanned >= scan_limit:
                 break
@@ -183,8 +197,8 @@ class TaskStore:
             except Exception:
                 continue
             if record.status in ACTIVE_TASK_STATUSES:
-                records.append(record)
-        return records
+                yielded += 1
+                yield record
 
     def find_for_opencode_event(self, opencode_session_id: str, message_ids: set[str]) -> TaskRecord | None:
         if not opencode_session_id:
@@ -211,6 +225,15 @@ class TaskStore:
             raise ValueError("task_record_exceeds_load_limit")
         payload = json.loads(path.read_text(encoding="utf-8"))
         return TaskRecord(**payload)
+
+    def possibly_truncated(self) -> bool:
+        limits = task_store_limits()
+        list_limit = _coerce_non_negative_int(limits["list_max_records"])
+        scan_limit = _coerce_non_negative_int(limits["scan_max_records"])
+        return _task_file_count_exceeds(self.tasks_dir, list_limit) or _task_file_count_exceeds(
+            self.tasks_dir,
+            scan_limit,
+        )
 
 
 def task_store_limits() -> dict[str, int]:
@@ -267,6 +290,17 @@ def _coerce_non_negative_int(value: int | None) -> int | None:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _task_file_count_exceeds(tasks_dir: Path, limit: int | None) -> bool:
+    if limit is None or limit <= 0:
+        return False
+    seen = 0
+    for _path in tasks_dir.glob("*.json"):
+        seen += 1
+        if seen > limit:
+            return True
+    return False
 
 
 def _json_dumps(payload: Any) -> str:

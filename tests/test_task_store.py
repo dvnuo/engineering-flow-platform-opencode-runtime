@@ -104,6 +104,21 @@ def test_save_uses_ultra_minimal_record_before_giving_up(tmp_path, monkeypatch):
     assert store.get("tiny") is not None
 
 
+def test_save_preserves_existing_file_when_encoding_is_impossible(tmp_path, monkeypatch):
+    store = TaskStore(tmp_path)
+    record = _record("preserve")
+    store.save(record)
+    original = (tmp_path / "preserve.json").read_text(encoding="utf-8")
+
+    monkeypatch.setenv("EFP_OPENCODE_TASKS_PERSIST_MAX_FILE_BYTES", "1")
+    record.status = "success"
+    record.output_payload = {"summary": "x" * 5000}
+    store.save(record)
+
+    assert (tmp_path / "preserve.json").read_text(encoding="utf-8") == original
+    assert store.get("preserve").status == "accepted"
+
+
 def test_find_for_opencode_event_uses_message_or_single_active_match(tmp_path):
     store = TaskStore(tmp_path)
     first = _record("first")

@@ -42,3 +42,20 @@ async def test_recovery_marks_running_task_blocked_without_extra_top_level_error
     raw = json.loads((paths.tasks_dir/'t1.json').read_text())
     assert 'error_code' not in raw
     assert got.runtime_events[-1]['session_id'] == 'portal-1'
+
+
+@pytest.mark.asyncio
+async def test_recovery_marks_all_active_tasks_without_list_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path/'state'))
+    monkeypatch.setenv('EFP_OPENCODE_TASKS_LIST_MAX_RECORDS', '1')
+    monkeypatch.setenv('EFP_OPENCODE_TASKS_SCAN_MAX_RECORDS', '1')
+    st = Settings.from_env(); paths = ensure_state_dirs(st)
+    store = TaskStore(paths.tasks_dir)
+    for idx in range(3):
+        store.save(TaskRecord(task_id=f't{idx}', task_type='generic_agent_task', request_id=f'req-{idx}', status='running', portal_session_id=f'portal-{idx}', opencode_session_id=f'oc-{idx}', input_payload={}, metadata={}, output_payload={}, artifacts={}, runtime_events=[], error=None, created_at=utc_now_iso()))
+
+    rm = RecoveryManager(settings=st,state_paths=paths,session_store=SessionStore(paths.sessions_dir),chatlog_store=ChatLogStore(paths.chatlogs_dir),opencode_client=FakeOpenCodeClient())
+    summary = await rm.recover()
+
+    assert summary['tasks_marked_blocked'] == 3
+    assert [store.get(f't{idx}').status for idx in range(3)] == ['blocked', 'blocked', 'blocked']

@@ -33,7 +33,7 @@ class RecoveryManager:
                 else:
                     summary["opencode_errors"] += 1
         task_store = TaskStore(self.state_paths.tasks_dir)
-        for record in task_store.list_active():
+        for record in task_store.iter_active(max_records=None, max_scan_records=None, use_default_limits=False):
             output_payload = record.output_payload if isinstance(record.output_payload, dict) else {}
             output_payload = dict(output_payload)
             output_payload["summary"] = "Adapter restarted before task completion"
