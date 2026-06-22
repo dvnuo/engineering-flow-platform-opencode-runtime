@@ -605,6 +605,14 @@ async def test_resume_active_task_collectors_schedules_persisted_running_once(tm
     await cleanup_task_background_tasks(app)
 
 
+def test_create_app_does_not_resume_task_collectors_on_startup(tmp_path, monkeypatch):
+    monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
+    fake = FakeTaskOpenCodeClient(no_assistant=True)
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    startup_names = {getattr(handler, "__name__", "") for handler in app.on_startup}
+    assert "_resume_task_collectors" not in startup_names
+
+
 @pytest.mark.asyncio
 async def test_testclient_close_cancels_pending_task_collectors(tmp_path, monkeypatch):
     from efp_opencode_adapter.app_keys import TASK_BACKGROUND_TASKS_KEY

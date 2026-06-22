@@ -64,7 +64,7 @@ from .opencode_process import OpenCodeProcessManager
 from .session_store import SessionStore
 from .skill_sync import sync_runtime_skills
 from .task_store import TaskStore
-from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_full_handler, get_task_handler, resume_active_task_collectors
+from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_full_handler, get_task_handler
 from .request_bindings import RequestBindingStore
 from .user_display_store import UserDisplayStore
 from .sessions_api import (
@@ -597,14 +597,6 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             print(f"recovery failed: {exc}")
 
     app.on_startup.append(_run_recovery)
-    async def _resume_task_collectors(app):
-        try:
-            resumed = resume_active_task_collectors(app)
-            if resumed:
-                print(f"resumed active task collectors: {resumed}")
-        except Exception as exc:
-            print(f"active task collector resume failed: {exc}")
-
     async def _managed_opencode_startup(app):
         manager = app.get(OPENCODE_PROCESS_MANAGER_KEY)
         if manager:
@@ -628,7 +620,6 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
     app.on_startup.append(_managed_opencode_startup)
-    app.on_startup.append(_resume_task_collectors)
     if should_start_event_bridge:
         app.on_startup.append(_start_event_bridge)
         app.on_cleanup.append(_cleanup_event_bridge)

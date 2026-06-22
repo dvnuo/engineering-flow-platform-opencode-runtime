@@ -19,13 +19,13 @@ async def test_recovery(tmp_path, monkeypatch):
     cs = ChatLogStore(paths.chatlogs_dir)
     cs.start_entry('p1', request_id='r1', message='m')
     (paths.chatlogs_dir/'bad.json').write_text('{bad', encoding='utf-8')
-    task = paths.tasks_dir/'running-task.json'
-    task.write_text(json.dumps({'status':'running','runtime_events':[]}), encoding='utf-8')
+    task = TaskRecord(task_id='running-task', task_type='generic_agent_task', request_id='req-1', status='running', portal_session_id='portal-1', opencode_session_id='oc-1', input_payload={}, metadata={}, output_payload={}, artifacts={}, runtime_events=[], error=None, created_at=utc_now_iso())
+    TaskStore(paths.tasks_dir).save(task)
     rm = RecoveryManager(settings=st,state_paths=paths,session_store=ss,chatlog_store=cs,opencode_client=FakeOpenCodeClient())
     sm = await rm.recover()
     assert sm['corrupted_chatlogs'] >= 1
     assert ss.get('p1').partial_recovery is True
-    assert json.loads(task.read_text())['status'] == 'blocked'
+    assert TaskStore(paths.tasks_dir).get('running-task').status == 'blocked'
 
 
 @pytest.mark.asyncio

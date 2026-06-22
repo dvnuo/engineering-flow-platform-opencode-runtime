@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from .thinking_events import task_lifecycle_event, utc_now_iso
+from .task_store import TaskStore
 
 
 class RecoveryManager:
@@ -32,27 +32,34 @@ class RecoveryManager:
                     summary["partial_recovery_marked"] += 1
                 else:
                     summary["opencode_errors"] += 1
-        tasks_dir: Path = self.state_paths.tasks_dir
-        for p in tasks_dir.glob("*.json"):
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if data.get("status") in {"accepted", "running"}:
-                data["status"] = "blocked"
-                output_payload = data.get("output_payload")
-                if not isinstance(output_payload, dict):
-                    output_payload = {}
-                output_payload["summary"] = "Adapter restarted before task completion"
-                output_payload["error_code"] = "adapter_restarted_task_recovery_required"
-                output_payload["blockers"] = ["Adapter restarted before task completion"]
-                output_payload["next_recommendation"] = "Re-dispatch task if it is still required."
-                data["output_payload"] = output_payload
-                data["error"] = {"code": "adapter_restarted_task_recovery_required", "message": "Adapter restarted before task completion; manual recovery required"}
-                data["finished_at"] = utc_now_iso()
-                ev = data.get("runtime_events") if isinstance(data.get("runtime_events"), list) else []
-                ev.append(task_lifecycle_event("task.blocked", session_id=str(data.get("portal_session_id", "")), request_id=str(data.get("request_id", "")), state="blocked", summary="Adapter restarted before task completion"))
-                data["runtime_events"] = ev
-                p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-                summary["tasks_marked_blocked"] += 1
+        task_store = TaskStore(self.state_paths.tasks_dir)
+        for record in task_store.list_active():
+            output_payload = record.output_payload if isinstance(record.output_payload, dict) else {}
+            output_payload = dict(output_payload)
+            output_payload["summary"] = "Adapter restarted before task completion"
+            output_payload["error_code"] = "adapter_restarted_task_recovery_required"
+            output_payload["blockers"] = ["Adapter restarted before task completion"]
+            output_payload["next_recommendation"] = "Re-dispatch task if it is still required."
+            runtime_events = list(record.runtime_events or [])
+            runtime_events.append(
+                task_lifecycle_event(
+                    "task.blocked",
+                    session_id=record.portal_session_id,
+                    request_id=record.request_id,
+                    state="blocked",
+                    summary="Adapter restarted before task completion",
+                )
+            )
+            task_store.update(
+                record.task_id,
+                status="blocked",
+                output_payload=output_payload,
+                error={
+                    "code": "adapter_restarted_task_recovery_required",
+                    "message": "Adapter restarted before task completion; manual recovery required",
+                },
+                finished_at=utc_now_iso(),
+                runtime_events=runtime_events,
+            )
+            summary["tasks_marked_blocked"] += 1
         return summary
