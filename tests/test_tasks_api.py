@@ -248,6 +248,39 @@ async def test_oversized_task_record_returns_413_and_is_not_overwritten(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_unreadable_task_record_returns_422_and_is_not_overwritten(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    tasks_dir = state_dir / "tasks"
+    tasks_dir.mkdir(parents=True)
+    path = tasks_dir / "broken.json"
+    path.write_text("{not-json", encoding="utf-8")
+    original = path.read_text(encoding="utf-8")
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state_dir))
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    get_response = await client.get("/api/tasks/broken")
+    get_body = await get_response.json()
+    execute_response = await client.post(
+        "/api/tasks/execute",
+        json={"task_id": "broken", "task_type": "generic_agent_task", "input_payload": {}, "metadata": {}},
+    )
+    execute_body = await execute_response.json()
+
+    assert get_response.status == 422
+    assert get_body["error"] == "task_record_unreadable"
+    assert execute_response.status == 422
+    assert execute_body["error"] == "task_record_unreadable"
+    assert fake.prompt_async_calls == []
+    assert path.read_text(encoding="utf-8") == original
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_real_shape_and_prompt_id_persisted(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
     monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')

@@ -5,6 +5,7 @@ from efp_opencode_adapter.task_store import (
     TaskRecord,
     TaskRecordLoadLimitExceeded,
     TaskRecordPersistenceLimitExceeded,
+    TaskRecordReadError,
     TaskStore,
     utc_now_iso,
 )
@@ -137,6 +138,17 @@ def test_save_raises_when_new_record_cannot_be_encoded(tmp_path, monkeypatch):
 
     assert exc_info.value.task_id == "impossible"
     assert not (tmp_path / "impossible.json").exists()
+
+
+def test_get_raises_when_existing_record_is_unreadable(tmp_path):
+    store = TaskStore(tmp_path)
+    (tmp_path / "broken.json").write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(TaskRecordReadError) as exc_info:
+        store.get("broken")
+
+    assert exc_info.value.task_id == "broken"
+    assert exc_info.value.code == "task_record_unreadable"
 
 
 def test_find_for_opencode_event_uses_message_or_single_active_match(tmp_path):

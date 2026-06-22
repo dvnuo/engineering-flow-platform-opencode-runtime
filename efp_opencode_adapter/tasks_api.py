@@ -29,6 +29,8 @@ from .task_store import (
     TaskRecord,
     TaskRecordLoadLimitExceeded,
     TaskRecordPersistenceLimitExceeded,
+    TaskRecordReadError,
+    TaskRecordStoreError,
     TaskStore,
     is_valid_task_id,
     utc_now_iso,
@@ -140,6 +142,29 @@ def _task_record_persistence_limit_response(exc: TaskRecordPersistenceLimitExcee
         },
         status=507,
     )
+
+
+def _task_record_read_error_response(exc: TaskRecordReadError) -> web.Response:
+    return web.json_response(
+        {
+            "error": exc.code,
+            "task_id": exc.task_id,
+            "message": str(exc),
+            "reason": exc.reason,
+            "recommendation": "Archive or repair the task record before retrying this task_id.",
+        },
+        status=422,
+    )
+
+
+def _task_store_error_response(exc: TaskRecordStoreError) -> web.Response:
+    if isinstance(exc, TaskRecordLoadLimitExceeded):
+        return _task_record_load_limit_response(exc)
+    if isinstance(exc, TaskRecordPersistenceLimitExceeded):
+        return _task_record_persistence_limit_response(exc)
+    if isinstance(exc, TaskRecordReadError):
+        return _task_record_read_error_response(exc)
+    return web.json_response({"error": exc.code, "task_id": exc.task_id, "message": str(exc)}, status=500)
 
 
 def _looks_structured_terminal_text(text: str) -> bool:
@@ -639,8 +664,8 @@ async def execute_task_handler(request: web.Request) -> web.Response:
     task_store: TaskStore = request.app[TASK_STORE_KEY]
     try:
         existing = task_store.get(task_id)
-    except TaskRecordLoadLimitExceeded as exc:
-        return _task_record_load_limit_response(exc)
+    except TaskRecordStoreError as exc:
+        return _task_store_error_response(exc)
     if existing:
         if existing.status in {"accepted", "running"}:
             return web.json_response({"ok": True, "status": "accepted", "task_id": task_id, "request_id": existing.request_id}, status=202)
@@ -731,10 +756,8 @@ async def execute_task_handler(request: web.Request) -> web.Response:
         if prompt_id != opencode_message_id:
             record = task_store.update(task_id, opencode_prompt_id=prompt_id)
         return web.json_response({"ok": True, "status": "accepted", "task_id": task_id, "request_id": request_id}, status=202)
-    except TaskRecordLoadLimitExceeded as exc:
-        return _task_record_load_limit_response(exc)
-    except TaskRecordPersistenceLimitExceeded as exc:
-        return _task_record_persistence_limit_response(exc)
+    except TaskRecordStoreError as exc:
+        return _task_store_error_response(exc)
     except OpenCodeClientError as exc:
         record = await _mark_dispatch_error(request.app, task_id, task_type=task_type, request_id=request_id, portal_session_id=portal_session_id, input_payload=input_payload, metadata=metadata, source=source, shared_context_ref=shared_context_ref, context_ref=context_ref, exc=exc)
         await _publish_task_event(request.app, record, "task.completed", "error")
@@ -907,10 +930,13 @@ async def collect_task_completion(app: web.Application, task_id: str) -> None:
             record = store.update(task_id, status="running", output_payload=out, finished_at=None)
             await _publish_task_event(app, record, "task.progress", "running")
             await asyncio.sleep(poll)
-    except TaskRecordLoadLimitExceeded:
+    except TaskRecordStoreError:
         return
     except Exception as exc:
-        record = store.get(task_id)
+        try:
+            record = store.get(task_id)
+        except TaskRecordStoreError:
+            return
         if record is None:
             return
         out = dict(record.output_payload or {})
@@ -936,8 +962,8 @@ async def get_task_handler(request: web.Request) -> web.Response:
     store: TaskStore = request.app[TASK_STORE_KEY]
     try:
         record = store.get(task_id)
-    except TaskRecordLoadLimitExceeded as exc:
-        return _task_record_load_limit_response(exc)
+    except TaskRecordStoreError as exc:
+        return _task_store_error_response(exc)
     if record is None:
         return web.json_response({"error": "task_not_found"}, status=404)
     return web.json_response(_to_public(record))
@@ -950,8 +976,8 @@ async def get_task_full_handler(request: web.Request) -> web.Response:
     store: TaskStore = request.app[TASK_STORE_KEY]
     try:
         record = store.get(task_id)
-    except TaskRecordLoadLimitExceeded as exc:
-        return _task_record_load_limit_response(exc)
+    except TaskRecordStoreError as exc:
+        return _task_store_error_response(exc)
     if record is None:
         return web.json_response({"error": "task_not_found"}, status=404)
     filename = _safe_task_result_filename(task_id)
@@ -968,8 +994,8 @@ async def cancel_task_handler(request: web.Request) -> web.Response:
     store: TaskStore = request.app[TASK_STORE_KEY]
     try:
         record = store.get(task_id)
-    except TaskRecordLoadLimitExceeded as exc:
-        return _task_record_load_limit_response(exc)
+    except TaskRecordStoreError as exc:
+        return _task_store_error_response(exc)
     if record is None:
         return web.json_response({"error": "task_not_found"}, status=404)
     if record.status in TERMINAL:

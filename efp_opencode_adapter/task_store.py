@@ -35,6 +35,16 @@ class TaskRecordLoadLimitExceeded(TaskRecordStoreError):
         self.file_size_bytes = file_size_bytes
 
 
+class TaskRecordReadError(TaskRecordStoreError):
+    def __init__(self, *, task_id: str, reason: str):
+        super().__init__(
+            "task_record_unreadable",
+            task_id=task_id,
+            message=f"Task record {task_id} exists but could not be read: {reason}",
+        )
+        self.reason = reason
+
+
 class TaskRecordPersistenceLimitExceeded(TaskRecordStoreError):
     def __init__(self, *, task_id: str, limit_bytes: int):
         super().__init__(
@@ -96,10 +106,10 @@ class TaskStore:
             return None
         try:
             return self._read_record(path)
-        except TaskRecordLoadLimitExceeded:
+        except TaskRecordStoreError:
             raise
-        except Exception:
-            return None
+        except Exception as exc:
+            raise TaskRecordReadError(task_id=task_id, reason=type(exc).__name__) from exc
 
     def save(self, record: TaskRecord) -> TaskRecord:
         path = self._task_path(record.task_id)
