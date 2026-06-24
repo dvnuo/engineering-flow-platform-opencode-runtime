@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
@@ -16,6 +18,10 @@ def make_settings(tmp_path):
         git_checkout_timeout_seconds=120,
         opencode_data_dir=tmp_path / "opencode-state",
         opencode_config_path=tmp_path / "workspace/.opencode/opencode.json",
+        efp_config_path=tmp_path / "workspace" / ".efp" / "config.yaml",
+        mobile_state_dir=tmp_path / "workspace" / ".efp" / "mobile" / "runs",
+        mobile_artifacts_dir=tmp_path / "workspace" / ".efp" / "mobile" / "artifacts",
+        browserstack_local_binary_path=Path("/usr/local/bin/BrowserStackLocal"),
         opencode_version="1.14.39",
         ready_timeout_seconds=60,
     )

@@ -60,6 +60,7 @@ from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_st
 from .runtime_env import aws_status_from_env, build_runtime_env_from_config, read_runtime_env_file, write_runtime_env_file
 from .thinking_events import safe_preview
 from .git_cli_auth import write_git_gh_auth_assets
+from .mobile_cli_config import write_mobile_cli_config
 from .opencode_process import OpenCodeProcessManager
 from .session_store import SessionStore
 from .skill_sync import sync_runtime_skills
@@ -247,11 +248,16 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     runtime_env_has_values = bool(env_result.env)
     env_result.env.update(atlassian_result.env)
     warnings.extend([item for item in env_result.warnings if item not in warnings])
+    mobile_result = write_mobile_cli_config(settings, runtime_config)
+    env_result.env.update(mobile_result.env)
+    warnings.extend([item for item in mobile_result.warnings if item not in warnings])
+    if mobile_result.configured and "mobile" not in updated_sections:
+        updated_sections.append("mobile")
     env_path = write_runtime_env_file(settings, env_result.env)
     git_auth_result = write_git_gh_auth_assets(settings, env_result.env)
     aws_status = aws_status_from_env(env_result.env)
     aws_configured = bool("aws" in env_result.updated_sections and aws_status.get("configured"))
-    combined_updated_sections = sorted(set(updated_sections + env_result.updated_sections + atlassian_result.updated_sections))
+    combined_updated_sections = sorted(set(updated_sections + env_result.updated_sections + atlassian_result.updated_sections + mobile_result.updated_sections))
     manager = request.app.get(OPENCODE_PROCESS_MANAGER_KEY)
     restart_performed = False
     health_ok = None
@@ -287,9 +293,9 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
         if pending_restart:
             warnings.append("opencode config patch unsupported; restart may be required")
         status, applied = ("pending_restart", False) if pending_restart else ("applied", True)
-    overlay = ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status=status, pending_restart=pending_restart, warnings=warnings, updated_sections=combined_updated_sections, last_apply_error=last_error, applied=applied, env_hash=env_result.env_hash, env_path=str(env_path), restart_performed=restart_performed, opencode_pid=opencode_pid, last_restart_at=restart_meta.get("last_restart_at") if restart_meta else None, last_restart_reason=restart_meta.get("last_restart_reason") if restart_meta else None, health_ok=health_ok, git_auth_configured=bool(git_auth_result.get("configured")), gh_host=git_auth_result.get("host"), gh_config_dir=git_auth_result.get("gh_config_dir"), git_askpass_path=git_auth_result.get("askpass_path"), gitconfig_path=git_auth_result.get("gitconfig_path"), atlassian_cli_configured=atlassian_result.configured, atlassian_config_path=atlassian_result.path, atlassian_jira_instances=atlassian_result.jira_instances, atlassian_confluence_instances=atlassian_result.confluence_instances, aws_configured=aws_configured)
+    overlay = ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status=status, pending_restart=pending_restart, warnings=warnings, updated_sections=combined_updated_sections, last_apply_error=last_error, applied=applied, env_hash=env_result.env_hash, env_path=str(env_path), restart_performed=restart_performed, opencode_pid=opencode_pid, last_restart_at=restart_meta.get("last_restart_at") if restart_meta else None, last_restart_reason=restart_meta.get("last_restart_reason") if restart_meta else None, health_ok=health_ok, git_auth_configured=bool(git_auth_result.get("configured")), gh_host=git_auth_result.get("host"), gh_config_dir=git_auth_result.get("gh_config_dir"), git_askpass_path=git_auth_result.get("askpass_path"), gitconfig_path=git_auth_result.get("gitconfig_path"), atlassian_cli_configured=atlassian_result.configured, atlassian_config_path=atlassian_result.path, atlassian_jira_instances=atlassian_result.jira_instances, atlassian_confluence_instances=atlassian_result.confluence_instances, mobile_cli_configured=mobile_result.configured, mobile_config_path=mobile_result.path, mobile_status=mobile_result.redacted_status, aws_configured=aws_configured)
     ProfileOverlayStore(settings).save(overlay)
-    response = {"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "env_written": True, "env_hash": env_result.env_hash, "env_path": str(env_path), "updated_sections": combined_updated_sections, "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "auth_update_status": auth_update_status, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "restart_performed": restart_performed, "opencode_pid": opencode_pid, "health_ok": health_ok, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host"), "gh_config_dir": git_auth_result.get("gh_config_dir"), "git_askpass_path": git_auth_result.get("askpass_path"), "gitconfig_path": git_auth_result.get("gitconfig_path"), "atlassian_cli_configured": atlassian_result.configured, "atlassian_config_path": atlassian_result.path, "atlassian_jira_instances": atlassian_result.jira_instances, "atlassian_confluence_instances": atlassian_result.confluence_instances, "atlassian_status": atlassian_result.redacted_status, "aws_configured": aws_configured, "status_endpoint": "/api/internal/runtime-profile/status"}
+    response = {"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "env_written": True, "env_hash": env_result.env_hash, "env_path": str(env_path), "updated_sections": combined_updated_sections, "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "auth_update_status": auth_update_status, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "restart_performed": restart_performed, "opencode_pid": opencode_pid, "health_ok": health_ok, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host"), "gh_config_dir": git_auth_result.get("gh_config_dir"), "git_askpass_path": git_auth_result.get("askpass_path"), "gitconfig_path": git_auth_result.get("gitconfig_path"), "atlassian_cli_configured": atlassian_result.configured, "atlassian_config_path": atlassian_result.path, "atlassian_jira_instances": atlassian_result.jira_instances, "atlassian_confluence_instances": atlassian_result.confluence_instances, "atlassian_status": atlassian_result.redacted_status, "mobile_cli_configured": mobile_result.configured, "mobile_config_path": mobile_result.path, "mobile_status": mobile_result.redacted_status, "aws_configured": aws_configured, "status_endpoint": "/api/internal/runtime-profile/status"}
     if restart_deferred_reason:
         response["restart_deferred_reason"] = restart_deferred_reason
     if auth_build.warning:
@@ -327,6 +333,17 @@ async def runtime_profile_status_handler(request: web.Request) -> web.Response:
             "git_askpass_path": git_askpass_path,
             "gitconfig_path": gitconfig_path,
             "aws_configured": bool(aws_status.get("configured")),
+            "mobile_cli_configured": path_exists(settings.efp_config_path),
+            "mobile_config_path": str(settings.efp_config_path),
+            "mobile_status": {
+                "configured": path_exists(settings.efp_config_path),
+                "state_dir": runtime_env.get("MOBILE_STATE_DIR"),
+                "artifacts_dir": runtime_env.get("MOBILE_ARTIFACTS_DIR"),
+                "local": {
+                    "binary": runtime_env.get("BROWSERSTACK_LOCAL_BINARY"),
+                    "binary_present": bool(runtime_env.get("BROWSERSTACK_LOCAL_BINARY") and path_exists(Path(runtime_env["BROWSERSTACK_LOCAL_BINARY"]))),
+                },
+            },
         })
 
     return web.json_response(payload)
@@ -355,6 +372,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
     overlay = ProfileOverlayStore(settings).load()
     profile_cfg = overlay.config if overlay else {}
     github_cfg = profile_cfg.get("github") if isinstance(profile_cfg.get("github"), dict) else {}
+    mobile_cfg = profile_cfg.get("mobile") if isinstance(profile_cfg.get("mobile"), dict) else {}
     proxy_cfg = profile_cfg.get("proxy") if isinstance(profile_cfg.get("proxy"), dict) else {}
     runtime_env = _runtime_env_for_status(settings, overlay)
     aws_status = aws_status_from_env(runtime_env)
@@ -396,6 +414,17 @@ async def effective_config_handler(request: web.Request) -> web.Response:
                 "copilot": {"enabled": bool(provider == "github-copilot" or copilot_credential_present or copilot_base_url_present), "credential_present": copilot_credential_present, "token_cached": bool(copilot_snapshot.get("token_cached")), "base_url_present": copilot_base_url_present, "expires_at_present": bool(copilot_snapshot.get("expires_at_present"))},
                 "proxy": {"enabled": bool(proxy_cfg.get("enabled")), "url_present": bool(proxy_cfg.get("url")), "password_present": bool(proxy_cfg.get("password"))},
                 "aws": {"enabled": bool(aws_status.get("configured"))},
+                "mobile": {
+                    "enabled": bool((mobile_cfg and mobile_cfg.get("enabled") is not False) or (overlay and overlay.mobile_cli_configured)),
+                    "config_path": str(settings.efp_config_path),
+                    "cli_configured": bool(overlay.mobile_cli_configured if overlay else path_exists(settings.efp_config_path)),
+                    "state_dir": runtime_env.get("MOBILE_STATE_DIR"),
+                    "artifacts_dir": runtime_env.get("MOBILE_ARTIFACTS_DIR"),
+                    "browserstack_username_present": bool(runtime_env.get("BROWSERSTACK_USERNAME")),
+                    "browserstack_access_key_present": bool(runtime_env.get("BROWSERSTACK_ACCESS_KEY")),
+                    "local_binary": runtime_env.get("BROWSERSTACK_LOCAL_BINARY"),
+                    "local_binary_present": bool(runtime_env.get("BROWSERSTACK_LOCAL_BINARY") and path_exists(Path(runtime_env["BROWSERSTACK_LOCAL_BINARY"]))),
+                },
                 "env_file": {"present": bool(overlay and overlay.env_path), "path": overlay.env_path if overlay else None, "hash": overlay.env_hash if overlay else None},
             },
         }

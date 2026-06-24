@@ -61,6 +61,22 @@ def profile_policy_permission_baseline() -> dict[str, Any]:
         "confluence space list*": "allow",
         "confluence *": "ask",
     }
+    mobile_bash = {
+        "mobile commands*": "allow",
+        "mobile schema*": "allow",
+        "mobile version*": "allow",
+        "mobile doctor*": "allow",
+        "mobile auth test*": "allow",
+        "mobile device list*": "allow",
+        "mobile device resolve*": "allow",
+        "mobile app resolve*": "allow",
+        "mobile run status*": "allow",
+        "mobile observe*": "allow",
+        "mobile locate*": "allow",
+        "mobile assert*": "allow",
+        "mobile report*": "allow",
+        "mobile *": "ask",
+    }
     java_maven_bash = {
         "java": "allow",
         "java *": "allow",
@@ -128,9 +144,11 @@ def profile_policy_permission_baseline() -> dict[str, Any]:
         "sh ./mvnw *": "allow",
         "chmod +x ./mvnw": "allow",
     }
-    bash = {"*": "ask", "git *": "allow", "gh *": "allow", "git status*": "allow", "git diff*": "allow", "git log*": "allow"}
+    bash = {"git *": "allow", "gh *": "allow", "git status*": "allow", "git diff*": "allow", "git log*": "allow"}
     bash.update(java_maven_bash)
     bash.update(atlassian_bash)
+    bash.update(mobile_bash)
+    bash["*"] = "ask"
     return {
         "*": "ask", "read": "allow", "glob": "allow", "grep": "allow", "edit": "ask", "write": "ask",
         "bash": bash,

@@ -32,10 +32,15 @@ def test_dockerfile_consumes_prebuilt_custom_tools_without_builder_stage():
         "COPY ${CUSTOM_TOOLS_DIR}/jira /usr/local/bin/jira",
         "COPY ${CUSTOM_TOOLS_DIR}/confluence /usr/local/bin/confluence",
         "COPY ${CUSTOM_TOOLS_DIR}/aws-auth /usr/local/bin/aws-auth",
+        "COPY ${CUSTOM_TOOLS_DIR}/mobile /usr/local/bin/mobile",
+        "COPY ${CUSTOM_TOOLS_DIR}/BrowserStackLocal /usr/local/bin/BrowserStackLocal",
         "aws-auth version --json",
         "aws-auth commands --json",
+        "mobile version --json",
+        "mobile commands --json",
         "jira schema issue.map-csv --json",
         "jira schema issue.bulk-create --json",
+        "mobile schema run.start --json",
     ]
     for token in required:
         assert token in text
@@ -47,6 +52,8 @@ def test_runtime_tools_context_contract_is_documented_and_ignored():
         "runtime-tools/jira",
         "runtime-tools/confluence",
         "runtime-tools/aws-auth",
+        "runtime-tools/mobile",
+        "runtime-tools/BrowserStackLocal",
         "engineering-flow-platform-tools",
         "scripts/build.sh --snapshot",
     ]:
@@ -64,10 +71,13 @@ def test_smoke_requires_runtime_tools_without_preparing_them():
         "require_runtime_tool jira",
         "require_runtime_tool confluence",
         "require_runtime_tool aws-auth",
+        "require_runtime_tool mobile",
+        "require_runtime_tool BrowserStackLocal",
         "Missing runtime-tools/${tool}",
         "docs/CUSTOM_TOOLS_IMAGE.md",
         "jira schema issue.map-csv --json",
         "jira schema issue.bulk-create --json",
+        "mobile schema run.start --json",
     ]:
         assert token in script
     assert "git clone" not in script

@@ -28,7 +28,8 @@ MANAGED_EXTERNAL_ENV_KEYS = {
     "JAVA_HOME", "JAVA21_HOME", "JDK21_HOME",
     "MAVEN_HOME", "M2_HOME", "MAVEN_CONFIG", "MAVEN_SETTINGS_PATH",
     "EFP_JENKINS_USERNAME", "EFP_JENKINS_PASSWORD", "JENKINS_USERNAME", "JENKINS_PASSWORD",
-    "EFP_CONFIG",
+    "EFP_CONFIG", "MOBILE_STATE_DIR", "MOBILE_ARTIFACTS_DIR", "BROWSERSTACK_LOCAL_BINARY",
+    "BROWSERSTACK_USERNAME", "BROWSERSTACK_ACCESS_KEY",
 }
 _VERSIONED_JAVA_HOME_RE = re.compile(r"^(JAVA|JDK)\d+_HOME$")
 _REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
@@ -79,6 +80,10 @@ def _first_text(*values, default: str = "") -> str:
         if text:
             return text
     return default
+
+
+def _path_text(path: Path) -> str:
+    return path.as_posix()
 
 
 def _github_host_from_urls(*values: object) -> str:
@@ -188,7 +193,7 @@ def _write_aws_auth_cli_files(settings: Settings, *, domain: str, username: str,
     aws_dir.mkdir(parents=True, exist_ok=True)
     credentials_path = aws_dir / "credentials"
     previous_credentials = _read_bytes_if_exists(credentials_path)
-    config_path = settings.adapter_state_dir / "efp" / "config.yaml"
+    config_path = settings.efp_config_path
     previous_config = _read_bytes_if_exists(config_path)
     auth_env = _aws_auth_env(
         config_path=config_path,
@@ -296,11 +301,15 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         "OPENCODE_DATA_DIR": str(settings.opencode_data_dir),
         "XDG_DATA_HOME": str(xdg_data_home),
         "ATLASSIAN_CONFIG": str(settings.atlassian_config_path),
+        "EFP_CONFIG": str(settings.efp_config_path),
         "EFP_RUNTIME_TYPE": "opencode",
         "EFP_WORKSPACE_DIR": str(settings.workspace_dir),
         "EFP_SKILLS_DIR": str(settings.skills_dir),
         "EFP_ADAPTER_STATE_DIR": str(settings.adapter_state_dir),
         "EFP_OPENCODE_URL": settings.opencode_url,
+        "MOBILE_STATE_DIR": str(settings.mobile_state_dir),
+        "MOBILE_ARTIFACTS_DIR": str(settings.mobile_artifacts_dir),
+        "BROWSERSTACK_LOCAL_BINARY": _path_text(settings.browserstack_local_binary_path),
         "JAVA21_HOME": "/opt/jdks/zulu21",
         "JDK21_HOME": "/opt/jdks/zulu21",
         "JAVA_HOME": "/opt/jdks/zulu21",
@@ -503,6 +512,23 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
             updated.append("jenkins")
         else:
             warnings.append("jenkins enabled but username and password are required")
+
+    mobile = cfg.get("mobile") if isinstance(cfg.get("mobile"), dict) else {}
+    mobile_section_present = isinstance(cfg.get("mobile"), dict)
+    mobile_enabled = mobile_section_present and _section_enabled(mobile)
+    if mobile_enabled:
+        browserstack = mobile.get("browserstack") if isinstance(mobile.get("browserstack"), dict) else {}
+        username = _first_text(browserstack.get("username"))
+        access_key = _first_clean_secret(browserstack.get("access_key"))
+        username_env = _first_text(browserstack.get("username_env"), default="BROWSERSTACK_USERNAME")
+        access_key_env = _first_text(browserstack.get("access_key_env"), default="BROWSERSTACK_ACCESS_KEY")
+        if username and username_env:
+            env[username_env] = username
+            env["BROWSERSTACK_USERNAME"] = username
+        if access_key and access_key_env:
+            env[access_key_env] = access_key
+            env["BROWSERSTACK_ACCESS_KEY"] = access_key
+        updated.append("mobile")
 
     git = cfg.get("git") if isinstance(cfg.get("git"), dict) else {}
     git_user = git.get("user") if isinstance(git.get("user"), dict) else {}

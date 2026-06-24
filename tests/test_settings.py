@@ -4,13 +4,23 @@ from efp_opencode_adapter.settings import Settings
 
 
 def test_settings_default_state_dirs_are_root_home(monkeypatch):
+    monkeypatch.delenv("EFP_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("EFP_ADAPTER_STATE_DIR", raising=False)
     monkeypatch.delenv("OPENCODE_DATA_DIR", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("EFP_CONFIG", raising=False)
+    monkeypatch.delenv("MOBILE_STATE_DIR", raising=False)
+    monkeypatch.delenv("MOBILE_ARTIFACTS_DIR", raising=False)
+    monkeypatch.delenv("BROWSERSTACK_LOCAL_BINARY", raising=False)
 
     settings = Settings.from_env()
 
     assert settings.adapter_state_dir == Path("/root/.local/share/efp-compat")
     assert settings.opencode_data_dir == Path("/root/.local/share/opencode")
+    assert settings.efp_config_path == Path("/workspace/.efp/config.yaml")
+    assert settings.mobile_state_dir == Path("/workspace/.efp/mobile/runs")
+    assert settings.mobile_artifacts_dir == Path("/workspace/.efp/mobile/artifacts")
+    assert settings.browserstack_local_binary_path == Path("/usr/local/bin/BrowserStackLocal")
 
 
 def test_settings_permission_defaults(monkeypatch):

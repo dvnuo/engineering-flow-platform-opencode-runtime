@@ -72,6 +72,9 @@ class ProfileOverlay:
     atlassian_config_path: str | None = None
     atlassian_jira_instances: int = 0
     atlassian_confluence_instances: int = 0
+    mobile_cli_configured: bool = False
+    mobile_config_path: str | None = None
+    mobile_status: dict[str, Any] = field(default_factory=dict)
     aws_configured: bool = False
 
 
@@ -143,6 +146,9 @@ class ProfileOverlayStore:
             atlassian_config_path=(str(payload.get("atlassian_config_path")) if payload.get("atlassian_config_path") is not None else None),
             atlassian_jira_instances=int(payload.get("atlassian_jira_instances", 0) or 0),
             atlassian_confluence_instances=int(payload.get("atlassian_confluence_instances", 0) or 0),
+            mobile_cli_configured=bool(payload.get("mobile_cli_configured", False)),
+            mobile_config_path=(str(payload.get("mobile_config_path")) if payload.get("mobile_config_path") is not None else None),
+            mobile_status=payload.get("mobile_status") if isinstance(payload.get("mobile_status"), dict) else {},
             aws_configured=bool(payload.get("aws_configured", False)),
         )
 
@@ -188,5 +194,8 @@ def build_profile_status_payload(settings: Settings) -> dict[str, Any]:
         "atlassian_config_path": overlay.atlassian_config_path,
         "atlassian_jira_instances": overlay.atlassian_jira_instances,
         "atlassian_confluence_instances": overlay.atlassian_confluence_instances,
+        "mobile_cli_configured": overlay.mobile_cli_configured,
+        "mobile_config_path": overlay.mobile_config_path,
+        "mobile_status": overlay.mobile_status,
         "aws_configured": overlay.aws_configured,
     }

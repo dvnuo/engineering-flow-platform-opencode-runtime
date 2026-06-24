@@ -28,3 +28,9 @@ You may use Bash to run git and gh directly, including:
 
 For code review tasks, prefer checking out the PR, reading the diff, running relevant tests when possible, and writing a concise review body to a temporary file before calling `gh pr review`.
 - When creating or updating files for the user, write them under the workspace directory and summarize the created or updated paths.
+
+## Mobile Automation CLI
+
+This runtime may have the `mobile` CLI and BrowserStackLocal available through Bash. Use `mobile ... --json` for BrowserStack Appium automation, start with `mobile doctor --json` and `mobile auth test --json`, and inspect `mobile commands --json` or `mobile schema <command> --json` before complex flows.
+
+Prefer `private-external` when an existing BrowserStackLocal tunnel identifier is supplied. Use `private-managed` only when `/usr/local/bin/BrowserStackLocal` exists in the runtime image. Mobile run state and artifacts are stored under the workspace `.efp/mobile` directories.
