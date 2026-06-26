@@ -31,6 +31,6 @@ For code review tasks, prefer checking out the PR, reading the diff, running rel
 
 ## Mobile Automation CLI
 
-This runtime may have the `mobile` CLI and BrowserStackLocal available through Bash. Use `mobile ... --json` for BrowserStack Appium automation, start with `mobile doctor --json` and `mobile auth test --json`, and inspect `mobile commands --json` or `mobile schema <command> --json` before complex flows.
+This runtime may have the `mobile-auto` CLI and BrowserStackLocal available through Bash. Use `mobile-auto ... --json` for BrowserStack Appium automation, start with `mobile-auto doctor --json` and `mobile-auto auth test --json`, and inspect `mobile-auto commands --json` or `mobile-auto schema <command> --json` before complex flows.
 
-Prefer `private-external` when an existing BrowserStackLocal tunnel identifier is supplied. Use `private-managed` only when `/usr/local/bin/BrowserStackLocal` exists in the runtime image. Mobile run state and artifacts are stored under the workspace `.efp/mobile` directories.
+Prefer `private-external` when an existing BrowserStackLocal tunnel identifier is supplied. Use `private-managed` only when `/usr/local/bin/BrowserStackLocal` exists in the runtime image. Mobile run state and artifacts are stored under the workspace `.efp/mobile-auto` directories.

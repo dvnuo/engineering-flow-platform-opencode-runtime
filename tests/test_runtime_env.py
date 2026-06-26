@@ -73,7 +73,7 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
             "username": "jenkins-user",
             "password": "jenkins-password",
         },
-        "mobile": {
+        "mobile-auto": {
             "enabled": True,
             "browserstack": {
                 "username": "bs-user",
@@ -126,8 +126,8 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     assert r.env["JENKINS_PASSWORD"] == "jenkins-password"
     assert r.env["BROWSERSTACK_USERNAME"] == "bs-user"
     assert r.env["BROWSERSTACK_ACCESS_KEY"] == "bs-access-key"
-    assert r.env["MOBILE_STATE_DIR"] == str(s.mobile_state_dir)
-    assert r.env["MOBILE_ARTIFACTS_DIR"] == str(s.mobile_artifacts_dir)
+    assert r.env["MOBILE_AUTO_STATE_DIR"] == str(s.mobile_state_dir)
+    assert r.env["MOBILE_AUTO_ARTIFACTS_DIR"] == str(s.mobile_artifacts_dir)
     assert r.env["BROWSERSTACK_LOCAL_BINARY"] == s.browserstack_local_binary_path.as_posix()
     assert "/opt/venv/bin" in configure_env["PATH"]
     assert ("/" + "app" + "/venv/bin") not in configure_env["PATH"]
@@ -171,7 +171,7 @@ def test_runtime_env_respects_disabled_external_sections(tmp_path, monkeypatch):
     for key in ("GITHUB_TOKEN", "EFP_GITHUB_CONFIG_JSON", "JIRA_BASE_URL", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_BASE_URL", "EFP_CONFLUENCE_INSTANCES_JSON", "AWS_SHARED_CREDENTIALS_FILE", "EFP_JENKINS_USERNAME", "EFP_JENKINS_PASSWORD", "JENKINS_USERNAME", "JENKINS_PASSWORD", "BROWSERSTACK_USERNAME", "BROWSERSTACK_ACCESS_KEY"):
         assert key not in env
     assert env["EFP_CONFIG"] == str(s.efp_config_path)
-    assert env["MOBILE_STATE_DIR"] == str(s.mobile_state_dir)
+    assert env["MOBILE_AUTO_STATE_DIR"] == str(s.mobile_state_dir)
 
 
 def test_runtime_env_supports_portal_git_user_shape(tmp_path, monkeypatch):
@@ -206,8 +206,8 @@ def test_empty_config_does_not_emit_external_json(tmp_path, monkeypatch):
     assert "EFP_JIRA_INSTANCES_JSON" not in env
     assert "EFP_CONFLUENCE_INSTANCES_JSON" not in env
     assert env["EFP_CONFIG"] == str(s.efp_config_path)
-    assert env["MOBILE_STATE_DIR"] == str(s.mobile_state_dir)
-    assert env["MOBILE_ARTIFACTS_DIR"] == str(s.mobile_artifacts_dir)
+    assert env["MOBILE_AUTO_STATE_DIR"] == str(s.mobile_state_dir)
+    assert env["MOBILE_AUTO_ARTIFACTS_DIR"] == str(s.mobile_artifacts_dir)
     assert env["BROWSERSTACK_LOCAL_BINARY"] == s.browserstack_local_binary_path.as_posix()
     assert "AWS_CONFIG_FILE" not in env
 

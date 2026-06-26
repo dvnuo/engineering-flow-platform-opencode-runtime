@@ -30,8 +30,8 @@ async def _run(workspace_dir: Path) -> int:
         workspace_dir=workspace_dir,
         opencode_config_path=workspace_dir / ".opencode" / "opencode.json",
         efp_config_path=Path(os.getenv("EFP_CONFIG", str(workspace_dir / ".efp" / "config.yaml"))),
-        mobile_state_dir=Path(os.getenv("MOBILE_STATE_DIR", str(workspace_dir / ".efp" / "mobile" / "runs"))),
-        mobile_artifacts_dir=Path(os.getenv("MOBILE_ARTIFACTS_DIR", str(workspace_dir / ".efp" / "mobile" / "artifacts"))),
+        mobile_state_dir=Path(os.getenv("MOBILE_AUTO_STATE_DIR", str(workspace_dir / ".efp" / "mobile-auto" / "runs"))),
+        mobile_artifacts_dir=Path(os.getenv("MOBILE_AUTO_ARTIFACTS_DIR", str(workspace_dir / ".efp" / "mobile-auto" / "artifacts"))),
         browserstack_local_binary_path=Path(os.getenv("BROWSERSTACK_LOCAL_BINARY", "/usr/local/bin/BrowserStackLocal")),
     )
 
@@ -107,8 +107,8 @@ async def _run(workspace_dir: Path) -> int:
     mobile_result = write_mobile_cli_config(settings, runtime_config if isinstance(runtime_config, dict) else {})
     env_result.env.update(mobile_result.env)
     warnings.extend([item for item in mobile_result.warnings if item not in warnings])
-    if mobile_result.configured and "mobile" not in updated_sections:
-        updated_sections.append("mobile")
+    if mobile_result.configured and "mobile-auto" not in updated_sections:
+        updated_sections.append("mobile-auto")
     env_path = write_runtime_env_file(settings, env_result.env)
     git_auth_result = write_git_gh_auth_assets(settings, env_result.env)
     aws_status = aws_status_from_env(env_result.env)

@@ -251,8 +251,8 @@ async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
     mobile_result = write_mobile_cli_config(settings, runtime_config)
     env_result.env.update(mobile_result.env)
     warnings.extend([item for item in mobile_result.warnings if item not in warnings])
-    if mobile_result.configured and "mobile" not in updated_sections:
-        updated_sections.append("mobile")
+    if mobile_result.configured and "mobile-auto" not in updated_sections:
+        updated_sections.append("mobile-auto")
     env_path = write_runtime_env_file(settings, env_result.env)
     git_auth_result = write_git_gh_auth_assets(settings, env_result.env)
     aws_status = aws_status_from_env(env_result.env)
@@ -337,8 +337,8 @@ async def runtime_profile_status_handler(request: web.Request) -> web.Response:
             "mobile_config_path": str(settings.efp_config_path),
             "mobile_status": {
                 "configured": path_exists(settings.efp_config_path),
-                "state_dir": runtime_env.get("MOBILE_STATE_DIR"),
-                "artifacts_dir": runtime_env.get("MOBILE_ARTIFACTS_DIR"),
+                "state_dir": runtime_env.get("MOBILE_AUTO_STATE_DIR"),
+                "artifacts_dir": runtime_env.get("MOBILE_AUTO_ARTIFACTS_DIR"),
                 "local": {
                     "binary": runtime_env.get("BROWSERSTACK_LOCAL_BINARY"),
                     "binary_present": bool(runtime_env.get("BROWSERSTACK_LOCAL_BINARY") and path_exists(Path(runtime_env["BROWSERSTACK_LOCAL_BINARY"]))),
@@ -372,7 +372,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
     overlay = ProfileOverlayStore(settings).load()
     profile_cfg = overlay.config if overlay else {}
     github_cfg = profile_cfg.get("github") if isinstance(profile_cfg.get("github"), dict) else {}
-    mobile_cfg = profile_cfg.get("mobile") if isinstance(profile_cfg.get("mobile"), dict) else {}
+    mobile_cfg = profile_cfg.get("mobile-auto") if isinstance(profile_cfg.get("mobile-auto"), dict) else {}
     proxy_cfg = profile_cfg.get("proxy") if isinstance(profile_cfg.get("proxy"), dict) else {}
     runtime_env = _runtime_env_for_status(settings, overlay)
     aws_status = aws_status_from_env(runtime_env)
@@ -414,12 +414,12 @@ async def effective_config_handler(request: web.Request) -> web.Response:
                 "copilot": {"enabled": bool(provider == "github-copilot" or copilot_credential_present or copilot_base_url_present), "credential_present": copilot_credential_present, "token_cached": bool(copilot_snapshot.get("token_cached")), "base_url_present": copilot_base_url_present, "expires_at_present": bool(copilot_snapshot.get("expires_at_present"))},
                 "proxy": {"enabled": bool(proxy_cfg.get("enabled")), "url_present": bool(proxy_cfg.get("url")), "password_present": bool(proxy_cfg.get("password"))},
                 "aws": {"enabled": bool(aws_status.get("configured"))},
-                "mobile": {
+                "mobile-auto": {
                     "enabled": bool((mobile_cfg and mobile_cfg.get("enabled") is not False) or (overlay and overlay.mobile_cli_configured)),
                     "config_path": str(settings.efp_config_path),
                     "cli_configured": bool(overlay.mobile_cli_configured if overlay else path_exists(settings.efp_config_path)),
-                    "state_dir": runtime_env.get("MOBILE_STATE_DIR"),
-                    "artifacts_dir": runtime_env.get("MOBILE_ARTIFACTS_DIR"),
+                    "state_dir": runtime_env.get("MOBILE_AUTO_STATE_DIR"),
+                    "artifacts_dir": runtime_env.get("MOBILE_AUTO_ARTIFACTS_DIR"),
                     "browserstack_username_present": bool(runtime_env.get("BROWSERSTACK_USERNAME")),
                     "browserstack_access_key_present": bool(runtime_env.get("BROWSERSTACK_ACCESS_KEY")),
                     "local_binary": runtime_env.get("BROWSERSTACK_LOCAL_BINARY"),

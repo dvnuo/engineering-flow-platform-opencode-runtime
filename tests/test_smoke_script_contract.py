@@ -19,12 +19,12 @@ def test_smoke_script_checks_atlassian_cli_schema_commands():
     required = [
         'jira version --json',
         'confluence version --json',
-        'mobile version --json',
+        'mobile-auto version --json',
         'jira commands --json',
-        'mobile commands --json',
+        'mobile-auto commands --json',
         'jira schema issue.map-csv --json',
         'jira schema issue.bulk-create --json',
-        'mobile schema run.start --json',
+        'mobile-auto schema run.start --json',
     ]
     for token in required:
         assert token in script

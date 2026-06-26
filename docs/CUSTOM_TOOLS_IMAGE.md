@@ -10,7 +10,7 @@ Required files before `docker build`:
 - `runtime-tools/jira`
 - `runtime-tools/confluence`
 - `runtime-tools/aws-auth`
-- `runtime-tools/mobile`
+- `runtime-tools/mobile-auto`
 - `runtime-tools/BrowserStackLocal`
 - `runtime-maven/settings.xml`
 
@@ -35,7 +35,7 @@ mkdir -p runtime-tools
 cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/jira runtime-tools/jira
 cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/confluence runtime-tools/confluence
 cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/aws-auth runtime-tools/aws-auth
-cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/mobile runtime-tools/mobile
+cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/mobile-auto runtime-tools/mobile-auto
 cp /secure/pipeline/browserstack/linux-amd64/BrowserStackLocal runtime-tools/BrowserStackLocal
 mkdir -p runtime-maven
 cp /secure/pipeline/generated/settings.xml runtime-maven/settings.xml
@@ -51,7 +51,7 @@ mkdir -p runtime-tools
 cp /path/to/engineering-flow-platform-tools/dist/linux-arm64/jira runtime-tools/jira
 cp /path/to/engineering-flow-platform-tools/dist/linux-arm64/confluence runtime-tools/confluence
 cp /path/to/engineering-flow-platform-tools/dist/linux-arm64/aws-auth runtime-tools/aws-auth
-cp /path/to/engineering-flow-platform-tools/dist/linux-arm64/mobile runtime-tools/mobile
+cp /path/to/engineering-flow-platform-tools/dist/linux-arm64/mobile-auto runtime-tools/mobile-auto
 cp /secure/pipeline/browserstack/linux-arm64/BrowserStackLocal runtime-tools/BrowserStackLocal
 ```
 

@@ -42,7 +42,7 @@ async def test_runtime_profile_apply_writes_mobile_config_and_env(tmp_path, monk
             "runtime_profile_id": "rp-mobile",
             "revision": 2,
             "config": {
-                "mobile": {
+                "mobile-auto": {
                     "enabled": True,
                     "default_provider": "browserstack",
                     "defaults": {"platform": "android", "network_mode": "private-external"},
@@ -63,17 +63,17 @@ async def test_runtime_profile_apply_writes_mobile_config_and_env(tmp_path, monk
     assert body["mobile_cli_configured"] is True
     assert body["mobile_config_path"] == str(workspace / ".efp/config.yaml")
     assert body["mobile_status"]["browserstack"]["access_key_present"] is True
-    assert "mobile" in body["updated_sections"]
+    assert "mobile-auto" in body["updated_sections"]
     assert access_key not in json.dumps(body)
 
     stored = yaml.safe_load((workspace / ".efp/config.yaml").read_text(encoding="utf-8"))
-    assert stored["mobile"]["browserstack"]["username"] == "bs-user"
-    assert stored["mobile"]["browserstack"]["access_key"] == access_key
-    assert stored["mobile"]["browserstack"]["local"]["binary"] == "/usr/local/bin/BrowserStackLocal"
+    assert stored["mobile-auto"]["browserstack"]["username"] == "bs-user"
+    assert stored["mobile-auto"]["browserstack"]["access_key"] == access_key
+    assert stored["mobile-auto"]["browserstack"]["local"]["binary"] == "/usr/local/bin/BrowserStackLocal"
 
     env_text = (state / "opencode.env").read_text(encoding="utf-8")
     assert "EFP_CONFIG=" in env_text
-    assert "MOBILE_STATE_DIR=" in env_text
+    assert "MOBILE_AUTO_STATE_DIR=" in env_text
     assert "BROWSERSTACK_LOCAL_BINARY=" in env_text
 
     status = await (await client.get("/api/internal/runtime-profile/status")).json()
@@ -82,9 +82,9 @@ async def test_runtime_profile_apply_writes_mobile_config_and_env(tmp_path, monk
     assert access_key not in json.dumps(status)
 
     effective = await (await client.get("/api/internal/opencode-effective-config")).json()
-    assert effective["runtime_integrations"]["mobile"]["enabled"] is True
-    assert effective["runtime_integrations"]["mobile"]["cli_configured"] is True
-    assert effective["runtime_integrations"]["mobile"]["browserstack_username_present"] is True
-    assert effective["runtime_integrations"]["mobile"]["browserstack_access_key_present"] is True
+    assert effective["runtime_integrations"]["mobile-auto"]["enabled"] is True
+    assert effective["runtime_integrations"]["mobile-auto"]["cli_configured"] is True
+    assert effective["runtime_integrations"]["mobile-auto"]["browserstack_username_present"] is True
+    assert effective["runtime_integrations"]["mobile-auto"]["browserstack_access_key_present"] is True
 
     await client.close()

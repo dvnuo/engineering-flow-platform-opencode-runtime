@@ -79,7 +79,7 @@ trap cleanup EXIT
 require_runtime_tool jira
 require_runtime_tool confluence
 require_runtime_tool aws-auth
-require_runtime_tool mobile
+require_runtime_tool mobile-auto
 require_runtime_tool BrowserStackLocal
 prepare_container_runtime
 prepare_maven_settings
@@ -93,7 +93,7 @@ if [[ "${RUN_RUNTIME_CONTRACT_TESTS}" == "1" ]]; then
   timeout "${RUNTIME_CONTRACT_TIMEOUT_SECONDS}" env "RUNTIME_BASE_URL=${RUNTIME_CONTRACT_BASE_URL}" python -m pytest -q runtime_contract_tests
 fi
 docker exec "${NAME}" bash -lc 'git --version && gh --version'
-docker exec "${NAME}" bash -lc 'jira version --json >/dev/null && confluence version --json >/dev/null && aws-auth version --json >/dev/null && mobile version --json >/dev/null && jira commands --json >/dev/null && aws-auth commands --json >/dev/null && mobile commands --json >/dev/null && jira schema issue.map-csv --json >/dev/null && jira schema issue.bulk-create --json >/dev/null && mobile schema run.start --json >/dev/null && test -x /usr/local/bin/BrowserStackLocal'
+docker exec "${NAME}" bash -lc 'jira version --json >/dev/null && confluence version --json >/dev/null && aws-auth version --json >/dev/null && mobile-auto version --json >/dev/null && jira commands --json >/dev/null && aws-auth commands --json >/dev/null && mobile-auto commands --json >/dev/null && jira schema issue.map-csv --json >/dev/null && jira schema issue.bulk-create --json >/dev/null && mobile-auto schema run.start --json >/dev/null && test -x /usr/local/bin/BrowserStackLocal'
 docker exec "${NAME}" java -version
 docker exec "${NAME}" javac -version
 docker exec "${NAME}" mvn -v

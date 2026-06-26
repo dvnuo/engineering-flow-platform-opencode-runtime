@@ -25,17 +25,17 @@ def test_dockerfile_uses_prebuilt_custom_tools_and_checks_schemas():
     assert "ARG CUSTOM_TOOLS_DIR=runtime-tools" in text
     assert "COPY ${CUSTOM_TOOLS_DIR}/jira /usr/local/bin/jira" in text
     assert "COPY ${CUSTOM_TOOLS_DIR}/confluence /usr/local/bin/confluence" in text
-    assert "COPY ${CUSTOM_TOOLS_DIR}/mobile /usr/local/bin/mobile" in text
+    assert "COPY ${CUSTOM_TOOLS_DIR}/mobile-auto /usr/local/bin/mobile-auto" in text
     assert "COPY ${CUSTOM_TOOLS_DIR}/BrowserStackLocal /usr/local/bin/BrowserStackLocal" in text
     assert "COPY --from=" + _join("atlassian", "-", "tools") not in text
     assert "jira version --json" in text
     assert "confluence version --json" in text
-    assert "mobile version --json" in text
+    assert "mobile-auto version --json" in text
     assert "jira commands --json" in text
-    assert "mobile commands --json" in text
+    assert "mobile-auto commands --json" in text
     assert "jira schema issue.map-csv --json" in text
     assert "jira schema issue.bulk-create --json" in text
-    assert "mobile schema run.start --json" in text
+    assert "mobile-auto schema run.start --json" in text
 
 
 def test_dockerfile_installs_node_22_from_ubuntu_base():

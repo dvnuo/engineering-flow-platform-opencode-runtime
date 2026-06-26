@@ -63,7 +63,7 @@ def _chmod_best_effort(path: Path, mode: int, warnings: list[str], warning: str)
 
 
 def _build_mobile_config(settings: Settings, runtime_config: dict, warnings: list[str]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    source = runtime_config.get("mobile") if isinstance(runtime_config.get("mobile"), dict) else {}
+    source = runtime_config.get("mobile-auto") if isinstance(runtime_config.get("mobile-auto"), dict) else {}
     status: dict[str, Any] = {"configured": False}
     if not _section_enabled(source):
         return None, status
@@ -111,7 +111,7 @@ def _build_mobile_config(settings: Settings, runtime_config: dict, warnings: lis
         },
     }
     if not browserstack:
-        warnings.append("mobile enabled but browserstack config is missing")
+        warnings.append("mobile-auto enabled but browserstack config is missing")
     return mobile, status
 
 
@@ -120,16 +120,16 @@ def write_mobile_cli_config(settings: Settings, runtime_config: dict) -> MobileC
     path = settings.efp_config_path
     env = {
         "EFP_CONFIG": str(path),
-        "MOBILE_STATE_DIR": str(settings.mobile_state_dir),
-        "MOBILE_ARTIFACTS_DIR": str(settings.mobile_artifacts_dir),
+        "MOBILE_AUTO_STATE_DIR": str(settings.mobile_state_dir),
+        "MOBILE_AUTO_ARTIFACTS_DIR": str(settings.mobile_artifacts_dir),
         "BROWSERSTACK_LOCAL_BINARY": _path_text(settings.browserstack_local_binary_path),
     }
     mobile_config, status = _build_mobile_config(settings, runtime_config if isinstance(runtime_config, dict) else {}, warnings)
     existing = _read_yaml_mapping(path)
-    existing.pop("mobile", None)
+    existing.pop("mobile-auto", None)
     configured = mobile_config is not None
     if configured:
-        existing["mobile"] = mobile_config
+        existing["mobile-auto"] = mobile_config
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,7 +153,7 @@ def write_mobile_cli_config(settings: Settings, runtime_config: dict) -> MobileC
         configured=configured,
         path=str(path),
         env=env,
-        updated_sections=["mobile"] if isinstance((runtime_config or {}).get("mobile"), dict) else [],
+        updated_sections=["mobile-auto"] if isinstance((runtime_config or {}).get("mobile-auto"), dict) else [],
         warnings=warnings,
         redacted_status=status,
     )

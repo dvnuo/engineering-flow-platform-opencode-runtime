@@ -28,7 +28,7 @@ MANAGED_EXTERNAL_ENV_KEYS = {
     "JAVA_HOME", "JAVA21_HOME", "JDK21_HOME",
     "MAVEN_HOME", "M2_HOME", "MAVEN_CONFIG", "MAVEN_SETTINGS_PATH",
     "EFP_JENKINS_USERNAME", "EFP_JENKINS_PASSWORD", "JENKINS_USERNAME", "JENKINS_PASSWORD",
-    "EFP_CONFIG", "MOBILE_STATE_DIR", "MOBILE_ARTIFACTS_DIR", "BROWSERSTACK_LOCAL_BINARY",
+    "EFP_CONFIG", "MOBILE_AUTO_STATE_DIR", "MOBILE_AUTO_ARTIFACTS_DIR", "BROWSERSTACK_LOCAL_BINARY",
     "BROWSERSTACK_USERNAME", "BROWSERSTACK_ACCESS_KEY",
 }
 _VERSIONED_JAVA_HOME_RE = re.compile(r"^(JAVA|JDK)\d+_HOME$")
@@ -307,8 +307,8 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         "EFP_SKILLS_DIR": str(settings.skills_dir),
         "EFP_ADAPTER_STATE_DIR": str(settings.adapter_state_dir),
         "EFP_OPENCODE_URL": settings.opencode_url,
-        "MOBILE_STATE_DIR": str(settings.mobile_state_dir),
-        "MOBILE_ARTIFACTS_DIR": str(settings.mobile_artifacts_dir),
+        "MOBILE_AUTO_STATE_DIR": str(settings.mobile_state_dir),
+        "MOBILE_AUTO_ARTIFACTS_DIR": str(settings.mobile_artifacts_dir),
         "BROWSERSTACK_LOCAL_BINARY": _path_text(settings.browserstack_local_binary_path),
         "JAVA21_HOME": "/opt/jdks/zulu21",
         "JDK21_HOME": "/opt/jdks/zulu21",
@@ -513,8 +513,8 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         else:
             warnings.append("jenkins enabled but username and password are required")
 
-    mobile = cfg.get("mobile") if isinstance(cfg.get("mobile"), dict) else {}
-    mobile_section_present = isinstance(cfg.get("mobile"), dict)
+    mobile = cfg.get("mobile-auto") if isinstance(cfg.get("mobile-auto"), dict) else {}
+    mobile_section_present = isinstance(cfg.get("mobile-auto"), dict)
     mobile_enabled = mobile_section_present and _section_enabled(mobile)
     if mobile_enabled:
         browserstack = mobile.get("browserstack") if isinstance(mobile.get("browserstack"), dict) else {}
@@ -528,7 +528,7 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         if access_key and access_key_env:
             env[access_key_env] = access_key
             env["BROWSERSTACK_ACCESS_KEY"] = access_key
-        updated.append("mobile")
+        updated.append("mobile-auto")
 
     git = cfg.get("git") if isinstance(cfg.get("git"), dict) else {}
     git_user = git.get("user") if isinstance(git.get("user"), dict) else {}
