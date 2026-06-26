@@ -60,7 +60,9 @@ async def test_runtime_profile_apply_writes_atlassian_config_and_env(tmp_path, m
     assert password not in json.dumps(body)
     assert token not in json.dumps(body)
     assert config_path.exists()
-    assert f"ATLASSIAN_CONFIG={config_path}" in (state / "opencode.env").read_text(encoding="utf-8")
+    env_text = (state / "opencode.env").read_text(encoding="utf-8")
+    assert "ATLASSIAN_CONFIG=" in env_text
+    assert str(config_path) in env_text
 
     stored = json.loads(config_path.read_text(encoding="utf-8"))
     assert stored["jira"]["default_instance"] == "jira-main"

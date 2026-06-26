@@ -17,6 +17,8 @@ def test_workspace_agents_md_example_exists():
     content = template.read_text(encoding="utf-8")
     assert "# AGENTS.md" in content
     assert "EFP Portal" in content
+    assert "Mobile Automation CLI" in content
+    assert "mobile-auto doctor --json" in content
 
 
 def test_ensure_default_agents_md_uses_workspace_example_when_missing(tmp_path, monkeypatch):
