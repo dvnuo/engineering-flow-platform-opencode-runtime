@@ -22,13 +22,20 @@ class Subscriber:
 
 
 class EventBus:
-    def __init__(self, replay_limit: int = 500, replay_ttl_seconds: float = 21600.0):
+    def __init__(
+        self,
+        replay_limit: int = 500,
+        replay_ttl_seconds: float = 21600.0,
+        sweep_interval_seconds: float = 60.0,
+    ):
         self._subs: set[Subscriber] = set()
         self.replay_limit = max(0, int(replay_limit))
         self.replay_ttl_seconds = max(0.001, float(replay_ttl_seconds))
+        self.sweep_interval_seconds = max(0.0, float(sweep_interval_seconds))
         self._recent_by_session: dict[str, deque[tuple[float, int, dict[str, Any]]]] = {}
         self._recent_by_request: dict[str, deque[tuple[float, int, dict[str, Any]]]] = {}
         self._seq = count(1)
+        self._last_sweep = 0.0
 
     def subscribe(self, filters: dict[str, str]) -> Subscriber:
         sub = Subscriber(filters={k: v for k, v in filters.items() if k in ALLOWED_FILTER_KEYS and v})
@@ -82,10 +89,28 @@ class EventBus:
         while bucket and bucket[0][0] < cutoff:
             bucket.popleft()
 
+    def _sweep_expired_buckets(self, *, now: float) -> None:
+        """Drop expired replay events and empty buckets across all keys.
+
+        Per-bucket pruning only runs when the same key is appended to or
+        queried again, which never happens for finished request ids; without
+        a global sweep those buckets retain their events forever.
+        """
+        if now - self._last_sweep < self.sweep_interval_seconds:
+            return
+        self._last_sweep = now
+        for store in (self._recent_by_session, self._recent_by_request):
+            for key in list(store.keys()):
+                bucket = store[key]
+                self._prune_bucket(bucket, now=now)
+                if not bucket:
+                    del store[key]
+
     def _store_recent(self, event: dict[str, Any]) -> None:
         if self.replay_limit <= 0 or not isinstance(event, dict):
             return
         now = time.time()
+        self._sweep_expired_buckets(now=now)
         item = (now, next(self._seq), copy.deepcopy(event))
         session_id = self._event_value(event, "session_id")
         request_id = self._event_value(event, "request_id")

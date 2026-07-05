@@ -118,6 +118,43 @@ async def test_event_bus_replay_ttl_behavior(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_event_bus_sweep_removes_expired_request_and_session_buckets(monkeypatch):
+    now = 1000.0
+    monkeypatch.setattr("efp_opencode_adapter.event_bus.time.time", lambda: now)
+    bus = EventBus(replay_limit=10, replay_ttl_seconds=5, sweep_interval_seconds=30)
+
+    # A finished chat run's request bucket is never appended to or queried
+    # again; only the periodic sweep can release it.
+    await bus.publish({"type": "assistant.delta", "session_id": "s1", "request_id": "r-done", "data": {"delta": "hi"}})
+    assert "r-done" in bus._recent_by_request
+    assert "s1" in bus._recent_by_session
+
+    now = 1040.0  # past TTL and past the sweep interval
+    await bus.publish({"type": "assistant.delta", "session_id": "s2", "request_id": "r-new", "data": {"delta": "yo"}})
+
+    assert "r-done" not in bus._recent_by_request
+    assert "s1" not in bus._recent_by_session
+    assert "r-new" in bus._recent_by_request
+    assert "s2" in bus._recent_by_session
+
+
+@pytest.mark.asyncio
+async def test_event_bus_sweep_respects_interval(monkeypatch):
+    now = 1000.0
+    monkeypatch.setattr("efp_opencode_adapter.event_bus.time.time", lambda: now)
+    bus = EventBus(replay_limit=10, replay_ttl_seconds=5, sweep_interval_seconds=60)
+
+    await bus.publish({"type": "one", "session_id": "s1", "request_id": "r1"})
+    now = 1010.0  # past TTL but within the sweep interval
+    await bus.publish({"type": "two", "session_id": "s2", "request_id": "r2"})
+
+    # Expired bucket is still present because no sweep ran yet ...
+    assert "r1" in bus._recent_by_request
+    # ... but its events are unreadable (query-time pruning still applies).
+    assert bus.recent_events(request_id="r1") == []
+
+
+@pytest.mark.asyncio
 async def test_event_bus_old_subscriber_behavior_unchanged():
     bus = EventBus(replay_limit=10, replay_ttl_seconds=60)
     sub = bus.subscribe({"session_id": "s1"})

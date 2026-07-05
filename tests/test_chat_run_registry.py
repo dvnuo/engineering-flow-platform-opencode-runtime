@@ -1,4 +1,10 @@
-from efp_opencode_adapter.chat_run_registry import ChatRunRegistry
+import asyncio
+from datetime import datetime, timezone
+
+from efp_opencode_adapter.chat_run_registry import (
+    RETAINED_EVENT_TAIL_ITEMS,
+    ChatRunRegistry,
+)
 
 
 def test_chat_run_registry_tracks_final_payload():
@@ -38,3 +44,100 @@ def test_chat_run_registry_prunes_only_terminal_records():
     assert registry.get("old") is None
     assert registry.get("running") is not None
     assert registry.get("new") is not None
+
+
+def test_chat_run_registry_compacts_retained_event_streams():
+    registry = ChatRunRegistry()
+    registry.start(session_id="s1", request_id="r1")
+    events = [{"type": "assistant.delta", "data": {"delta": str(i)}} for i in range(500)]
+
+    registry.complete(
+        "r1",
+        {
+            "ok": True,
+            "completion_state": "completed",
+            "response": "done",
+            "events": events,
+            "runtime_events": events,
+        },
+    )
+
+    final = registry.get("r1").to_payload()["final_payload"]
+    assert final["response"] == "done"
+    assert len(final["runtime_events"]) == RETAINED_EVENT_TAIL_ITEMS
+    assert final["runtime_events"][-1] == events[-1]
+    assert final["runtime_events_count"] == 500
+    assert final["runtime_events_truncated"] is True
+    assert len(final["events"]) == RETAINED_EVENT_TAIL_ITEMS
+
+
+def test_chat_run_registry_keeps_small_event_lists_intact():
+    registry = ChatRunRegistry()
+    registry.start(session_id="s1", request_id="r1")
+    events = [{"type": "assistant.delta", "data": {"delta": "x"}}]
+
+    registry.complete(
+        "r1",
+        {"ok": True, "completion_state": "completed", "runtime_events": events},
+    )
+
+    final = registry.get("r1").to_payload()["final_payload"]
+    assert final["runtime_events"] == events
+    assert "runtime_events_count" not in final
+    assert "runtime_events_truncated" not in final
+
+
+def test_chat_run_registry_releases_task_reference_on_terminal():
+    async def scenario():
+        registry = ChatRunRegistry()
+        record = registry.start(session_id="s1", request_id="r1")
+
+        async def _noop():
+            return {"ok": True}
+
+        task = asyncio.create_task(_noop())
+        registry.attach_task("r1", task)
+        await task
+        assert record.task is task
+
+        registry.complete("r1", {"ok": True, "completion_state": "completed"})
+        assert record.task is None
+
+    asyncio.run(scenario())
+
+
+def test_chat_run_registry_marks_stale_running_records_failed_and_prunable():
+    registry = ChatRunRegistry(max_records=2, stale_running_seconds=3600)
+    stuck = registry.start(session_id="s1", request_id="stuck")
+    stuck.updated_at = "2000-01-01T00:00:00Z"
+
+    registry.start(session_id="s1", request_id="new1")
+
+    stuck_record = registry.get("stuck")
+    assert stuck_record.state == "failed"
+    assert stuck_record.terminal is True
+    assert stuck_record.error_payload["error"] == "chat_run_stale"
+
+    registry.start(session_id="s1", request_id="new2")
+    assert registry.get("stuck") is None
+    assert registry.get("new1") is not None
+    assert registry.get("new2") is not None
+
+
+def test_chat_run_registry_stale_check_handles_mixed_timestamp_formats():
+    # utc_now_iso() in this adapter returns an offset suffix ("+00:00"), so the
+    # stale check must not depend on a specific ISO string format.
+    registry = ChatRunRegistry(max_records=10, stale_running_seconds=3600)
+    fresh = registry.start(session_id="s1", request_id="fresh")
+    fresh.updated_at = datetime.now(timezone.utc).isoformat()  # offset suffix, no 'Z'
+    stale = registry.start(session_id="s1", request_id="stale")
+    stale.updated_at = "2000-01-01T00:00:00Z"
+    unparseable = registry.start(session_id="s1", request_id="weird")
+    unparseable.updated_at = "not-a-timestamp"
+
+    registry.start(session_id="s1", request_id="trigger")
+
+    assert registry.get("fresh").state == "running"
+    assert registry.get("stale").state == "failed"
+    # Unparseable timestamps must not get a run killed.
+    assert registry.get("weird").state == "running"
