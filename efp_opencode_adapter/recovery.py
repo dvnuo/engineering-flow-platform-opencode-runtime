@@ -9,6 +9,10 @@ from .task_store import ACTIVE_TASK_STATUSES, TaskRecord, TaskStore, is_valid_ta
 
 
 _TASK_RECORD_RECOVERY_PREFIX_BYTES = 64 * 1024
+# Mirrors chat_api.RUNNING_CHATLOG_STATUSES; kept local to avoid importing the
+# full chat handler module during startup recovery.
+_RUNNING_CHATLOG_STATUSES = {"running", "accepted", "queued", "in_progress"}
+_CHAT_INTERRUPTED_BY_RESTART_MESSAGE = "Chat run interrupted by adapter restart."
 
 
 def _json_string_field_prefix(text: str, key: str) -> str | None:
@@ -96,14 +100,23 @@ class RecoveryManager:
         self.opencode_client = opencode_client
 
     async def recover(self) -> dict:
-        summary = {"sessions_reloaded": 0, "partial_recovery_marked": 0, "tasks_marked_blocked": 0, "corrupted_chatlogs": 0, "opencode_errors": 0}
+        summary = {
+            "sessions_reloaded": 0,
+            "partial_recovery_marked": 0,
+            "tasks_marked_blocked": 0,
+            "corrupted_chatlogs": 0,
+            "opencode_errors": 0,
+            "chat_entries_marked_interrupted": 0,
+        }
         self.session_store.reload()
         summary["sessions_reloaded"] = len(self.session_store.list_active())
         for p in self.state_paths.chatlogs_dir.glob("*.json"):
             try:
-                json.loads(p.read_text(encoding="utf-8"))
+                payload = json.loads(p.read_text(encoding="utf-8"))
             except Exception:
                 summary["corrupted_chatlogs"] += 1
+                continue
+            summary["chat_entries_marked_interrupted"] += self._mark_interrupted_chat_entries(payload)
         for rec in self.session_store.list_active():
             try:
                 await self.opencode_client.get_session(rec.opencode_session_id)
@@ -129,3 +142,35 @@ class RecoveryManager:
                 blocked_task_ids.add(record.task_id)
                 summary["tasks_marked_blocked"] += 1
         return summary
+
+    def _mark_interrupted_chat_entries(self, chatlog_payload: dict) -> int:
+        """Expire chatlog entries still flagged running after a restart.
+
+        Chat runs never survive an adapter restart; without this sweep the
+        chatlog fallback keeps reporting a phantom running run and Portal
+        reconnect flows poll it forever.
+        """
+        if not isinstance(chatlog_payload, dict):
+            return 0
+        session_id = str(chatlog_payload.get("session_id") or "")
+        entries = chatlog_payload.get("entries")
+        if not session_id or not isinstance(entries, list):
+            return 0
+        marked = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status") or "").strip().lower()
+            request_id = str(entry.get("request_id") or "")
+            if not request_id or status not in _RUNNING_CHATLOG_STATUSES:
+                continue
+            try:
+                self.chatlog_store.fail_entry(
+                    session_id,
+                    request_id=request_id,
+                    error=_CHAT_INTERRUPTED_BY_RESTART_MESSAGE,
+                )
+                marked += 1
+            except Exception:
+                continue
+        return marked

@@ -49,6 +49,12 @@ class OpenCodeTransportTimeout(OpenCodeClientError):
             },
         )
         self.is_transport_timeout = True
+        # A timed-out request does not mean OpenCode dropped the work: the
+        # blocking session message POST lasts as long as the run itself, so
+        # long chats always outlive the submit timeout while the message keeps
+        # executing. Mark the timeout recoverable so the send acceptance probe
+        # can hand off to completion polling instead of failing the chat.
+        self.is_recoverable_transport_error = True
         self.method = method
         self.path = path
         self.exception_type = type(exc).__name__ if exc is not None else "TimeoutError"
