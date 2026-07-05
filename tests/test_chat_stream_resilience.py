@@ -8,6 +8,7 @@ import asyncio
 
 import pytest
 from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
 from efp_opencode_adapter import chat_api
 from efp_opencode_adapter.chat_api import (
@@ -16,7 +17,9 @@ from efp_opencode_adapter.chat_api import (
     chat_run_registry,
 )
 from efp_opencode_adapter.chatlog_store import ChatLogStore
+from efp_opencode_adapter.opencode_client import OpenCodeTransportTimeout
 from efp_opencode_adapter.recovery import RecoveryManager
+from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.session_store import SessionStore
 from efp_opencode_adapter.settings import Settings
 from efp_opencode_adapter.state import ensure_state_dirs
@@ -147,3 +150,53 @@ def test_timeout_text_explains_background_continuation():
     text = chat_api._non_success_assistant_text("incomplete", "final_assistant_message_timeout")
     assert "background" in text
     assert "history" in text
+
+
+def test_transport_timeout_is_marked_recoverable():
+    # The blocking session message POST lasts as long as the run itself, so a
+    # submit timeout must route into the send acceptance probe instead of
+    # failing a chat whose message OpenCode is still executing.
+    exc = OpenCodeTransportTimeout("POST", "/session/oc-1/message", 900)
+    assert exc.is_transport_timeout is True
+    assert exc.is_recoverable_transport_error is True
+
+
+class AcceptedThenTimedOutClient(FakeOpenCodeClient):
+    """Send blocks past the submit timeout while the run keeps executing."""
+
+    async def send_message(self, session_id, *, parts, model, agent, system=None, message_id=None, no_reply=None, tools=None):
+        user = {"id": message_id or "u-timeout", "role": "user", "parts": parts}
+        assistant = {
+            "id": "a-timeout",
+            "role": "assistant",
+            "parts": [{"type": "text", "text": "long run final"}],
+        }
+        self.messages[session_id].extend([user, assistant])
+        raise OpenCodeTransportTimeout("POST", f"/session/{session_id}/message", 1)
+
+
+@pytest.mark.asyncio
+async def test_chat_recovers_when_send_times_out_while_run_continues(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("EFP_CHAT_COMPLETION_POLL_SECONDS", "0.1")
+    app = create_app(Settings.from_env(), opencode_client=AcceptedThenTimedOutClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/chat",
+            json={"message": "long task", "session_id": "s-timeout", "request_id": "r-timeout"},
+        )
+        payload = await resp.json()
+
+        assert resp.status == 200
+        assert payload["ok"] is True
+        assert payload["completion_state"] == "completed"
+        assert payload["response"] == "long run final"
+        event_types = [event.get("type") for event in payload.get("runtime_events", [])]
+        assert "chat.failed" not in event_types
+        assert "execution.failed" not in event_types
+        assert payload["_llm_debug"]["send_disconnect_probe"]["accepted"] is True
+    finally:
+        await client.close()
