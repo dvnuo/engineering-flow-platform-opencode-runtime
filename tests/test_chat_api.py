@@ -112,15 +112,17 @@ async def test_chat_short_request_completes_without_long_task_metadata(tmp_path,
 async def test_chat_run_status_reports_running_chatlog_as_running(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
-    app[CHATLOG_STORE_KEY].start_entry(
-        "s-running-status",
-        request_id="req-running-status",
-        message="hello",
-        runtime_events=[{"type": "chat.started"}],
-    )
     client = TestClient(TestServer(app))
     await client.start_server()
     try:
+        # Create the running entry after startup: entries that exist before
+        # startup are restart leftovers and are swept to error by recovery.
+        app[CHATLOG_STORE_KEY].start_entry(
+            "s-running-status",
+            request_id="req-running-status",
+            message="hello",
+            runtime_events=[{"type": "chat.started"}],
+        )
         resp = await client.get("/api/chat/runs/req-running-status?session_id=s-running-status")
         payload = await resp.json()
 

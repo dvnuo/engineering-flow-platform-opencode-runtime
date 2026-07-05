@@ -50,15 +50,17 @@ async def test_session_detail_exposes_running_chatlog_for_portal_recovery(tmp_pa
     app[SESSION_STORE_KEY].upsert(
         SessionRecord("s-running", "oc-running", "Running", None, None, now, now, "", 0)
     )
-    app[CHATLOG_STORE_KEY].start_entry(
-        "s-running",
-        request_id="req-running",
-        message="hello",
-        runtime_events=[{"type": "llm_thinking", "summary": "Thinking"}],
-    )
     client = TestClient(TestServer(app))
     await client.start_server()
     try:
+        # Create the running entry after startup: entries that exist before
+        # startup are restart leftovers and are swept to error by recovery.
+        app[CHATLOG_STORE_KEY].start_entry(
+            "s-running",
+            request_id="req-running",
+            message="hello",
+            runtime_events=[{"type": "llm_thinking", "summary": "Thinking"}],
+        )
         detail = await (await client.get("/api/sessions/s-running")).json()
 
         assert detail["success"] is True

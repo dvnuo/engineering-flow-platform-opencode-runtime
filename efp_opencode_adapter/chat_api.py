@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import inspect
+import os
 import re
 import time
 from typing import Any, Iterable
@@ -517,7 +518,11 @@ def _non_success_assistant_text(completion_state: str, reason: str) -> str:
     if completion_state == "empty_final":
         return "OpenCode completed without a visible assistant response."
     if reason == "final_assistant_message_timeout":
-        return "OpenCode did not produce a final visible assistant response before the short request timeout."
+        return (
+            "OpenCode is still working on this request in the background; the chat "
+            "response timed out waiting for the final assistant message. The result "
+            "will appear in this session's history once the run completes."
+        )
     if completion_state == "blocked":
         return "OpenCode is blocked before producing a final visible assistant response."
     if completion_state == "error":
@@ -1244,6 +1249,26 @@ async def chat_handler(request: web.Request) -> web.Response:
         raise _bad_request("invalid_json")
     if not isinstance(payload, dict):
         raise _bad_request("invalid_json")
+    raw_request_id = str(payload.get("request_id") or "").strip()
+    if raw_request_id:
+        # Idempotency guard: stream fallbacks may re-submit the same
+        # request_id after a transport break while the original run is
+        # still executing detached. Never execute the same request twice.
+        raw_session_id = str(payload.get("session_id") or "").strip()
+        existing_run = chat_run_registry.get(raw_request_id, session_id=raw_session_id or None)
+        if existing_run is not None:
+            if existing_run.terminal and isinstance(existing_run.final_payload, dict):
+                return web.json_response(existing_run.final_payload)
+            return web.json_response(
+                {
+                    "error": "duplicate_chat_request_id",
+                    "message": "A chat run with this request_id already exists; reconnect to it instead of re-submitting.",
+                    "session_id": existing_run.session_id,
+                    "request_id": raw_request_id,
+                    "state": existing_run.state,
+                },
+                status=409,
+            )
     result = await handle_chat_payload_for_app(request.app, payload)
     return web.json_response(result)
 
@@ -1255,6 +1280,29 @@ class SSEClientDisconnected(ConnectionError):
 async def _write_sse(resp: web.StreamResponse, event: str, data: dict[str, Any]) -> None:
     try:
         await resp.write(f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8"))
+    except (ConnectionResetError, RuntimeError) as exc:
+        raise SSEClientDisconnected(str(exc)) from exc
+
+
+def _chat_sse_keepalive_interval_seconds() -> float:
+    """Idle interval between SSE keepalive comments on the chat stream.
+
+    Long tool executions produce no runtime events; without periodic bytes,
+    intermediaries with idle read timeouts (for example ingress-nginx's
+    default 60s proxy-read-timeout) silently kill the stream mid-run.
+    """
+    raw = str(os.getenv("EFP_CHAT_SSE_KEEPALIVE_SECONDS", "")).strip()
+    try:
+        value = float(raw) if raw else 15.0
+    except (TypeError, ValueError):
+        return 15.0
+    return max(1.0, value)
+
+
+async def _write_sse_keepalive(resp: web.StreamResponse) -> None:
+    """Write an SSE comment line; SSE parsers ignore lines starting with ':'."""
+    try:
+        await resp.write(b": keepalive\n\n")
     except (ConnectionResetError, RuntimeError) as exc:
         raise SSEClientDisconnected(str(exc)) from exc
 
@@ -1298,12 +1346,18 @@ async def _drain_runtime_event_queue(resp: web.StreamResponse, subscriber: Any, 
 
 
 async def _stream_runtime_events_until_done(resp: web.StreamResponse, subscriber: Any, chat_task: asyncio.Task, seen_ids: set[str]) -> None:
+    keepalive_interval = _chat_sse_keepalive_interval_seconds()
+    last_write_monotonic = time.monotonic()
     while not chat_task.done():
         try:
             event = await asyncio.wait_for(subscriber.queue.get(), timeout=0.1)
         except asyncio.TimeoutError:
+            if time.monotonic() - last_write_monotonic >= keepalive_interval:
+                await _write_sse_keepalive(resp)
+                last_write_monotonic = time.monotonic()
             continue
         await _write_runtime_event_sse(resp, event, seen_ids)
+        last_write_monotonic = time.monotonic()
     await _drain_runtime_event_queue(resp, subscriber, seen_ids)
 
 
