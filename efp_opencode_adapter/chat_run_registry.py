@@ -14,6 +14,17 @@ RETAINED_EVENT_TAIL_ITEMS = 100
 DEFAULT_STALE_RUNNING_SECONDS = 6 * 3600
 
 
+def _parse_iso_timestamp(value: Any) -> datetime | None:
+    """Parse an ISO timestamp ('Z' or offset suffix); None when unparseable."""
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def compact_final_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     """Drop full event streams from a retained terminal payload.
 
@@ -102,11 +113,12 @@ class ChatRunRegistry:
         """
         if self._stale_running_seconds <= 0:
             return
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=self._stale_running_seconds)
-        ).isoformat().replace("+00:00", "Z")
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self._stale_running_seconds)
         for record in self._records.values():
-            if record.terminal or record.updated_at >= cutoff:
+            if record.terminal:
+                continue
+            updated_at = _parse_iso_timestamp(record.updated_at)
+            if updated_at is None or updated_at >= cutoff:
                 continue
             record.state = "failed"
             record.error_payload = {

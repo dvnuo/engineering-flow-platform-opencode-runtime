@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 
 from efp_opencode_adapter.chat_run_registry import (
     RETAINED_EVENT_TAIL_ITEMS,
@@ -121,3 +122,22 @@ def test_chat_run_registry_marks_stale_running_records_failed_and_prunable():
     assert registry.get("stuck") is None
     assert registry.get("new1") is not None
     assert registry.get("new2") is not None
+
+
+def test_chat_run_registry_stale_check_handles_mixed_timestamp_formats():
+    # utc_now_iso() in this adapter returns an offset suffix ("+00:00"), so the
+    # stale check must not depend on a specific ISO string format.
+    registry = ChatRunRegistry(max_records=10, stale_running_seconds=3600)
+    fresh = registry.start(session_id="s1", request_id="fresh")
+    fresh.updated_at = datetime.now(timezone.utc).isoformat()  # offset suffix, no 'Z'
+    stale = registry.start(session_id="s1", request_id="stale")
+    stale.updated_at = "2000-01-01T00:00:00Z"
+    unparseable = registry.start(session_id="s1", request_id="weird")
+    unparseable.updated_at = "not-a-timestamp"
+
+    registry.start(session_id="s1", request_id="trigger")
+
+    assert registry.get("fresh").state == "running"
+    assert registry.get("stale").state == "failed"
+    # Unparseable timestamps must not get a run killed.
+    assert registry.get("weird").state == "running"
