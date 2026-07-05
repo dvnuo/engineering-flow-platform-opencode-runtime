@@ -29,11 +29,20 @@ class Settings:
     git_checkout_timeout_seconds: float
     opencode_data_dir: Path
     opencode_config_path: Path
+    efp_config_path: Path
+    mobile_state_dir: Path
+    mobile_artifacts_dir: Path
+    browserstack_local_binary_path: Path
     # Optional build/configured OpenCode package version for observability only.
     # It must never be used as a startup compatibility gate.
     opencode_version: str | None
     ready_timeout_seconds: int
-    atlassian_config_path: Path = field(default_factory=lambda: Path(os.getenv("ATLASSIAN_CONFIG") or (Path(os.getenv("HOME", "/root")) / ".config" / "atlassian" / "config.json")))
+    atlassian_config_path: Path = field(
+        default_factory=lambda: Path(
+            os.getenv("ATLASSIAN_CONFIG")
+            or (Path(os.getenv("EFP_ADAPTER_STATE_DIR", "/root/.local/share/efp-compat")) / "atlassian" / "config.json")
+        )
+    )
     event_bridge_enabled: bool = True
     event_bridge_initial_backoff_seconds: float = 1.0
     event_bridge_max_backoff_seconds: float = 30.0
@@ -56,22 +65,26 @@ class Settings:
     @classmethod
     def from_env(cls, opencode_url: str | None = None) -> "Settings":
         workspace_dir = Path(os.getenv("EFP_WORKSPACE_DIR", "/workspace"))
-        home_dir = Path(os.getenv("HOME", "/root"))
+        adapter_state_dir = Path(os.getenv("EFP_ADAPTER_STATE_DIR", "/root/.local/share/efp-compat"))
         copilot_proxy_base_url = (os.getenv("EFP_COPILOT_PROXY_BASE_URL") or "http://127.0.0.1:8000/api/internal/copilot").rstrip("/")
         copilot_github_api_base_url = (os.getenv("EFP_COPILOT_GITHUB_API_BASE_URL") or "https://api.github.com").rstrip("/")
         copilot_api_base_url = (os.getenv("EFP_COPILOT_API_BASE_URL") or "https://api.enterprise.githubcopilot.com").rstrip("/")
         return cls(
             opencode_url=opencode_url or os.getenv("EFP_OPENCODE_URL", "http://127.0.0.1:4096"),
-            adapter_state_dir=Path(os.getenv("EFP_ADAPTER_STATE_DIR", "/root/.local/share/efp-compat")),
+            adapter_state_dir=adapter_state_dir,
             workspace_dir=workspace_dir,
             skills_dir=Path(os.getenv("EFP_SKILLS_DIR", "/app/skills")),
             workspace_repos_dir=Path(os.getenv("EFP_WORKSPACE_REPOS_DIR", str(workspace_dir / "repos"))),
             git_checkout_timeout_seconds=float(os.getenv("EFP_GIT_CHECKOUT_TIMEOUT_SECONDS", "120")),
             opencode_data_dir=Path(os.getenv("OPENCODE_DATA_DIR", "/root/.local/share/opencode")),
             opencode_config_path=Path(os.getenv("OPENCODE_CONFIG", "/workspace/.opencode/opencode.json")),
+            efp_config_path=Path(os.getenv("EFP_CONFIG", str(workspace_dir / ".efp" / "config.yaml"))),
+            mobile_state_dir=Path(os.getenv("MOBILE_AUTO_STATE_DIR", str(workspace_dir / ".efp" / "mobile-auto" / "runs"))),
+            mobile_artifacts_dir=Path(os.getenv("MOBILE_AUTO_ARTIFACTS_DIR", str(workspace_dir / ".efp" / "mobile-auto" / "artifacts"))),
+            browserstack_local_binary_path=Path(os.getenv("BROWSERSTACK_LOCAL_BINARY", "/usr/local/bin/BrowserStackLocal")),
             opencode_version=(os.getenv("OPENCODE_VERSION") or None),
             ready_timeout_seconds=int(os.getenv("EFP_OPENCODE_READY_TIMEOUT_SECONDS", "60")),
-            atlassian_config_path=Path(os.getenv("ATLASSIAN_CONFIG") or (home_dir / ".config" / "atlassian" / "config.json")),
+            atlassian_config_path=Path(os.getenv("ATLASSIAN_CONFIG") or (adapter_state_dir / "atlassian" / "config.json")),
             event_bridge_enabled=_env_bool("EFP_OPENCODE_EVENT_BRIDGE_ENABLED", True),
             event_bridge_initial_backoff_seconds=float(os.getenv("EFP_OPENCODE_EVENT_BRIDGE_INITIAL_BACKOFF_SECONDS", "1.0")),
             event_bridge_max_backoff_seconds=float(os.getenv("EFP_OPENCODE_EVENT_BRIDGE_MAX_BACKOFF_SECONDS", "30.0")),

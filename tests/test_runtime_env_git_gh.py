@@ -12,8 +12,12 @@ def make_settings(tmp_path: Path) -> Settings:
         skills_dir=tmp_path / "skills",
         workspace_repos_dir=tmp_path / "workspace" / "repos",
         git_checkout_timeout_seconds=120,
-        opencode_data_dir=tmp_path / "opencode-data",
+        opencode_data_dir=tmp_path / "state" / "xdg-data" / "opencode",
         opencode_config_path=tmp_path / "workspace" / ".opencode" / "opencode.json",
+        efp_config_path=tmp_path / "workspace" / ".efp" / "config.yaml",
+        mobile_state_dir=tmp_path / "workspace" / ".efp" / "mobile-auto" / "runs",
+        mobile_artifacts_dir=tmp_path / "workspace" / ".efp" / "mobile-auto" / "artifacts",
+        browserstack_local_binary_path=Path("/usr/local/bin/BrowserStackLocal"),
         opencode_version="1.14.39",
         ready_timeout_seconds=1,
     )

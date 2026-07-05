@@ -73,6 +73,15 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
             "username": "jenkins-user",
             "password": "jenkins-password",
         },
+        "mobile-auto": {
+            "enabled": True,
+            "browserstack": {
+                "username": "bs-user",
+                "access_key": "bs-access-key",
+                "username_env": "BROWSERSTACK_USERNAME",
+                "access_key_env": "BROWSERSTACK_ACCESS_KEY",
+            },
+        },
         "proxy": {"enabled": True, "url": "http://h:1", "username": "a", "password": "b"},
         "git": {"author_name": "n", "author_email": "e@x"},
         "debug": {"enabled": True, "log_level": "DEBUG"},
@@ -115,6 +124,11 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     assert r.env["EFP_JENKINS_PASSWORD"] == "jenkins-password"
     assert r.env["JENKINS_USERNAME"] == "jenkins-user"
     assert r.env["JENKINS_PASSWORD"] == "jenkins-password"
+    assert r.env["BROWSERSTACK_USERNAME"] == "bs-user"
+    assert r.env["BROWSERSTACK_ACCESS_KEY"] == "bs-access-key"
+    assert r.env["MOBILE_AUTO_STATE_DIR"] == str(s.mobile_state_dir)
+    assert r.env["MOBILE_AUTO_ARTIFACTS_DIR"] == str(s.mobile_artifacts_dir)
+    assert r.env["BROWSERSTACK_LOCAL_BINARY"] == s.browserstack_local_binary_path.as_posix()
     assert "/opt/venv/bin" in configure_env["PATH"]
     assert ("/" + "app" + "/venv/bin") not in configure_env["PATH"]
     p = write_runtime_env_file(s, r.env)
@@ -124,6 +138,7 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     assert redacted["GITHUB_TOKEN"] is True
     assert redacted["EFP_JENKINS_PASSWORD"] is True
     assert redacted["JENKINS_PASSWORD"] is True
+    assert redacted["BROWSERSTACK_ACCESS_KEY"] is True
     assert redacted["HTTPS_PROXY"] == "http://[redacted]@h:1"
     assert "aws-password" not in json.dumps(redacted)
     assert "jenkins-password" not in json.dumps(redacted)
@@ -153,8 +168,10 @@ def test_runtime_env_respects_disabled_external_sections(tmp_path, monkeypatch):
         "jenkins": {"enabled": False, "username": "u", "password": "p"},
     }
     env = build_runtime_env_from_config(s, cfg).env
-    for key in ("GITHUB_TOKEN", "EFP_GITHUB_CONFIG_JSON", "JIRA_BASE_URL", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_BASE_URL", "EFP_CONFLUENCE_INSTANCES_JSON", "EFP_CONFIG", "AWS_SHARED_CREDENTIALS_FILE", "EFP_JENKINS_USERNAME", "EFP_JENKINS_PASSWORD", "JENKINS_USERNAME", "JENKINS_PASSWORD"):
+    for key in ("GITHUB_TOKEN", "EFP_GITHUB_CONFIG_JSON", "JIRA_BASE_URL", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_BASE_URL", "EFP_CONFLUENCE_INSTANCES_JSON", "AWS_SHARED_CREDENTIALS_FILE", "EFP_JENKINS_USERNAME", "EFP_JENKINS_PASSWORD", "JENKINS_USERNAME", "JENKINS_PASSWORD", "BROWSERSTACK_USERNAME", "BROWSERSTACK_ACCESS_KEY"):
         assert key not in env
+    assert env["EFP_CONFIG"] == str(s.efp_config_path)
+    assert env["MOBILE_AUTO_STATE_DIR"] == str(s.mobile_state_dir)
 
 
 def test_runtime_env_supports_portal_git_user_shape(tmp_path, monkeypatch):
@@ -188,7 +205,10 @@ def test_empty_config_does_not_emit_external_json(tmp_path, monkeypatch):
     assert "GITHUB_API_BASE_URL" not in env
     assert "EFP_JIRA_INSTANCES_JSON" not in env
     assert "EFP_CONFLUENCE_INSTANCES_JSON" not in env
-    assert "EFP_CONFIG" not in env
+    assert env["EFP_CONFIG"] == str(s.efp_config_path)
+    assert env["MOBILE_AUTO_STATE_DIR"] == str(s.mobile_state_dir)
+    assert env["MOBILE_AUTO_ARTIFACTS_DIR"] == str(s.mobile_artifacts_dir)
+    assert env["BROWSERSTACK_LOCAL_BINARY"] == s.browserstack_local_binary_path.as_posix()
     assert "AWS_CONFIG_FILE" not in env
 
 
@@ -202,7 +222,7 @@ def test_runtime_env_aws_requires_all_portal_fields(tmp_path, monkeypatch):
             "password": "***REDACTED***",
         }
     }).env
-    assert "EFP_CONFIG" not in env
+    assert env["EFP_CONFIG"] == str(s.efp_config_path)
     assert "AWS_SHARED_CREDENTIALS_FILE" not in env
 
 
@@ -217,7 +237,7 @@ def test_runtime_env_jenkins_requires_username_and_password(tmp_path, monkeypatc
             }
         },
     )
-    assert "EFP_CONFIG" not in result.env
+    assert result.env["EFP_CONFIG"] == str(s.efp_config_path)
     assert "jenkins enabled but username and password are required" in result.warnings
 
 
