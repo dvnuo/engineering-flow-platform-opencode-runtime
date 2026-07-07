@@ -55,12 +55,18 @@ async def test_stream_loop_writes_keepalive_comments_while_idle(monkeypatch):
 
 
 class _EndlessDuplicateSubscriber:
-    """Queue that always yields the same event id (all dedup after the first)."""
+    """Steady stream of one repeated event id (all dedup after the first).
+
+    Events arrive every 50ms so the loop keeps taking the successful-get
+    branch (never the idle timeout branch) while writing no bytes, and the
+    event loop still schedules the chat task's timer normally.
+    """
 
     def __init__(self):
         self.queue = self
 
     async def get(self):
+        await asyncio.sleep(0.05)
         return {"id": "dup-1", "type": "runtime_event", "request_id": "r-dup"}
 
     def get_nowait(self):
