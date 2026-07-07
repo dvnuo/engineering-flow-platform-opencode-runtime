@@ -63,6 +63,11 @@ class _EndlessDuplicateSubscriber:
     async def get(self):
         return {"id": "dup-1", "type": "runtime_event", "request_id": "r-dup"}
 
+    def get_nowait(self):
+        # The post-loop drain sees an empty queue; the endless supply above
+        # only models the live-streaming phase.
+        raise asyncio.QueueEmpty
+
 
 @pytest.mark.asyncio
 async def test_stream_loop_keeps_alive_when_only_duplicate_events_arrive(monkeypatch):
