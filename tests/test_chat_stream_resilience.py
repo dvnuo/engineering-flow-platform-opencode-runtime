@@ -54,6 +54,32 @@ async def test_stream_loop_writes_keepalive_comments_while_idle(monkeypatch):
     assert all("data:" not in chunk for chunk in keepalive_chunks)
 
 
+class _EndlessDuplicateSubscriber:
+    """Queue that always yields the same event id (all dedup after the first)."""
+
+    def __init__(self):
+        self.queue = self
+
+    async def get(self):
+        return {"id": "dup-1", "type": "runtime_event", "request_id": "r-dup"}
+
+
+@pytest.mark.asyncio
+async def test_stream_loop_keeps_alive_when_only_duplicate_events_arrive(monkeypatch):
+    # Deduplicated events write no bytes; a stream of duplicates must not
+    # suppress keepalives or intermediaries still hit idle read timeouts.
+    monkeypatch.setenv("EFP_CHAT_SSE_KEEPALIVE_SECONDS", "1")
+    resp = _RecordingResponse()
+    chat_task = asyncio.create_task(asyncio.sleep(1.4))
+
+    await _stream_runtime_events_until_done(resp, _EndlessDuplicateSubscriber(), chat_task, set())
+
+    event_chunks = [chunk for chunk in resp.writes if chunk.startswith("event: runtime_event")]
+    keepalive_chunks = [chunk for chunk in resp.writes if chunk.startswith(": keepalive")]
+    assert len(event_chunks) == 1
+    assert keepalive_chunks, "expected keepalives while only duplicate events arrive"
+
+
 @pytest.mark.asyncio
 async def test_stream_loop_does_not_write_keepalive_when_stream_is_short(monkeypatch):
     monkeypatch.setenv("EFP_CHAT_SSE_KEEPALIVE_SECONDS", "60")
