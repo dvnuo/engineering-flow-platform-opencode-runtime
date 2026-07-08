@@ -1321,12 +1321,13 @@ def _consume_background_chat_result(task: asyncio.Task) -> None:
         logger.debug("detached chat stream task finished with error", exc_info=True)
 
 
-async def _write_runtime_event_sse(resp: web.StreamResponse, event: dict[str, Any], seen_ids: set[str]) -> None:
+async def _write_runtime_event_sse(resp: web.StreamResponse, event: dict[str, Any], seen_ids: set[str]) -> bool:
+    """Write one runtime event; return True only when bytes were written."""
     if not isinstance(event, dict):
-        return
+        return False
     event_id = str(event.get("id") or "")
     if event_id and event_id in seen_ids:
-        return
+        return False
     if event_id:
         seen_ids.add(event_id)
     event_data = event.get("data") if isinstance(event.get("data"), dict) else {}
@@ -1334,6 +1335,7 @@ async def _write_runtime_event_sse(resp: web.StreamResponse, event: dict[str, An
     if request_id:
         chat_run_registry.record_event(request_id, event)
     await _write_sse(resp, "runtime_event", event)
+    return True
 
 
 async def _drain_runtime_event_queue(resp: web.StreamResponse, subscriber: Any, seen_ids: set[str]) -> None:
@@ -1356,8 +1358,13 @@ async def _stream_runtime_events_until_done(resp: web.StreamResponse, subscriber
                 await _write_sse_keepalive(resp)
                 last_write_monotonic = time.monotonic()
             continue
-        await _write_runtime_event_sse(resp, event, seen_ids)
-        last_write_monotonic = time.monotonic()
+        # Deduplicated/invalid events write no bytes and must not push the
+        # keepalive out; only real writes refresh the idle clock.
+        if await _write_runtime_event_sse(resp, event, seen_ids):
+            last_write_monotonic = time.monotonic()
+        elif time.monotonic() - last_write_monotonic >= keepalive_interval:
+            await _write_sse_keepalive(resp)
+            last_write_monotonic = time.monotonic()
     await _drain_runtime_event_queue(resp, subscriber, seen_ids)
 
 
