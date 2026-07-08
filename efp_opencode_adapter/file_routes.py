@@ -61,6 +61,42 @@ async def _multipart_upload(request: web.Request) -> tuple[UploadedPart | None, 
     return upload, fields
 
 
+async def _read_json_body(request) -> dict:
+    if request.content_type.startswith("application/json"):
+        payload = await request.json()
+        return payload if isinstance(payload, dict) else {}
+    if request.content_type.startswith("multipart/") or request.content_type.startswith(
+        "application/x-www-form-urlencoded"
+    ):
+        return dict(await request.post())
+    return {}
+
+
+async def _stream_temp_download(request, file_path, content_type, headers) -> web.StreamResponse:
+    """Stream a temp archive in chunks then delete it (flat memory, no leak)."""
+    response = web.StreamResponse(headers=headers)
+    response.content_type = content_type or "application/octet-stream"
+    try:
+        response.content_length = file_path.stat().st_size
+    except OSError:
+        pass
+    await response.prepare(request)
+    try:
+        with open(file_path, "rb") as handle:
+            while True:
+                chunk = handle.read(256 * 1024)
+                if not chunk:
+                    break
+                await response.write(chunk)
+        await response.write_eof()
+    finally:
+        try:
+            file_path.unlink()
+        except OSError:
+            pass
+    return response
+
+
 def register_file_routes(app: web.Application) -> None:
     settings = app[SETTINGS_KEY]
     file_service = app.get(FILE_SERVICE_KEY) or WorkspaceFileService(settings)
@@ -140,14 +176,52 @@ def register_file_routes(app: web.Application) -> None:
             if not paths:
                 paths = ["."]
             if len(paths) == 1:
-                file_path, filename, content_type = file_service.prepare_download(paths[0])
+                file_path, filename, content_type, is_temp = file_service.prepare_download(paths[0])
             else:
-                file_path, filename, content_type = file_service.prepare_download_many(paths)
-            resp = web.FileResponse(file_path)
-            resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
-            if content_type:
-                resp.content_type = content_type
-            return resp
+                file_path, filename, content_type, is_temp = file_service.prepare_download_many(paths)
+        except Exception as exc:
+            return _error(exc)
+
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        if is_temp:
+            # Directory/multi archives are temp files: stream then delete so
+            # they neither pin memory nor leak on disk.
+            return await _stream_temp_download(request, file_path, content_type, headers)
+        resp = web.FileResponse(file_path, headers=headers)
+        if content_type:
+            resp.content_type = content_type
+        return resp
+
+    async def server_files_mkdir(request):
+        try:
+            payload = await _read_json_body(request)
+            path = payload.get("path") or request.query.get("path")
+            if not path:
+                raise ValueError("path is required")
+            return web.json_response(file_service.make_directory(path))
+        except Exception as exc:
+            return _error(exc)
+
+    async def server_files_new_file(request):
+        try:
+            payload = await _read_json_body(request)
+            path = payload.get("path") or request.query.get("path")
+            if not path:
+                raise ValueError("path is required")
+            return web.json_response(file_service.create_file(path))
+        except Exception as exc:
+            return _error(exc)
+
+    async def server_files_move(request):
+        try:
+            payload = await _read_json_body(request)
+            source = payload.get("source") or payload.get("path") or request.query.get("source")
+            destination = payload.get("destination") or request.query.get("destination")
+            if not source:
+                raise ValueError("source is required")
+            if not destination:
+                raise ValueError("destination is required")
+            return web.json_response(file_service.move_path(source, destination))
         except Exception as exc:
             return _error(exc)
 
@@ -243,6 +317,9 @@ def register_file_routes(app: web.Application) -> None:
     app.router.add_post("/api/server-files/upload", server_files_upload)
     app.router.add_post("/api/server-files/delete", server_files_delete)
     app.router.add_get("/api/server-files/download", server_files_download)
+    app.router.add_post("/api/server-files/mkdir", server_files_mkdir)
+    app.router.add_post("/api/server-files/new-file", server_files_new_file)
+    app.router.add_post("/api/server-files/move", server_files_move)
     app.router.add_get("/api/files", server_files_browse)
     app.router.add_get("/api/files/read", server_files_read)
     app.router.add_post("/api/files/upload", attachments_upload)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -550,8 +551,30 @@ async def internal_opencode_log_tail_handler(request: web.Request) -> web.Respon
     return web.json_response({"success": True, "engine": "opencode", "lines": lines, "log_tail": safe_preview(text, 20000)})
 
 
+DEFAULT_MAX_UPLOAD_MB = 25
+UPLOAD_TRANSPORT_HEADROOM_MB = 5
+
+
+def resolve_upload_client_max_size() -> int:
+    """aiohttp ``client_max_size`` (bytes) for request bodies incl. uploads.
+
+    Sized from EFP_MAX_UPLOAD_MB (the user-facing per-file cap the Portal
+    enforces) plus headroom for multipart / transport overhead so the adapter
+    is never the gate for a file the Portal already accepted. Kept in parity
+    with the native runtime.
+    """
+    raw = os.getenv("EFP_MAX_UPLOAD_MB", str(DEFAULT_MAX_UPLOAD_MB))
+    try:
+        mb = int(str(raw).strip())
+    except (TypeError, ValueError):
+        mb = DEFAULT_MAX_UPLOAD_MB
+    if mb <= 0:
+        mb = DEFAULT_MAX_UPLOAD_MB
+    return (mb + UPLOAD_TRANSPORT_HEADROOM_MB) * 1024 * 1024
+
+
 def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None, *, start_event_bridge: bool | None = None, opencode_process_manager: OpenCodeProcessManager | None = None) -> web.Application:
-    app = web.Application()
+    app = web.Application(client_max_size=resolve_upload_client_max_size())
     app[SETTINGS_KEY] = settings
     state_paths = ensure_state_dirs(settings)
     app[STATE_PATHS_KEY] = state_paths

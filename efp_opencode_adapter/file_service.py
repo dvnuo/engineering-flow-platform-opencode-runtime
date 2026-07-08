@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import mimetypes
+import os
 import shutil
 import tempfile
 import zipfile
@@ -9,6 +10,20 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from .settings import Settings
+
+# Editor/preview read cap (parity with the native runtime). Reading a whole
+# large file into memory and returning it as JSON would spike memory and mangle
+# binary; cap the returned bytes and flag truncation/binary instead.
+DEFAULT_READ_FILE_MAX_BYTES = 1024 * 1024
+
+
+def _read_file_max_bytes() -> int:
+    raw = os.getenv("EFP_MAX_READ_FILE_BYTES", str(DEFAULT_READ_FILE_MAX_BYTES))
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        value = DEFAULT_READ_FILE_MAX_BYTES
+    return value if value > 0 else DEFAULT_READ_FILE_MAX_BYTES
 
 
 class WorkspaceFileService:
@@ -80,16 +95,25 @@ class WorkspaceFileService:
         target = self.resolve_workspace_path(user_path)
         if not target.exists() or not target.is_file():
             raise FileNotFoundError
-        raw = target.read_bytes()
-        content = raw.decode("utf-8", errors="replace")
+        size = target.stat().st_size
+        limit = _read_file_max_bytes()
+        with target.open("rb") as handle:
+            raw = handle.read(limit + 1)
+        truncated = len(raw) > limit
+        if truncated:
+            raw = raw[:limit]
+        is_binary = b"\x00" in raw
         content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         return {
             "success": True,
             "path": self.workspace_relative_path(target),
-            "content": content,
+            "content": "" if is_binary else raw.decode("utf-8", errors="replace"),
             "language": _guess_language(target),
             "content_type": content_type,
-            "size": len(raw),
+            "size": size,
+            "returned_bytes": len(raw),
+            "truncated": truncated,
+            "is_binary": is_binary,
         }
 
     def get_content_path(self, user_path: str) -> Path:
@@ -124,6 +148,79 @@ class WorkspaceFileService:
             "mode": "file_save",
             "size": len(data),
             "content_type": mimetypes.guess_type(name)[0] or "application/octet-stream",
+        }
+
+    def move_path(self, source: str | None, destination: str | None) -> dict:
+        """Rename or move a file/directory within the workspace (B1)."""
+        src = self.resolve_workspace_path(source)
+        if src == self.root:
+            raise PermissionError("cannot move workspace root")
+        if not src.exists():
+            raise FileNotFoundError
+        if src.is_symlink():
+            raise PermissionError("path outside workspace")
+
+        dst = self.resolve_workspace_path(destination)
+        if dst == self.root or dst == src:
+            raise ValueError("invalid destination")
+        if dst.exists():
+            raise ValueError("destination already exists")
+
+        source_relative = self.workspace_relative_path(src)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_under_workspace(dst.parent)
+        shutil.move(str(src), str(dst))
+        destination_relative = self.workspace_relative_path(dst)
+        return {
+            "success": True,
+            "mode": "move",
+            "source_relative_path": source_relative,
+            "path": destination_relative,
+            "relative_path": destination_relative,
+            "target_path": str(dst.resolve()),
+            "is_dir": dst.is_dir(),
+            "is_file": dst.is_file(),
+        }
+
+    def make_directory(self, user_path: str | None) -> dict:
+        """Create a new directory (B2)."""
+        target = self.resolve_workspace_path(user_path)
+        if target == self.root:
+            raise ValueError("path is required")
+        if target.exists():
+            raise ValueError("already exists")
+        target.mkdir(parents=True, exist_ok=False)
+        self._ensure_under_workspace(target)
+        relative = self.workspace_relative_path(target)
+        return {
+            "success": True,
+            "mode": "mkdir",
+            "path": relative,
+            "relative_path": relative,
+            "target_path": str(target.resolve()),
+            "is_dir": True,
+        }
+
+    def create_file(self, user_path: str | None) -> dict:
+        """Create a new empty file (B2)."""
+        target = self.resolve_workspace_path(user_path)
+        if target == self.root:
+            raise ValueError("path is required")
+        if target.exists():
+            raise ValueError("already exists")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_under_workspace(target.parent)
+        target.touch()
+        relative = self.workspace_relative_path(target)
+        return {
+            "success": True,
+            "mode": "file_create",
+            "path": relative,
+            "relative_path": relative,
+            "target_path": str(target.resolve()),
+            "is_file": True,
+            "size": 0,
+            "content_type": mimetypes.guess_type(target.name)[0] or "application/octet-stream",
         }
 
     def extract_zip_safely(self, directory: str | None, filename: str, data: bytes) -> dict:
@@ -249,12 +346,12 @@ class WorkspaceFileService:
             collapsed.append((target, is_dir, is_file, rel))
         return collapsed
 
-    def prepare_download(self, user_path: str) -> tuple[Path, str, str | None]:
+    def prepare_download(self, user_path: str) -> tuple[Path, str, str | None, bool]:
         target = self.resolve_workspace_path(user_path)
         if not target.exists():
             raise FileNotFoundError
         if target.is_file():
-            return target, target.name, None
+            return target, target.name, None, False
         if target.is_dir():
             rel = self.workspace_relative_path(target)
             archive_name = f"{target.name or 'workspace'}.zip"
@@ -270,10 +367,10 @@ class WorkspaceFileService:
                     resolved = self._ensure_under_workspace(p)
                     arc = (Path(rel) / p.relative_to(target)).as_posix() if rel != "." else p.relative_to(target).as_posix()
                     zf.write(resolved, arcname=arc)
-            return tmp_path, archive_name, "application/zip"
+            return tmp_path, archive_name, "application/zip", True
         raise ValueError("unsupported path")
 
-    def prepare_download_many(self, user_paths: list[str]) -> tuple[Path, str, str | None]:
+    def prepare_download_many(self, user_paths: list[str]) -> tuple[Path, str, str | None, bool]:
         if not user_paths:
             raise ValueError("paths is required")
         if len(user_paths) == 1:
@@ -307,7 +404,7 @@ class WorkspaceFileService:
                         zf.write(resolved, arcname=arc)
                 else:
                     raise ValueError("unsupported path")
-        return tmp_path, "server-files.zip", "application/zip"
+        return tmp_path, "server-files.zip", "application/zip", True
 
 
 def _sanitize_filename(filename: str) -> str:
