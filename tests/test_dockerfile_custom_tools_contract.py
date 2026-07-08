@@ -31,15 +31,19 @@ def test_dockerfile_consumes_prebuilt_custom_tools_without_builder_stage():
         "ARG CUSTOM_TOOLS_DIR=runtime-tools",
         "COPY ${CUSTOM_TOOLS_DIR}/jira /usr/local/bin/jira",
         "COPY ${CUSTOM_TOOLS_DIR}/confluence /usr/local/bin/confluence",
+        "COPY ${CUSTOM_TOOLS_DIR}/jenkins /usr/local/bin/jenkins",
         "COPY ${CUSTOM_TOOLS_DIR}/aws-auth /usr/local/bin/aws-auth",
         "COPY ${CUSTOM_TOOLS_DIR}/mobile-auto /usr/local/bin/mobile-auto",
         "COPY ${CUSTOM_TOOLS_DIR}/BrowserStackLocal /usr/local/bin/BrowserStackLocal",
         "aws-auth version --json",
         "aws-auth commands --json",
+        "jenkins version --json",
+        "jenkins commands --json",
         "mobile-auto version --json",
         "mobile-auto commands --json",
         "jira schema issue.map-csv --json",
         "jira schema issue.bulk-create --json",
+        "jenkins schema build.test-report --json",
         "mobile-auto schema run.start --json",
     ]
     for token in required:
@@ -51,6 +55,7 @@ def test_runtime_tools_context_contract_is_documented_and_ignored():
     for token in [
         "runtime-tools/jira",
         "runtime-tools/confluence",
+        "runtime-tools/jenkins",
         "runtime-tools/aws-auth",
         "runtime-tools/mobile-auto",
         "runtime-tools/BrowserStackLocal",
@@ -70,6 +75,7 @@ def test_smoke_requires_runtime_tools_without_preparing_them():
     for token in [
         "require_runtime_tool jira",
         "require_runtime_tool confluence",
+        "require_runtime_tool jenkins",
         "require_runtime_tool aws-auth",
         "require_runtime_tool mobile-auto",
         "require_runtime_tool BrowserStackLocal",
@@ -77,6 +83,7 @@ def test_smoke_requires_runtime_tools_without_preparing_them():
         "docs/CUSTOM_TOOLS_IMAGE.md",
         "jira schema issue.map-csv --json",
         "jira schema issue.bulk-create --json",
+        "jenkins schema build.test-report --json",
         "mobile-auto schema run.start --json",
     ]:
         assert token in script

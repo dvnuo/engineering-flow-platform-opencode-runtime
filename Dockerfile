@@ -213,20 +213,24 @@ RUN set -eux; \
 
 COPY ${CUSTOM_TOOLS_DIR}/jira /usr/local/bin/jira
 COPY ${CUSTOM_TOOLS_DIR}/confluence /usr/local/bin/confluence
+COPY ${CUSTOM_TOOLS_DIR}/jenkins /usr/local/bin/jenkins
 COPY ${CUSTOM_TOOLS_DIR}/aws-auth /usr/local/bin/aws-auth
 COPY ${CUSTOM_TOOLS_DIR}/mobile-auto /usr/local/bin/mobile-auto
 COPY ${CUSTOM_TOOLS_DIR}/BrowserStackLocal /usr/local/bin/BrowserStackLocal
 RUN set -eux; \
-  chmod 0755 /usr/local/bin/jira /usr/local/bin/confluence /usr/local/bin/aws-auth /usr/local/bin/mobile-auto /usr/local/bin/BrowserStackLocal; \
+  chmod 0755 /usr/local/bin/jira /usr/local/bin/confluence /usr/local/bin/jenkins /usr/local/bin/aws-auth /usr/local/bin/mobile-auto /usr/local/bin/BrowserStackLocal; \
   jira version --json >/dev/null; \
   confluence version --json >/dev/null; \
+  jenkins version --json >/dev/null; \
   aws-auth version --json >/dev/null; \
   mobile-auto version --json >/dev/null; \
   jira commands --json >/dev/null; \
+  jenkins commands --json >/dev/null; \
   aws-auth commands --json >/dev/null; \
   mobile-auto commands --json >/dev/null; \
   jira schema issue.map-csv --json >/dev/null; \
   jira schema issue.bulk-create --json >/dev/null; \
+  jenkins schema build.test-report --json >/dev/null; \
   mobile-auto schema run.start --json >/dev/null; \
   test -x /usr/local/bin/BrowserStackLocal
 
