@@ -1,7 +1,7 @@
 import json
-from pathlib import Path
 
 import pytest
+import yaml
 from aiohttp.test_utils import TestClient, TestServer
 
 from efp_opencode_adapter.server import create_app
@@ -25,11 +25,14 @@ class FakeOpenCodeClient:
 @pytest.mark.asyncio
 async def test_runtime_profile_apply_writes_atlassian_config_and_env(tmp_path, monkeypatch):
     workspace, state = tmp_path / "workspace", tmp_path / "state"
-    config_path = tmp_path / "home" / ".config" / "atlassian" / "config.json"
+    # atlassian config is now merged into the shared EFP config file (the path
+    # EFP_CONFIG points to), not a separate JSON, so the CLI resolves it.
+    efp_config_path = workspace / ".efp" / "config.yaml"
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode/opencode.json"))
-    monkeypatch.setenv("ATLASSIAN_CONFIG", str(config_path))
+    monkeypatch.delenv("ATLASSIAN_CONFIG", raising=False)
+    monkeypatch.delenv("EFP_CONFIG", raising=False)
 
     app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
     client = TestClient(TestServer(app))
@@ -53,24 +56,24 @@ async def test_runtime_profile_apply_writes_atlassian_config_and_env(tmp_path, m
 
     assert resp.status == 200
     assert body["atlassian_cli_configured"] is True
-    assert body["atlassian_config_path"] == str(config_path)
+    assert body["atlassian_config_path"] == str(efp_config_path)
     assert body["atlassian_jira_instances"] == 1
     assert body["atlassian_confluence_instances"] == 1
     assert "atlassian" in body["updated_sections"]
     assert password not in json.dumps(body)
     assert token not in json.dumps(body)
-    assert config_path.exists()
+    assert efp_config_path.exists()
     env_text = (state / "opencode.env").read_text(encoding="utf-8")
     assert "ATLASSIAN_CONFIG=" in env_text
-    assert str(config_path) in env_text
+    assert str(efp_config_path) in env_text
 
-    stored = json.loads(config_path.read_text(encoding="utf-8"))
+    stored = yaml.safe_load(efp_config_path.read_text(encoding="utf-8"))
     assert stored["jira"]["default_instance"] == "jira-main"
     assert stored["confluence"]["instances"][0]["default_space"] == "ENG"
 
     status = await (await client.get("/api/internal/runtime-profile/status")).json()
     assert status["atlassian_cli_configured"] is True
-    assert status["atlassian_config_path"] == str(config_path)
+    assert status["atlassian_config_path"] == str(efp_config_path)
     assert password not in json.dumps(status)
     assert token not in json.dumps(status)
 

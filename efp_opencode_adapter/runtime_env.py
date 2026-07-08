@@ -300,7 +300,9 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         "OPENCODE_CONFIG": str(settings.opencode_config_path),
         "OPENCODE_DATA_DIR": str(settings.opencode_data_dir),
         "XDG_DATA_HOME": str(xdg_data_home),
-        "ATLASSIAN_CONFIG": str(settings.atlassian_config_path),
+        # atlassian config now lives in the shared EFP config file; keep both
+        # env vars pointing at it so any resolution order finds jira/confluence.
+        "ATLASSIAN_CONFIG": str(settings.efp_config_path),
         "EFP_CONFIG": str(settings.efp_config_path),
         "EFP_RUNTIME_TYPE": "opencode",
         "EFP_WORKSPACE_DIR": str(settings.workspace_dir),
