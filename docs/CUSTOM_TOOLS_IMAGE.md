@@ -9,6 +9,7 @@ Required files before `docker build`:
 
 - `runtime-tools/jira`
 - `runtime-tools/confluence`
+- `runtime-tools/jenkins`
 - `runtime-tools/aws-auth`
 - `runtime-tools/mobile-auto`
 - `runtime-tools/BrowserStackLocal`
@@ -34,6 +35,7 @@ cd /path/to/engineering-flow-platform-opencode-runtime
 mkdir -p runtime-tools
 cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/jira runtime-tools/jira
 cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/confluence runtime-tools/confluence
+cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/jenkins runtime-tools/jenkins
 cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/aws-auth runtime-tools/aws-auth
 cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/mobile-auto runtime-tools/mobile-auto
 cp /secure/pipeline/browserstack/linux-amd64/BrowserStackLocal runtime-tools/BrowserStackLocal
@@ -50,6 +52,7 @@ Example for linux/arm64:
 mkdir -p runtime-tools
 cp /path/to/engineering-flow-platform-tools/dist/linux-arm64/jira runtime-tools/jira
 cp /path/to/engineering-flow-platform-tools/dist/linux-arm64/confluence runtime-tools/confluence
+cp /path/to/engineering-flow-platform-tools/dist/linux-arm64/jenkins runtime-tools/jenkins
 cp /path/to/engineering-flow-platform-tools/dist/linux-arm64/aws-auth runtime-tools/aws-auth
 cp /path/to/engineering-flow-platform-tools/dist/linux-arm64/mobile-auto runtime-tools/mobile-auto
 cp /secure/pipeline/browserstack/linux-arm64/BrowserStackLocal runtime-tools/BrowserStackLocal
