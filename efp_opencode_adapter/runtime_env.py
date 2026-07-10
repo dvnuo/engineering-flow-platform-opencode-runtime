@@ -17,6 +17,9 @@ SECRET_MARKERS = ("TOKEN", "PASSWORD", "SECRET", "API_KEY", "ACCESS", "REFRESH",
 AWS_AUTH_DEFAULT_COMMAND = "aws-auth"
 RUNTIME_VENV_BIN_DIRS = ("/opt/venv/bin",)
 MANAGED_EXTERNAL_ENV_KEYS = {
+    # Full profile Secret blob: scrubbed from the adapter process after boot
+    # projection and never allowed to reach the opencode child env.
+    "EFP_PROFILE_CONFIG",
     "GITHUB_TOKEN", "GITHUB_ACCESS_TOKEN", "GITHUB_API_BASE_URL", "EFP_GITHUB_CONFIG_JSON",
     "ATLASSIAN_CONFIG",
     "JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_PASSWORD", "JIRA_TOKEN", "JIRA_PROJECT_KEY", "EFP_JIRA_INSTANCES_JSON",
@@ -171,9 +174,19 @@ def _format_command(args: list[str], secrets: tuple[str, ...]) -> str:
     return " ".join(shlex.quote(_redact_text(str(arg), secrets)) for arg in args)
 
 
+AWS_AUTH_TIMEOUT_SECONDS = 120.0
+
+
 def _run_aws_auth(command: list[str], *, env: dict[str, str], password: str, input_text: str | None = None) -> None:
+    # Bounded so a hung aws-auth login surfaces as a boot projection failure
+    # (adapter unready) instead of stalling startup silently.
     try:
-        result = subprocess.run(command, input=input_text, text=True, capture_output=True, check=False, env=env)
+        result = subprocess.run(command, input=input_text, text=True, capture_output=True, check=False, env=env, timeout=AWS_AUTH_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "AWS auth command timed out: "
+            f"{_format_command(command, (password,))} after {AWS_AUTH_TIMEOUT_SECONDS}s"
+        ) from exc
     except OSError as exc:
         raise RuntimeError(
             "Failed to run AWS auth command: "
@@ -337,6 +350,8 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
     github_section_present = isinstance(cfg.get("github"), dict)
     github_enabled = github_section_present and _section_enabled(github)
 
+    # The profile env blob is the sole config source: no ambient process env
+    # fallbacks (GH_TOKEN/GITHUB_USERNAME/... leak-back paths were removed).
     if github_section_present and not github_enabled:
         github_token = ""
     else:
@@ -344,29 +359,21 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
             github.get("api_token") if isinstance(github, dict) else None,
             github.get("token") if isinstance(github, dict) else None,
             github.get("access_token") if isinstance(github, dict) else None,
-            os.getenv("GH_TOKEN"),
-            os.getenv("GITHUB_TOKEN"),
-            os.getenv("EFP_GITHUB_TOKEN"),
         )
     github_username = _first_text(
         github.get("username") if isinstance(github, dict) else None,
         github.get("login") if isinstance(github, dict) else None,
         (cfg.get("git") or {}).get("username") if isinstance(cfg.get("git"), dict) else None,
-        os.getenv("EFP_GITHUB_USERNAME"),
-        os.getenv("GITHUB_USERNAME"),
-        os.getenv("GIT_USERNAME"),
         default="x-access-token",
     )
     github_api_base_url = _first_text(
         github.get("api_base_url") if isinstance(github, dict) else None,
         github.get("base_url") if isinstance(github, dict) else None,
-        os.getenv("GITHUB_API_BASE_URL"),
         default="https://api.github.com",
     ).rstrip("/")
     github_host = _github_host_from_urls(
         github.get("host") if isinstance(github, dict) else None,
         github.get("web_base_url") if isinstance(github, dict) else None,
-        os.getenv("GH_HOST"),
         github_api_base_url,
     )
     env["GH_CONFIG_DIR"] = str(settings.adapter_state_dir / "gh")
@@ -534,10 +541,8 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
 
     git = cfg.get("git") if isinstance(cfg.get("git"), dict) else {}
     git_user = git.get("user") if isinstance(git.get("user"), dict) else {}
-    author_name = git.get("author_name") or git_user.get("name")
+    author_name = git.get("author_name") or git_user.get("name") or github_username
     author_email = git.get("author_email") or git_user.get("email")
-    author_name = author_name or os.getenv("GIT_AUTHOR_NAME") or github_username
-    author_email = author_email or os.getenv("GIT_AUTHOR_EMAIL") or os.getenv("GITHUB_EMAIL")
     git_env_written = False
     if author_name:
         env["GIT_AUTHOR_NAME"] = str(author_name)

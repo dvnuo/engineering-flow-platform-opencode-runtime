@@ -105,11 +105,13 @@ def test_entrypoint_bootstrap_order_for_managed_adapter_server():
     root = Path(__file__).resolve().parents[1]
     text = (root / "entrypoint.sh").read_text(encoding="utf-8")
     assert "python -m efp_opencode_adapter.init_assets" in text
-    assert "python -m efp_opencode_adapter.portal_runtime_context_bootstrap" in text
     assert "python -m efp_opencode_adapter.server" in text
     assert "--manage-opencode" in text
-    assert text.index("python -m efp_opencode_adapter.init_assets") < text.index("python -m efp_opencode_adapter.portal_runtime_context_bootstrap")
-    assert text.index("python -m efp_opencode_adapter.portal_runtime_context_bootstrap") < text.index("python -m efp_opencode_adapter.server")
+    # Profile config arrives via the Secret env; there is no HTTP bootstrap step.
+    assert "portal_runtime_context_bootstrap" not in text
+    assert 'test -n "${EFP_PROFILE_CONFIG+x}"' in text
+    assert text.index('test -n "${EFP_PROFILE_CONFIG+x}"') < text.index("python -m efp_opencode_adapter.init_assets")
+    assert text.index("python -m efp_opencode_adapter.init_assets") < text.index("python -m efp_opencode_adapter.server")
 
 
 def test_dockerfile_runs_as_root_with_root_state_dirs():
@@ -130,5 +132,5 @@ def test_managed_opencode_startup_checks_health_before_tool_registry():
     server_text = (root / "efp_opencode_adapter" / "server.py").read_text(encoding="utf-8")
     process_text = (root / "efp_opencode_adapter" / "opencode_process.py").read_text(encoding="utf-8")
     assert "app.on_startup.append(_managed_opencode_startup)" in server_text
-    assert "await manager.start(env, reason=\"startup\")" in server_text
+    assert "await manager.start(projection.env, reason=\"startup\")" in server_text
     assert "await self.client.wait_until_ready" in process_text

@@ -26,6 +26,9 @@ This repository provides an OpenCode-based runtime adapter for EFP-facing APIs.
 - `EFP_ADAPTER_STATE_DIR`
 - `OPENCODE_DATA_DIR`
 - `OPENCODE_CONFIG`
+- `EFP_PROFILE_CONFIG` (rendered profile payload JSON from the per-profile Secret)
+- `EFP_PROFILE_REVISION` (profile revision string from the Secret)
+- `EFP_PROFILE_ID` (profile id, or `none` for unbound agents)
 
 ## Required mounted directories
 - `/workspace`
@@ -37,6 +40,7 @@ This repository provides an OpenCode-based runtime adapter for EFP-facing APIs.
 At minimum, runtime provides:
 - `/health`
 - `/actuator/health`
+- `/ready`
 - `/api/chat`
 - `/api/chat/stream`
 - `/api/sessions`
@@ -94,9 +98,30 @@ Task state loading and persistence are bounded:
 - `EFP_OPENCODE_TASKS_PERSIST_EVENT_TAIL` limits runtime events retained when a
   task record must be minimized. The default is `50`.
 
-## Runtime profile apply/status contract
-- Apply endpoint updates runtime profile and OpenCode config.
-- Status endpoint reports apply status, revision, and restart/health-related state.
+## Runtime profile boot/status contract
+Profile config is delivered exclusively through pod env at container start;
+there is no apply endpoint and no hot-apply path.
+
+- Delivery: the Portal renders each profile into a per-profile Secret and
+  injects it as pod env — `EFP_PROFILE_CONFIG` (full payload JSON, key
+  `opencode.json`), `EFP_PROFILE_REVISION`, and `EFP_PROFILE_ID`.
+- Boot projection: the adapter parses `EFP_PROFILE_CONFIG` once at startup and
+  projects it into runtime assets (opencode.json, auth.json, opencode.env,
+  git/gh auth assets, atlassian/mobile CLI config, AWS auth), then removes the
+  blob from its process env before the managed OpenCode child starts. The
+  child env never contains `EFP_PROFILE_CONFIG`.
+- Failure semantics: a missing `EFP_PROFILE_CONFIG` env var is a fatal pod
+  misconfiguration (the adapter stays alive but unready); an empty
+  `"config": {}` payload is a valid empty profile (base config).
+- Activation is restart-only: config changes reach a pod only via a
+  Portal-triggered restart with an updated Secret. The managed OpenCode
+  watchdog only revives the child with the boot-time env.
+- Readiness: `GET /ready` returns 200 with
+  `{"ready": true, "runtime_profile_id": ..., "revision": ...}` only after the
+  boot projection succeeded and the managed OpenCode child is healthy;
+  otherwise 503 with `{"ready": false, "error": ...}`.
+- Status endpoint reports the running revision from the pod env plus the boot
+  projection record (warnings, hashes, per-integration configured flags).
 - Effective config endpoint exposes sanitized runtime configuration and integration status.
 
 ## Runtime contract tests

@@ -125,7 +125,7 @@ run_pytest_gate "P2 skill/assets/capabilities subset" "${PYTEST_TIMEOUT_SECONDS}
 
 run_pytest_gate "P2 event/profile subset" "${PYTEST_TIMEOUT_SECONDS}" -q \
   tests/test_event_bridge.py \
-  tests/test_runtime_profile_apply.py
+  tests/test_boot_projection.py
 
 run_pytest_gate "P2 tasks/recovery/tools subset" "${PYTEST_TIMEOUT_SECONDS}" -q \
   tests/test_tasks_api.py \

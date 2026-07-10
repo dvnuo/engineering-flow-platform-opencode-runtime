@@ -27,7 +27,7 @@ def _settings(tmp_path, monkeypatch):
 def _fake_aws_auth(monkeypatch):
     calls = []
 
-    def fake_run(args, input=None, text=False, capture_output=False, check=False, env=None):
+    def fake_run(args, input=None, text=False, capture_output=False, check=False, env=None, timeout=None):
         call = {
             "args": list(args),
             "input": input,
@@ -35,6 +35,7 @@ def _fake_aws_auth(monkeypatch):
             "capture_output": capture_output,
             "check": check,
             "env": dict(env or {}),
+            "timeout": timeout,
         }
         calls.append(call)
         if call["args"][:3] == ["aws-auth", "auth", "login"]:
@@ -109,6 +110,7 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
         "--json",
     ]
     assert aws_auth_calls[0]["input"] == "aws-password\n"
+    assert aws_auth_calls[0]["timeout"]
     assert "aws-password" not in " ".join(configure_args)
     assert len(aws_auth_calls) == 1
     configure_env = aws_auth_calls[0]["env"]
@@ -245,7 +247,7 @@ def test_runtime_env_aws_auth_failure_redacts_password(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     captured = {}
 
-    def fake_run(args, input=None, text=False, capture_output=False, check=False, env=None):
+    def fake_run(args, input=None, text=False, capture_output=False, check=False, env=None, timeout=None):
         captured["args"] = list(args)
         captured["env"] = dict(env or {})
         return subprocess.CompletedProcess(args, 1, stdout="", stderr="login failed for aws-password")

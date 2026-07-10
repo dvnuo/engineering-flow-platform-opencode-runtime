@@ -54,7 +54,7 @@ class _WatchdogManager(OpenCodeProcessManager):
         super().__init__(settings, client, event_bus=event_bus)
         self.restart_reasons = []
 
-    async def restart(self, env=None, reason="runtime_profile_apply"):
+    async def restart(self, *, reason="watchdog"):
         self.restart_reasons.append(reason)
         self.process = _FakeProcess()
         self.last_restart_reason = reason
@@ -231,19 +231,22 @@ async def test_restart_without_env_reuses_last_start_env(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_runtime_profile_apply_restart_updates_cached_env(monkeypatch):
+async def test_restart_is_watchdog_only_and_always_reuses_boot_env(monkeypatch):
+    # No new-env restarts exist anymore: config activation is pod-restart-only,
+    # so every managed restart replays the env from the boot-time start.
+    import inspect
+
     captured_envs = _capture_managed_spawns(monkeypatch)
     manager = OpenCodeProcessManager(Settings.from_env(), _FakeClient([]))
+    parameters = inspect.signature(manager.restart).parameters
+    assert "env" not in parameters
 
-    await manager.start({"OPENCODE_PROVIDER": "old", "ATLASSIAN_CONFIG": "/old/config"}, reason="startup")
-    await manager.restart({"OPENCODE_PROVIDER": "new", "ATLASSIAN_CONFIG": "/new/config"}, reason="runtime_profile_apply")
+    await manager.start({"OPENCODE_PROVIDER": "boot", "ATLASSIAN_CONFIG": "/boot/config"}, reason="startup")
     await manager.restart(reason="watchdog_health_failed")
 
-    assert captured_envs[0]["OPENCODE_PROVIDER"] == "old"
-    assert captured_envs[1]["OPENCODE_PROVIDER"] == "new"
-    assert captured_envs[1]["ATLASSIAN_CONFIG"] == "/new/config"
-    assert captured_envs[2]["OPENCODE_PROVIDER"] == "new"
-    assert captured_envs[2]["ATLASSIAN_CONFIG"] == "/new/config"
+    assert captured_envs[0]["OPENCODE_PROVIDER"] == "boot"
+    assert captured_envs[1]["OPENCODE_PROVIDER"] == "boot"
+    assert captured_envs[1]["ATLASSIAN_CONFIG"] == "/boot/config"
 
 
 @pytest.mark.asyncio

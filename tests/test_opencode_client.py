@@ -106,25 +106,6 @@ async def test_health_does_not_send_authorization_header(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_put_auth_sends_opencode_api_auth_payload_without_basic_auth(monkeypatch):
-    app = web.Application()
-
-    async def put_auth(request: web.Request):
-        assert request.headers.get("Authorization") is None
-        body = await request.json()
-        assert body == {"type": "api", "key": "secret-value"}
-        return web.json_response({}, status=200)
-
-    app.router.add_put("/auth/anthropic", put_auth)
-    server = TestServer(app)
-    await server.start_server()
-    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
-    result = await OpenCodeClient(Settings.from_env()).put_auth("anthropic", "secret-value")
-    assert result["success"] is True
-    await server.close()
-
-
-@pytest.mark.asyncio
 async def test_unreachable_health_is_unhealthy(monkeypatch):
     monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
     settings = Settings.from_env()
@@ -195,27 +176,11 @@ async def test_prompt_async_rejects_non_204(monkeypatch, status):
 
 
 @pytest.mark.asyncio
-async def test_put_auth_redacts_secret_on_exception(monkeypatch):
-    monkeypatch.setenv("EFP_OPENCODE_URL", "http://127.0.0.1:9")
-    result = await OpenCodeClient(Settings.from_env()).put_auth("anthropic", "SECRET-XYZ")
-    assert result["success"] is False
-    assert "SECRET-XYZ" not in result.get("error", "")
-
-
-@pytest.mark.asyncio
-async def test_patch_config_pending_restart(monkeypatch):
-    app = web.Application()
-
-    async def patch(_):
-        return web.json_response({}, status=404)
-
-    app.router.add_patch("/config", patch)
-    server = TestServer(app)
-    await server.start_server()
-    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
-    result = await OpenCodeClient(Settings.from_env()).patch_config({"a": 1})
-    assert result["pending_restart"] is True
-    await server.close()
+async def test_hot_apply_client_methods_are_removed():
+    # Boot-only projection: no runtime auth/config mutation surface remains.
+    client = OpenCodeClient(Settings.from_env())
+    for removed in ("put_auth", "put_auth_info", "patch_config"):
+        assert not hasattr(client, removed)
 
 
 @pytest.mark.asyncio
@@ -752,22 +717,6 @@ async def test_list_tool_ids_rejects_invalid_shape(monkeypatch):
     monkeypatch.setattr(client, "_request_json", fake_request_json)
     with pytest.raises(OpenCodeClientError, match="unexpected tool ids response shape"):
         await client.list_tool_ids()
-
-@pytest.mark.asyncio
-async def test_put_auth_info_sends_non_copilot_api_auth(monkeypatch):
-    app = web.Application()
-    async def put_auth(request: web.Request):
-        assert request.headers.get("Authorization") is None
-        body = await request.json()
-        assert body == {"type": "api", "key": "sk_TEST"}
-        return web.json_response({}, status=200)
-    app.router.add_put("/auth/anthropic", put_auth)
-    server = TestServer(app); await server.start_server()
-    monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
-    result = await OpenCodeClient(Settings.from_env()).put_auth_info("anthropic", {"type": "api", "key": "sk_TEST"})
-    assert result["success"] is True
-    await server.close()
-
 
 @pytest.mark.asyncio
 async def test_send_message_model_ref_and_error_redaction(monkeypatch):
