@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +25,7 @@ from .app_keys import (
     OPENCODE_WATCHDOG_TASK_KEY,
     REQUEST_BINDING_STORE_KEY,
     COPILOT_TOKEN_MANAGER_KEY,
+    BOOT_PROJECTION_KEY,
 )
 
 from .capabilities import build_capability_catalog
@@ -50,21 +50,16 @@ from .portal_metadata_client import PortalMetadataClient
 from .recovery import RecoveryManager
 from .usage_api import usage_handler
 from .usage_tracker import UsageTracker
-from .agents_md import ensure_default_agents_md
-from .atlassian_cli_config import write_atlassian_cli_config
-from .opencode_config import build_opencode_config, normalize_opencode_provider_id, write_opencode_config
-from .opencode_auth import build_opencode_auth_from_runtime_config, clear_opencode_auth_provider
-from .copilot_plugin_auth import CopilotTokenManager, load_copilot_plugin_credential, save_or_clear_copilot_plugin_credential
+from .opencode_config import normalize_opencode_provider_id
+from .copilot_plugin_auth import CopilotTokenManager, load_copilot_plugin_credential
 from .copilot_proxy import copilot_proxy_handler
 from .path_utils import path_exists
-from .profile_store import ProfileOverlay, ProfileOverlayStore, build_profile_status_payload, sanitize_profile_config_for_storage, sanitize_public_secrets
-from .runtime_env import aws_status_from_env, build_runtime_env_from_config, read_runtime_env_file, write_runtime_env_file
+from .portal_runtime_context_bootstrap import run_boot_projection_from_env
+from .profile_store import ProfileOverlayStore, build_profile_status_payload, sanitize_public_secrets
+from .runtime_env import aws_status_from_env, build_runtime_env_from_config, read_runtime_env_file
 from .thinking_events import safe_preview
-from .git_cli_auth import write_git_gh_auth_assets
-from .mobile_cli_config import write_mobile_cli_config
 from .opencode_process import OpenCodeProcessManager
 from .session_store import SessionStore
-from .skill_sync import sync_runtime_skills
 from .task_store import TaskStore
 from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_full_handler, get_task_handler
 from .request_bindings import RequestBindingStore
@@ -80,48 +75,44 @@ from .sessions_api import (
     rename_session_handler,
     session_chatlog_handler,
 )
-from .settings import Settings
+from .settings import (
+    PROFILE_CONFIG_ENV,
+    PROFILE_ID_ENV,
+    Settings,
+    profile_env_profile_id,
+    profile_env_revision,
+)
 from .state import build_state_health_snapshot, ensure_state_dirs
 import asyncio
 
 
-GIT_GH_ENV_KEYS = {
-    "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_ACCESS_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-    "GITHUB_API_BASE_URL", "EFP_GITHUB_CONFIG_JSON",
-    "GH_HOST", "GH_CONFIG_DIR", "GH_PROMPT_DISABLED", "GH_REPO", "GIT_USERNAME", "GIT_PASSWORD", "GIT_ASKPASS",
-    "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_EDITOR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
-    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
-}
-AWS_ENV_KEYS = {
-    "EFP_CONFIG",
-    "AWS_SHARED_CREDENTIALS_FILE",
-}
-STARTUP_FALLBACK_ENV_KEYS = GIT_GH_ENV_KEYS | AWS_ENV_KEYS | {"ATLASSIAN_CONFIG"}
+def _boot_projection_snapshot(app: web.Application) -> dict[str, Any] | None:
+    snapshot = app.get(BOOT_PROJECTION_KEY)
+    return snapshot if isinstance(snapshot, dict) else None
 
 
-def _merge_startup_env_with_process_fallback(settings: Settings, env: dict[str, str]) -> dict[str, str]:
-    fallback = build_runtime_env_from_config(settings, {}).env
-    merged = dict(env)
-    for key in STARTUP_FALLBACK_ENV_KEYS:
-        if not merged.get(key) and fallback.get(key):
-            merged[key] = fallback[key]
-    return merged
+def _boot_projection_complete(app: web.Application) -> bool:
+    snapshot = _boot_projection_snapshot(app)
+    return bool(snapshot and snapshot.get("ready"))
 
 
-def _runtime_env_for_status(settings: Settings, overlay) -> dict[str, str]:
-    env_path = Path(overlay.env_path) if overlay and overlay.env_path else settings.adapter_state_dir / "opencode.env"
+def _runtime_env_for_status(request: web.Request) -> dict[str, str]:
+    """Runtime env for status reporting: the in-memory boot projection when
+    available, else the opencode.env boot artifact, else the baseline env."""
+    snapshot = _boot_projection_snapshot(request.app)
+    if snapshot and isinstance(snapshot.get("env"), dict):
+        return dict(snapshot["env"])
+    settings: Settings = request.app[SETTINGS_KEY]
+    env_path = settings.adapter_state_dir / "opencode.env"
     if path_exists(env_path):
-        return _merge_startup_env_with_process_fallback(settings, read_runtime_env_file(env_path))
+        return read_runtime_env_file(env_path)
     return build_runtime_env_from_config(settings, {}).env
 
 
-def _is_atlassian_only_profile_change(runtime_config: dict, updated_sections: list[str]) -> bool:
-    if not isinstance(runtime_config, dict) or not runtime_config:
-        return False
-    meaningful_keys = {str(key) for key, value in runtime_config.items() if value not in ({}, [], None, "")}
-    if not meaningful_keys or not meaningful_keys.issubset({"jira", "confluence", "atlassian"}):
-        return False
-    return "atlassian" in set(updated_sections)
+def _profile_identity_from_env(fallback_profile_id, fallback_revision) -> tuple[Any, Any]:
+    profile_id = profile_env_profile_id() if os.getenv(PROFILE_ID_ENV) is not None else fallback_profile_id
+    revision = profile_env_revision()
+    return profile_id, revision if revision is not None else fallback_revision
 
 
 async def health_handler(request: web.Request) -> web.Response:
@@ -137,7 +128,14 @@ async def health_handler(request: web.Request) -> web.Response:
     state_healthy = bool(state_health.get("healthy"))
     bridge = request.app.get(EVENT_BRIDGE_KEY)
     event_bridge_status = bridge.status_snapshot() if bridge and hasattr(bridge, "status_snapshot") else {"enabled": False, "running": False}
-    healthy = opencode_healthy and state_healthy
+    # Boot projection gate: in managed mode the adapter is not healthy until
+    # the env-payload projection completed at startup.
+    managed = request.app.get(OPENCODE_PROCESS_MANAGER_KEY) is not None
+    projection_complete = _boot_projection_complete(request.app) if managed else True
+    snapshot = _boot_projection_snapshot(request.app)
+    profile_status = build_profile_status_payload(settings)
+    profile_id, revision = _profile_identity_from_env(profile_status.get("runtime_profile_id"), profile_status.get("revision"))
+    healthy = opencode_healthy and state_healthy and projection_complete
     payload = {
         "status": "ok" if healthy else "degraded",
         "service": "efp-opencode-runtime",
@@ -146,8 +144,14 @@ async def health_handler(request: web.Request) -> web.Response:
         "opencode": {"healthy": opencode_healthy},
         "state": state_health,
         "event_bridge": event_bridge_status,
-        "profile": {k: v for k, v in build_profile_status_payload(settings).items() if k in {"status", "pending_restart", "runtime_profile_id", "revision"}},
+        "profile": {
+            "runtime_profile_id": profile_id,
+            "revision": revision,
+            "boot_projection_complete": projection_complete,
+        },
     }
+    if snapshot and snapshot.get("error"):
+        payload["profile"]["boot_projection_error"] = snapshot.get("error")
     if opencode_healthy:
         payload["opencode"]["version"] = info.get("version")
     else:
@@ -156,197 +160,42 @@ async def health_handler(request: web.Request) -> web.Response:
     return web.json_response(payload, status=200 if healthy else 503)
 
 
-async def runtime_profile_apply_handler(request: web.Request) -> web.Response:
-    if request.headers.get("X-Portal-Author-Source") != "portal":
-        return web.json_response({"success": False, "error": "forbidden", "engine": "opencode"}, status=403)
-    try:
-        payload = await request.json()
-    except Exception:
-        return web.json_response({"success": False, "error": "invalid json", "engine": "opencode"}, status=400)
-    if not isinstance(payload, dict) or not isinstance(payload.get("config"), dict):
-        return web.json_response({"success": False, "error": "config must be an object", "engine": "opencode"}, status=400)
-    settings: Settings = request.app[SETTINGS_KEY]
+async def ready_handler(request: web.Request) -> web.Response:
+    """Readiness gate: 200 only after the boot projection succeeded and the
+    managed OpenCode child is healthy."""
+    snapshot = _boot_projection_snapshot(request.app)
+    if not snapshot or not snapshot.get("ready"):
+        error = (snapshot or {}).get("error") or "boot projection not complete"
+        return web.json_response({"ready": False, "error": error}, status=503)
     client = request.app[OPENCODE_CLIENT_KEY]
-    runtime_config = payload["config"]
-    runtime_profile_id = payload.get("runtime_profile_id")
-    revision = payload.get("revision")
-    ensure_default_agents_md(settings)
     try:
-        sync_runtime_skills(settings)
-    except Exception as exc:
-        detail = sanitize_public_secrets(str(exc))
-        if not isinstance(detail, str):
-            detail = str(detail)
-        return web.json_response(
-            {
-                "success": False,
-                "engine": "opencode",
-                "status": "failed",
-                "applied": False,
-                "error": "skill_sync_failed",
-                "detail": detail,
-                "status_endpoint": "/api/internal/runtime-profile/status",
-            },
-            status=500,
-        )
-    generated_config, config_hash, updated_sections = build_opencode_config(settings, runtime_config)
-    warnings: list[str] = []
-    status = "failed"
-    applied = False
-    pending_restart = False
-    config_written = False
-    last_error = None
-    try:
-        write_opencode_config(settings, generated_config)
-        config_written = True
+        info = await client.health()
     except Exception:
-        last_error = "config_write_failed"
-        ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status="failed", pending_restart=False, warnings=warnings, updated_sections=updated_sections, last_apply_error=last_error, applied=False))
-        return web.json_response({"success": False, "engine": "opencode", "status": "failed", "applied": False, "pending_restart": False, "config_written": False, "error": "config_write_failed", "warnings": warnings, "status_endpoint": "/api/internal/runtime-profile/status"}, status=500)
-    try:
-        copilot_credential_result = save_or_clear_copilot_plugin_credential(settings, runtime_config)
-        clear_opencode_auth_provider(settings, "github-copilot")
-    except Exception:
-        last_error = "copilot_credential_state_failed"
-        ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status="failed", pending_restart=False, warnings=warnings, updated_sections=updated_sections, last_apply_error=last_error, applied=False))
-        return web.json_response({"success": False, "engine": "opencode", "status": "failed", "applied": False, "pending_restart": False, "config_written": config_written, "error": last_error, "warnings": warnings, "status_endpoint": "/api/internal/runtime-profile/status"}, status=500)
-    llm = runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
-    if llm and any(key in llm for key in ("provider", "model", "api_key", "oauth", "temperature", "max_tokens")) and "llm" not in updated_sections:
-        updated_sections.append("llm")
-    if (copilot_credential_result.stored or copilot_credential_result.cleared) and "llm" not in updated_sections:
-        updated_sections.append("llm")
-    auth_build = build_opencode_auth_from_runtime_config(runtime_config)
-    provider = auth_build.provider
-    auth_update_status = "skipped"
-    if auth_build.warning:
-        warnings.append(auth_build.warning)
-    if provider and auth_build.auth_info:
-        if hasattr(client, "put_auth_info"):
-            try:
-                auth_result = await client.put_auth_info(provider, auth_build.auth_info)
-            except Exception:
-                auth_result = {"success": False, "error": "auth update failed"}
-        elif hasattr(client, "put_auth") and auth_build.auth_info.get("type") == "api":
-            try:
-                auth_result = await client.put_auth(provider, auth_build.auth_info.get("key"))
-            except Exception:
-                auth_result = {"success": False, "error": "auth update failed"}
-        else:
-            auth_result = {"success": False, "skipped": True}
-            warnings.append("opencode auth update skipped")
-        if auth_result.get("success"):
-            auth_update_status = "updated"
-        elif auth_result.get("skipped"):
-            auth_update_status = "skipped"
-        else:
-            warnings.append("opencode auth update failed; manual auth or restart may be required")
-            auth_update_status = "failed"
-    atlassian_result = write_atlassian_cli_config(settings, runtime_config)
-    warnings.extend([item for item in atlassian_result.warnings if item not in warnings])
-    if atlassian_result.configured and "atlassian" not in updated_sections:
-        updated_sections.append("atlassian")
-    env_result = build_runtime_env_from_config(settings, runtime_config)
-    runtime_env_has_values = bool(env_result.env)
-    env_result.env.update(atlassian_result.env)
-    warnings.extend([item for item in env_result.warnings if item not in warnings])
-    mobile_result = write_mobile_cli_config(settings, runtime_config)
-    env_result.env.update(mobile_result.env)
-    warnings.extend([item for item in mobile_result.warnings if item not in warnings])
-    if mobile_result.configured and "mobile-auto" not in updated_sections:
-        updated_sections.append("mobile-auto")
-    env_path = write_runtime_env_file(settings, env_result.env)
-    git_auth_result = write_git_gh_auth_assets(settings, env_result.env)
-    aws_status = aws_status_from_env(env_result.env)
-    aws_configured = bool("aws" in env_result.updated_sections and aws_status.get("configured"))
-    combined_updated_sections = sorted(set(updated_sections + env_result.updated_sections + atlassian_result.updated_sections + mobile_result.updated_sections))
-    manager = request.app.get(OPENCODE_PROCESS_MANAGER_KEY)
-    restart_performed = False
-    health_ok = None
-    opencode_pid = None
-    restart_meta = {}
-    restart_deferred_reason = None
-    if manager:
-        if _is_atlassian_only_profile_change(runtime_config, combined_updated_sections):
-            status, applied = "applied", True
-            pending_restart = False
-        else:
-            # Empty env_result.env should not clear the cached managed env. Use None to preserve
-            # the last successful startup/runtime-profile env for OpenCode recovery/watchdog restarts.
-            # Atlassian config always contributes ATLASSIAN_CONFIG, so guard on the pre-merge env.
-            restart_env = env_result.env if runtime_env_has_values else None
-            restart_meta = await manager.restart(restart_env, reason="runtime_profile_apply")
-            restart_performed = True
-            health_ok = bool(restart_meta.get("health_ok"))
-            opencode_pid = restart_meta.get("pid")
-            pending_restart = not health_ok
-            if pending_restart:
-                status, applied, last_error = "failed", False, "opencode_restart_failed"
-            else:
-                status, applied = "applied", True
-    else:
-        patch_result: dict = {"success": False, "pending_restart": True}
-        if hasattr(client, "patch_config"):
-            try:
-                patch_result = await client.patch_config(generated_config)
-            except Exception:
-                patch_result = {"success": False, "pending_restart": True}
-            pending_restart = bool(patch_result.get("pending_restart", not patch_result.get("success", False)))
-        if pending_restart:
-            warnings.append("opencode config patch unsupported; restart may be required")
-        status, applied = ("pending_restart", False) if pending_restart else ("applied", True)
-    overlay = ProfileOverlay(runtime_profile_id=runtime_profile_id, revision=revision, config=sanitize_profile_config_for_storage(runtime_config), applied_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), generated_config_hash=config_hash, status=status, pending_restart=pending_restart, warnings=warnings, updated_sections=combined_updated_sections, last_apply_error=last_error, applied=applied, env_hash=env_result.env_hash, env_path=str(env_path), restart_performed=restart_performed, opencode_pid=opencode_pid, last_restart_at=restart_meta.get("last_restart_at") if restart_meta else None, last_restart_reason=restart_meta.get("last_restart_reason") if restart_meta else None, health_ok=health_ok, git_auth_configured=bool(git_auth_result.get("configured")), gh_host=git_auth_result.get("host"), gh_config_dir=git_auth_result.get("gh_config_dir"), git_askpass_path=git_auth_result.get("askpass_path"), gitconfig_path=git_auth_result.get("gitconfig_path"), atlassian_cli_configured=atlassian_result.configured, atlassian_config_path=atlassian_result.path, atlassian_jira_instances=atlassian_result.jira_instances, atlassian_confluence_instances=atlassian_result.confluence_instances, mobile_cli_configured=mobile_result.configured, mobile_config_path=mobile_result.path, mobile_status=mobile_result.redacted_status, aws_configured=aws_configured)
-    ProfileOverlayStore(settings).save(overlay)
-    response = {"success": True, "engine": "opencode", "runtime_profile_id": runtime_profile_id, "revision": revision, "status": status, "applied": applied, "config_written": config_written, "env_written": True, "env_hash": env_result.env_hash, "env_path": str(env_path), "updated_sections": combined_updated_sections, "config_hash": config_hash, "pending_restart": pending_restart, "warnings": warnings, "auth_update_status": auth_update_status, "auth_provider": auth_build.provider, "auth_type": auth_build.auth_type, "restart_performed": restart_performed, "opencode_pid": opencode_pid, "health_ok": health_ok, "git_auth_configured": bool(git_auth_result.get("configured")), "gh_host": git_auth_result.get("host"), "gh_config_dir": git_auth_result.get("gh_config_dir"), "git_askpass_path": git_auth_result.get("askpass_path"), "gitconfig_path": git_auth_result.get("gitconfig_path"), "atlassian_cli_configured": atlassian_result.configured, "atlassian_config_path": atlassian_result.path, "atlassian_jira_instances": atlassian_result.jira_instances, "atlassian_confluence_instances": atlassian_result.confluence_instances, "atlassian_status": atlassian_result.redacted_status, "mobile_cli_configured": mobile_result.configured, "mobile_config_path": mobile_result.path, "mobile_status": mobile_result.redacted_status, "aws_configured": aws_configured, "status_endpoint": "/api/internal/runtime-profile/status"}
-    if restart_deferred_reason:
-        response["restart_deferred_reason"] = restart_deferred_reason
-    if auth_build.warning:
-        response["auth_warning"] = auth_build.warning
-    return web.json_response(response, status=500 if manager and pending_restart and last_error == "opencode_restart_failed" else 200)
+        info = {"healthy": False, "error": "unavailable"}
+    if not info.get("healthy"):
+        error = sanitize_public_secrets(str(info.get("error", "opencode unavailable")))
+        return web.json_response({"ready": False, "error": error if isinstance(error, str) else "opencode unavailable"}, status=503)
+    return web.json_response({
+        "ready": True,
+        "runtime_profile_id": snapshot.get("runtime_profile_id"),
+        "revision": snapshot.get("revision"),
+    })
 
 
 async def runtime_profile_status_handler(request: web.Request) -> web.Response:
     settings: Settings = request.app[SETTINGS_KEY]
     payload = build_profile_status_payload(settings)
-
-    overlay = ProfileOverlayStore(settings).load()
-    if not overlay:
-        runtime_env = _runtime_env_for_status(settings, overlay)
-        aws_status = aws_status_from_env(runtime_env)
-        git_askpass_path = runtime_env.get("GIT_ASKPASS")
-        gitconfig_path = runtime_env.get("GIT_CONFIG_GLOBAL")
-        gh_host = runtime_env.get("GH_HOST") or "github.com"
-        env_token_present = bool(
-            runtime_env.get("GH_TOKEN")
-            or runtime_env.get("GITHUB_TOKEN")
-            or runtime_env.get("GH_ENTERPRISE_TOKEN")
-            or runtime_env.get("GITHUB_ENTERPRISE_TOKEN")
-        )
-        payload.update({
-            "git_auth_configured": bool(
-                env_token_present
-                and git_askpass_path
-                and gitconfig_path
-                and path_exists(Path(git_askpass_path))
-                and path_exists(Path(gitconfig_path))
-            ),
-            "gh_host": gh_host,
-            "gh_config_dir": runtime_env.get("GH_CONFIG_DIR"),
-            "git_askpass_path": git_askpass_path,
-            "gitconfig_path": gitconfig_path,
-            "aws_configured": bool(aws_status.get("configured")),
-            "mobile_cli_configured": path_exists(settings.efp_config_path),
-            "mobile_config_path": str(settings.efp_config_path),
-            "mobile_status": {
-                "configured": path_exists(settings.efp_config_path),
-                "state_dir": runtime_env.get("MOBILE_AUTO_STATE_DIR"),
-                "artifacts_dir": runtime_env.get("MOBILE_AUTO_ARTIFACTS_DIR"),
-                "local": {
-                    "binary": runtime_env.get("BROWSERSTACK_LOCAL_BINARY"),
-                    "binary_present": bool(runtime_env.get("BROWSERSTACK_LOCAL_BINARY") and path_exists(Path(runtime_env["BROWSERSTACK_LOCAL_BINARY"]))),
-                },
-            },
-        })
-
+    # The pod env (EFP_PROFILE_ID/EFP_PROFILE_REVISION) is authoritative for
+    # the running identity; the boot overlay is a projection detail record.
+    profile_id, revision = _profile_identity_from_env(payload.get("runtime_profile_id"), payload.get("revision"))
+    payload["runtime_profile_id"] = profile_id
+    payload["revision"] = revision
+    snapshot = _boot_projection_snapshot(request.app)
+    payload["boot_projection"] = {
+        "complete": bool(snapshot and snapshot.get("ready")),
+        "error": snapshot.get("error") if snapshot else None,
+        "applied_at": snapshot.get("applied_at") if snapshot else payload.get("applied_at"),
+    }
     return web.json_response(payload)
 
 
@@ -371,11 +220,15 @@ async def effective_config_handler(request: web.Request) -> web.Response:
             auth = {}
     auth_obj = auth.get(provider) if isinstance(auth, dict) and provider != "github-copilot" else None
     overlay = ProfileOverlayStore(settings).load()
+    profile_id, profile_revision = _profile_identity_from_env(
+        overlay.runtime_profile_id if overlay else None,
+        overlay.revision if overlay else None,
+    )
     profile_cfg = overlay.config if overlay else {}
     github_cfg = profile_cfg.get("github") if isinstance(profile_cfg.get("github"), dict) else {}
     mobile_cfg = profile_cfg.get("mobile-auto") if isinstance(profile_cfg.get("mobile-auto"), dict) else {}
     proxy_cfg = profile_cfg.get("proxy") if isinstance(profile_cfg.get("proxy"), dict) else {}
-    runtime_env = _runtime_env_for_status(settings, overlay)
+    runtime_env = _runtime_env_for_status(request)
     aws_status = aws_status_from_env(runtime_env)
     env_token_present = bool(runtime_env.get("GH_TOKEN") or runtime_env.get("GITHUB_TOKEN") or runtime_env.get("GH_ENTERPRISE_TOKEN") or runtime_env.get("GITHUB_ENTERPRISE_TOKEN"))
     config_token_present = bool(github_cfg.get("api_token") or github_cfg.get("token") or github_cfg.get("access_token"))
@@ -407,8 +260,8 @@ async def effective_config_handler(request: web.Request) -> web.Response:
             "provider_options": provider_options,
             "config_path": str(settings.opencode_config_path),
             "profile": {
-                "runtime_profile_id": overlay.runtime_profile_id if overlay else None,
-                "revision": overlay.revision if overlay else None,
+                "runtime_profile_id": profile_id,
+                "revision": profile_revision,
             },
             "runtime_integrations": {
                 "github": {"enabled": bool(github_cfg) or env_token_present, "base_url": github_cfg.get("api_base_url") or runtime_env.get("GITHUB_API_BASE_URL") or "https://api.github.com", "host": gh_host, "token_present": config_token_present or env_token_present, "git_auth_configured": git_auth_configured, "gh_config_dir": runtime_env.get("GH_CONFIG_DIR"), "git_askpass_present": git_askpass_present, "gitconfig_present": gitconfig_present},
@@ -604,8 +457,8 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     register_file_routes(app)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/actuator/health", health_handler)
+    app.router.add_get("/ready", ready_handler)
     app.router.add_route("*", "/api/internal/copilot/{tail:.*}", copilot_proxy_handler)
-    app.router.add_post("/api/internal/runtime-profile/apply", runtime_profile_apply_handler)
     app.router.add_get("/api/internal/runtime-profile/status", runtime_profile_status_handler)
     app.router.add_get("/api/internal/opencode/status", internal_opencode_status_handler)
     app.router.add_get("/api/internal/opencode/log-tail", internal_opencode_log_tail_handler)
@@ -651,16 +504,39 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.on_startup.append(_run_recovery)
     async def _managed_opencode_startup(app):
         manager = app.get(OPENCODE_PROCESS_MANAGER_KEY)
-        if manager:
-            env_path = settings.adapter_state_dir / "opencode.env"
-            if path_exists(env_path):
-                env = _merge_startup_env_with_process_fallback(settings, read_runtime_env_file(env_path))
-            else:
-                env = build_runtime_env_from_config(settings, {}).env
-            write_git_gh_auth_assets(settings, env)
-            await manager.start(env, reason="startup")
-            if hasattr(manager, "run_watchdog"):
-                app[OPENCODE_WATCHDOG_TASK_KEY] = asyncio.create_task(manager.run_watchdog(app=app))
+        if not manager:
+            return
+        # Boot ordering contract: projection -> scrub blob -> start opencode
+        # with the projected env -> spawn watchdog. Blocking work is fine here:
+        # nothing is served until startup completes, and readiness gates on it.
+        try:
+            projection = run_boot_projection_from_env(settings)
+        except Exception as exc:
+            error = sanitize_public_secrets(str(exc))
+            if not isinstance(error, str):
+                error = "boot projection failed"
+            # Stay alive but unready: /ready (and managed /health) report 503
+            # instead of crash-looping the container on a bad profile.
+            app[BOOT_PROJECTION_KEY] = {"ready": False, "error": error}
+            os.environ.pop(PROFILE_CONFIG_ENV, None)
+            print(f"boot projection failed; adapter stays unready: {error}")
+            return
+        profile_id, revision = _profile_identity_from_env(projection.runtime_profile_id, projection.revision)
+        app[BOOT_PROJECTION_KEY] = {
+            "ready": True,
+            "error": None,
+            "runtime_profile_id": profile_id,
+            "revision": revision,
+            "applied_at": projection.applied_at,
+            "warnings": list(projection.warnings),
+            "env_hash": projection.env_hash,
+            "env": dict(projection.env),
+        }
+        # Scrub the full Secret blob before any child process can spawn.
+        os.environ.pop(PROFILE_CONFIG_ENV, None)
+        await manager.start(projection.env, reason="startup")
+        if hasattr(manager, "run_watchdog"):
+            app[OPENCODE_WATCHDOG_TASK_KEY] = asyncio.create_task(manager.run_watchdog(app=app))
 
     async def _start_event_bridge(app):
         bridge = app.get(EVENT_BRIDGE_KEY)

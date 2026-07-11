@@ -10,13 +10,12 @@ export EFP_ADAPTER_STATE_DIR="${EFP_ADAPTER_STATE_DIR:-/root/.local/share/efp-co
 export OPENCODE_DATA_DIR="${OPENCODE_DATA_DIR:-/root/.local/share/opencode}"
 export EFP_OPENCODE_URL="${EFP_OPENCODE_URL:-http://127.0.0.1:4096}"
 
+# Fail fast on a broken pod spec: the profile Secret env must be injected.
+# The adapter projects it at startup; readiness gates on that projection.
+test -n "${EFP_PROFILE_CONFIG+x}" || { echo 'EFP_PROFILE_CONFIG missing' >&2; exit 1; }
+
 echo "Initializing EFP OpenCode runtime assets..."
 python -m efp_opencode_adapter.init_assets
-
-
-echo "Bootstrapping OpenCode runtime profile from Portal context..."
-python -m efp_opencode_adapter.portal_runtime_context_bootstrap \
-  --workspace-dir "${EFP_WORKSPACE_DIR}"
 
 echo "opencode version $(opencode --version)"
 echo "Starting efp-opencode-adapter on 0.0.0.0:8000 with managed OpenCode serve..."

@@ -1,8 +1,60 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+PROFILE_CONFIG_ENV = "EFP_PROFILE_CONFIG"
+PROFILE_REVISION_ENV = "EFP_PROFILE_REVISION"
+PROFILE_ID_ENV = "EFP_PROFILE_ID"
+
+
+class ProfileEnvError(RuntimeError):
+    """Fatal pod misconfiguration: the profile env payload is missing or unparseable."""
+
+
+def load_profile_env_payload() -> dict[str, Any]:
+    """Parse the EFP_PROFILE_CONFIG apply-payload injected from the profile Secret.
+
+    A missing env var means the pod spec is broken (fatal). An empty
+    ``"config": {}`` payload is a valid empty profile (efp-profile-none).
+    """
+    raw = os.environ.get(PROFILE_CONFIG_ENV)
+    if raw is None:
+        # Wording deliberately avoids sanitize_public_secrets marker words so
+        # the error stays readable in /ready and status payloads.
+        raise ProfileEnvError(
+            f"{PROFILE_CONFIG_ENV} is not set; the pod spec must inject the profile env payload"
+        )
+    text = raw.strip()
+    if not text:
+        raise ProfileEnvError(f"{PROFILE_CONFIG_ENV} is empty; expected a JSON object payload")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ProfileEnvError(f"{PROFILE_CONFIG_ENV} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ProfileEnvError(f"{PROFILE_CONFIG_ENV} must be a JSON object")
+    return payload
+
+
+def profile_env_revision() -> int | str | None:
+    raw = (os.getenv(PROFILE_REVISION_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
+
+
+def profile_env_profile_id() -> str | None:
+    raw = (os.getenv(PROFILE_ID_ENV) or "").strip()
+    if not raw or raw.lower() == "none":
+        return None
+    return raw
 
 
 def _env_bool(name: str, default: bool) -> bool:

@@ -64,7 +64,7 @@ def test_ci_unit_splits_p2_subset_by_domain():
 
     assert 'P2 event/profile subset' in script
     assert 'tests/test_event_bridge.py' in script
-    assert 'tests/test_runtime_profile_apply.py' in script
+    assert 'tests/test_boot_projection.py' in script
 
     assert 'P2 tasks/recovery/tools subset' in script
     assert 'tests/test_tasks_api.py' in script

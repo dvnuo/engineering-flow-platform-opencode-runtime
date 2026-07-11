@@ -31,7 +31,7 @@ async def test_effective_config_profile_and_copilot_integration_are_safe(tmp_pat
     (data / "auth.json").write_text(json.dumps({"github-copilot": {"type": "oauth", "refresh": "SECRET", "access": "SECRET"}}))
     settings = Settings.from_env()
     save_copilot_plugin_credential(settings, CopilotSourceCredential(credential="gho_SECRET", source="api_key"))
-    ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id="rp-1", revision=3, config={}, applied_at="2026-01-01T00:00:00Z", generated_config_hash="h", status="applied", pending_restart=False, warnings=[], updated_sections=["llm"], last_apply_error=None, applied=True))
+    ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id="rp-1", revision=3, config={}, applied_at="2026-01-01T00:00:00Z", generated_config_hash="h", warnings=[], updated_sections=["llm"]))
 
     app = create_app(settings, opencode_client=FakeClient())
     c = TestClient(TestServer(app)); await c.start_server()
@@ -71,7 +71,7 @@ async def test_effective_config_does_not_expose_external_tools_key(tmp_path, mon
     env_path = write_runtime_env_file(settings, {
         "AWS_SHARED_CREDENTIALS_FILE": str(state / "aws/credentials"),
     })
-    ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id="rp-2", revision=4, config={"github": {"api_token": "SECRET"}, "proxy": {"enabled": True, "password": "SECRET", "url": "http://proxy.local"}, "aws": {"enabled": True, "domain": "HBEU", "username": "aws-user", "password": "SECRET"}}, applied_at="2026-01-01T00:00:00Z", generated_config_hash="h2", status="applied", pending_restart=False, warnings=[], updated_sections=["llm"], last_apply_error=None, applied=True, env_path=str(env_path), env_hash="h3"))
+    ProfileOverlayStore(settings).save(ProfileOverlay(runtime_profile_id="rp-2", revision=4, config={"github": {"api_token": "SECRET"}, "proxy": {"enabled": True, "password": "SECRET", "url": "http://proxy.local"}, "aws": {"enabled": True, "domain": "HBEU", "username": "aws-user", "password": "SECRET"}}, applied_at="2026-01-01T00:00:00Z", generated_config_hash="h2", warnings=[], updated_sections=["llm"], env_path=str(env_path), env_hash="h3"))
 
     app = create_app(settings, opencode_client=FakeClient())
     c = TestClient(TestServer(app)); await c.start_server()

@@ -119,11 +119,11 @@ class OpenCodeProcessManager:
             await self.process.wait()
         return self.status_snapshot()
 
-    async def restart(self, env: dict[str, str] | None = None, *, reason: str = "runtime_profile_apply") -> dict:
-        # env=None reuses the most recent managed runtime env. Passing an
-        # explicit dict, including {}, replaces the cached managed env.
+    async def restart(self, *, reason: str = "watchdog") -> dict:
+        # Watchdog-only revive: config activation is restart-of-the-pod-only,
+        # so a managed restart always reuses the env from the boot-time start.
         await self.stop()
-        return await self.start(env, reason=reason)
+        return await self.start(None, reason=reason)
 
     async def run_watchdog(self, app=None, interval_seconds: float = 10, health_failures_before_restart: int = 3) -> None:
         consecutive_health_failures = 0

@@ -45,24 +45,22 @@ def sanitize_public_secrets(value: Any) -> Any:
 
 @dataclass(frozen=True)
 class ProfileOverlay:
+    """Boot record of the last env-payload projection.
+
+    Written unconditionally at every boot so a stale file can never report an
+    old revision. Config activation is restart-only; there is no apply
+    lifecycle (pending_restart/applied/health) to track anymore.
+    """
+
     runtime_profile_id: str | None
     revision: int | None
     config: dict[str, Any]
     applied_at: str
     generated_config_hash: str
-    status: str = "unknown"
-    pending_restart: bool = False
     warnings: list[str] = field(default_factory=list)
     updated_sections: list[str] = field(default_factory=list)
-    last_apply_error: str | None = None
-    applied: bool = False
     env_hash: str | None = None
     env_path: str | None = None
-    restart_performed: bool = False
-    opencode_pid: int | None = None
-    last_restart_at: str | None = None
-    last_restart_reason: str | None = None
-    health_ok: bool | None = None
     git_auth_configured: bool = False
     gh_host: str | None = None
     gh_config_dir: str | None = None
@@ -124,19 +122,10 @@ class ProfileOverlayStore:
             config=sanitize_profile_config_for_storage(config),
             applied_at=str(payload.get("applied_at") or ""),
             generated_config_hash=str(payload.get("generated_config_hash") or ""),
-            status=str(payload.get("status") or "unknown"),
-            pending_restart=bool(payload.get("pending_restart", False)),
             warnings=[str(x) for x in payload.get("warnings", []) if isinstance(x, str)],
             updated_sections=[str(x) for x in payload.get("updated_sections", []) if isinstance(x, str)],
-            last_apply_error=(str(payload.get("last_apply_error")) if payload.get("last_apply_error") is not None else None),
-            applied=bool(payload.get("applied", False)),
             env_hash=(str(payload.get("env_hash")) if payload.get("env_hash") is not None else None),
             env_path=(str(payload.get("env_path")) if payload.get("env_path") is not None else None),
-            restart_performed=bool(payload.get("restart_performed", False)),
-            opencode_pid=(int(payload.get("opencode_pid")) if payload.get("opencode_pid") is not None else None),
-            last_restart_at=(str(payload.get("last_restart_at")) if payload.get("last_restart_at") is not None else None),
-            last_restart_reason=(str(payload.get("last_restart_reason")) if payload.get("last_restart_reason") is not None else None),
-            health_ok=(bool(payload.get("health_ok")) if payload.get("health_ok") is not None else None),
             git_auth_configured=bool(payload.get("git_auth_configured", False)),
             gh_host=(str(payload.get("gh_host")) if payload.get("gh_host") is not None else None),
             gh_config_dir=(str(payload.get("gh_config_dir")) if payload.get("gh_config_dir") is not None else None),
@@ -164,27 +153,18 @@ class ProfileOverlayStore:
 def build_profile_status_payload(settings: Settings) -> dict[str, Any]:
     overlay = ProfileOverlayStore(settings).load()
     if not overlay:
-        return {"engine": "opencode", "status": "unknown", "applied": False, "pending_restart": False, "warnings": [], "updated_sections": [], "restart_required": False}
+        return {"engine": "opencode", "source": "boot", "runtime_profile_id": None, "revision": None, "warnings": [], "updated_sections": []}
     return {
         "engine": "opencode",
-        "status": overlay.status,
+        "source": "boot",
         "runtime_profile_id": overlay.runtime_profile_id,
         "revision": overlay.revision,
-        "applied": overlay.applied,
-        "pending_restart": overlay.pending_restart,
         "updated_sections": overlay.updated_sections,
         "config_hash": overlay.generated_config_hash,
         "warnings": overlay.warnings,
-        "last_apply_error": overlay.last_apply_error,
         "applied_at": overlay.applied_at,
-        "restart_required": overlay.pending_restart,
         "env_hash": overlay.env_hash,
         "env_path": overlay.env_path,
-        "restart_performed": overlay.restart_performed,
-        "opencode_pid": overlay.opencode_pid,
-        "last_restart_at": overlay.last_restart_at,
-        "last_restart_reason": overlay.last_restart_reason,
-        "health_ok": overlay.health_ok,
         "git_auth_configured": overlay.git_auth_configured,
         "gh_host": overlay.gh_host,
         "gh_config_dir": overlay.gh_config_dir,

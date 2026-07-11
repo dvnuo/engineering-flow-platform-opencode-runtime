@@ -11,7 +11,7 @@ def test_docs_contract_sections_and_keywords():
         '## Overview', '## Runtime topology', '## Non-goals', '## Required environment variables',
         '## Required mounted directories', '## Portal-facing endpoints', '## Internal-only OpenCode server',
         '## Skills asset mapping', '## State persistence contract',
-        '## Runtime profile apply/status contract', '## Runtime contract tests', '## Live LLM checks are opt-in',
+        '## Runtime profile boot/status contract', '## Runtime contract tests', '## Live LLM checks are opt-in',
         '## Failure modes and expected status',
     ]:
         assert section in runtime

@@ -347,24 +347,6 @@ class OpenCodeClient:
         except Exception as exc:
             return {"healthy": False, "error": str(exc)}
 
-    async def put_auth_info(self, provider: str, auth_info: Mapping[str, Any]) -> dict[str, Any]:
-        if not provider or not auth_info:
-            return {"success": False, "skipped": True}
-        url = f"{self.settings.opencode_url.rstrip('/')}/auth/{provider}"
-        try:
-            resp = await self._request("PUT", url, json=dict(auth_info), timeout=aiohttp.ClientTimeout(total=10))
-            try:
-                if 200 <= resp.status < 300:
-                    return {"success": True, "status": resp.status, "auth_type": auth_info.get("type")}
-                return {"success": False, "status": resp.status, "error": "auth update failed"}
-            finally:
-                await _close_owned_response(resp)
-        except Exception as exc:
-            return {"success": False, "error": _safe_error_preview(str(exc))}
-
-    async def put_auth(self, provider: str, api_key: str) -> dict[str, Any]:
-        return await self.put_auth_info(provider, {"type": "api", "key": api_key})
-
     async def list_commands(self, timeout_seconds: int = 30) -> list[dict[str, Any]]:
         data = await self._request_json(
             "GET",
@@ -407,19 +389,6 @@ class OpenCodeClient:
             json=payload,
             expected_statuses=(200,),
         )
-
-    async def patch_config(self, config: dict[str, Any]) -> dict[str, Any]:
-        url = f"{self.settings.opencode_url.rstrip('/')}/config"
-        try:
-            resp = await self._request("PATCH", url, json=config, timeout=aiohttp.ClientTimeout(total=10))
-            try:
-                if 200 <= resp.status < 300:
-                    return {"success": True, "status": resp.status}
-                return {"success": False, "pending_restart": True, "status": resp.status, "error": "config patch unsupported"}
-            finally:
-                await _close_owned_response(resp)
-        except Exception:
-            return {"success": False, "pending_restart": True, "error": "config patch unsupported"}
 
     async def mcp(self) -> dict[str, Any]:
         url = f"{self.settings.opencode_url.rstrip('/')}/mcp"
