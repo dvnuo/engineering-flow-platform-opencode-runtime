@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -89,12 +89,6 @@ class Settings:
     # It must never be used as a startup compatibility gate.
     opencode_version: str | None
     ready_timeout_seconds: int
-    atlassian_config_path: Path = field(
-        default_factory=lambda: Path(
-            os.getenv("ATLASSIAN_CONFIG")
-            or (Path(os.getenv("EFP_ADAPTER_STATE_DIR", "/root/.local/share/efp-compat")) / "atlassian" / "config.json")
-        )
-    )
     event_bridge_enabled: bool = True
     event_bridge_initial_backoff_seconds: float = 1.0
     event_bridge_max_backoff_seconds: float = 30.0
@@ -136,7 +130,6 @@ class Settings:
             browserstack_local_binary_path=Path(os.getenv("BROWSERSTACK_LOCAL_BINARY", "/usr/local/bin/BrowserStackLocal")),
             opencode_version=(os.getenv("OPENCODE_VERSION") or None),
             ready_timeout_seconds=int(os.getenv("EFP_OPENCODE_READY_TIMEOUT_SECONDS", "60")),
-            atlassian_config_path=Path(os.getenv("ATLASSIAN_CONFIG") or (adapter_state_dir / "atlassian" / "config.json")),
             event_bridge_enabled=_env_bool("EFP_OPENCODE_EVENT_BRIDGE_ENABLED", True),
             event_bridge_initial_backoff_seconds=float(os.getenv("EFP_OPENCODE_EVENT_BRIDGE_INITIAL_BACKOFF_SECONDS", "1.0")),
             event_bridge_max_backoff_seconds=float(os.getenv("EFP_OPENCODE_EVENT_BRIDGE_MAX_BACKOFF_SECONDS", "30.0")),
