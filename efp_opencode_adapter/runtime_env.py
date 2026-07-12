@@ -12,6 +12,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from .path_utils import path_exists
 from .settings import Settings
+from .tools_config_env import build_cli_env
 
 SECRET_MARKERS = ("TOKEN", "PASSWORD", "SECRET", "API_KEY", "ACCESS", "REFRESH", "AUTHORIZATION")
 AWS_AUTH_DEFAULT_COMMAND = "aws-auth"
@@ -36,12 +37,18 @@ MANAGED_EXTERNAL_ENV_KEYS = {
 }
 _VERSIONED_JAVA_HOME_RE = re.compile(r"^(JAVA|JDK)\d+_HOME$")
 _REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
+# EFP_-prefixed indexed convention families now feed the shared Go CLIs
+# (tools_config_env.build_cli_env). Strip any ambient/stale ones by prefix so a
+# previous image's values can't leak past the freshly-built managed env.
+MANAGED_EXTERNAL_ENV_PREFIXES = ("EFP_JIRA_", "EFP_CONFLUENCE_", "EFP_JENKINS_")
 
 
 def _is_managed_external_env_key(key: str) -> bool:
     if key.startswith("AWS_"):
         return True
     if key in MANAGED_EXTERNAL_ENV_KEYS:
+        return True
+    if key.startswith(MANAGED_EXTERNAL_ENV_PREFIXES):
         return True
     return bool(_VERSIONED_JAVA_HOME_RE.match(key) and key not in {"JAVA21_HOME", "JDK21_HOME"})
 
@@ -288,10 +295,6 @@ def ensure_opencode_xdg_data_home(settings: Settings) -> Path:
     return xdg_home
 
 
-def _trim_url(url: str) -> str:
-    return url.rstrip("/")
-
-
 def _inject_proxy_auth(url: str, username: str | None, password: str | None) -> str:
     if not username and not password:
         return url
@@ -313,9 +316,9 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         "OPENCODE_CONFIG": str(settings.opencode_config_path),
         "OPENCODE_DATA_DIR": str(settings.opencode_data_dir),
         "XDG_DATA_HOME": str(xdg_data_home),
-        # atlassian config now lives in the shared EFP config file; keep both
-        # env vars pointing at it so any resolution order finds jira/confluence.
-        "ATLASSIAN_CONFIG": str(settings.efp_config_path),
+        # jira/confluence/jenkins reach the Go CLIs through the EFP_-prefixed env
+        # convention (see tools_config_env.build_cli_env, merged in below); aws
+        # and mobile-auto still resolve config from this shared file.
         "EFP_CONFIG": str(settings.efp_config_path),
         "EFP_RUNTIME_TYPE": "opencode",
         "EFP_WORKSPACE_DIR": str(settings.workspace_dir),
@@ -386,7 +389,6 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
 
     if github_token:
         env["GITHUB_TOKEN"] = github_token
-        env["GITHUB_ACCESS_TOKEN"] = github_token
         env["GH_TOKEN"] = github_token
         env["GITHUB_API_BASE_URL"] = github_api_base_url
         env["GH_HOST"] = github_host
@@ -395,97 +397,20 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
         if not _is_github_dotcom_like(github_host):
             env["GH_ENTERPRISE_TOKEN"] = github_token
             env["GITHUB_ENTERPRISE_TOKEN"] = github_token
-        normalized_github = {
-            "enabled": True,
-            "api_token": github_token,
-            "base_url": github_api_base_url,
-            "api_base_url": github_api_base_url,
-            "host": github_host,
-            "username": github_username,
-        }
-        env["EFP_GITHUB_CONFIG_JSON"] = json.dumps(normalized_github, ensure_ascii=False, separators=(",", ":"))
         updated.append("github")
     elif github_enabled:
         warnings.append("github enabled but no token provided")
 
-    def _apply_instance(section: str, prefix: str, project_key: str) -> None:
-        source = cfg.get(section) if isinstance(cfg.get(section), dict) else {}
-        if not _section_enabled(source):
-            return
-        instances = source.get("instances") if isinstance(source.get("instances"), list) else None
-        if not isinstance(instances, list):
-            return
-        safe_instances = []
-        for item in instances:
-            if not isinstance(item, dict):
-                continue
-            if item.get("enabled") is False:
-                continue
-            raw_url = str(item.get("url") or "").strip()
-            if not raw_url:
-                continue
-            username = str(item.get("username") or item.get("email") or "").strip()
-            api_token = _clean_secret(item.get("api_token") or item.get("token"))
-            password = _clean_secret(item.get("password"))
-            credential_present = bool(api_token or password)
-            if not credential_present:
-                continue
-            safe_item = {
-                "enabled": True,
-                "url": _trim_url(raw_url),
-            }
-            if api_token:
-                safe_item["token"] = api_token
-            if password:
-                safe_item["password"] = password
-            if item.get("name"):
-                safe_item["name"] = str(item.get("name"))
-            if username:
-                safe_item["username"] = username
-            if project_key == "project":
-                proj = item.get("project") or item.get("project_key")
-                if proj:
-                    safe_item["project"] = str(proj)
-            else:
-                space = item.get("space") or item.get("space_key")
-                if space:
-                    safe_item["space"] = str(space)
-            if password and not username and not api_token:
-                continue
-            if section == "jira":
-                api_version_raw = str(item.get("api_version") or "").strip()
-                if api_version_raw in {"2", "3"}:
-                    safe_item["api_version"] = api_version_raw
-                elif username and password and not api_token:
-                    safe_item["api_version"] = "2"
-                else:
-                    safe_item["api_version"] = "3"
-            safe_instances.append(safe_item)
-        if not safe_instances:
-            warnings.append(f"{section} enabled but no valid instance credential")
-            return
-        selected = safe_instances[0]
-        env[f"{prefix}_BASE_URL"] = selected["url"]
-        username = str(selected.get("username") or "").strip()
-        api_token = _clean_secret(selected.get("token"))
-        password = _clean_secret(selected.get("password"))
-        if username and api_token:
-            env[f"{prefix}_EMAIL"] = username
-            env[f"{prefix}_API_TOKEN"] = api_token
-        elif username and password:
-            env[f"{prefix}_USERNAME"] = username
-            env[f"{prefix}_PASSWORD"] = password
-        elif api_token:
-            env[f"{prefix}_TOKEN"] = api_token
-        else:
-            return
-        if selected.get(project_key):
-            env[f"{prefix}_{'PROJECT_KEY' if project_key == 'project' else 'SPACE_KEY'}"] = str(selected.get(project_key))
-        env[f"EFP_{prefix}_INSTANCES_JSON"] = json.dumps(safe_instances, ensure_ascii=False, separators=(",", ":"))
-        updated.append(section)
-
-    _apply_instance("jira", "JIRA", "project")
-    _apply_instance("confluence", "CONFLUENCE", "space")
+    # jira/confluence/jenkins are projected into the EFP_-prefixed indexed env
+    # convention consumed by the shared Go CLIs (byte-identical to native). This
+    # replaces the former flat JIRA_*/CONFLUENCE_* exports and the config.yaml
+    # file write; the CLIs decode EFP_<PATH> vars directly.
+    cli_env = build_cli_env(cfg)
+    if cli_env:
+        env.update(cli_env)
+        for section in ("jira", "confluence", "jenkins"):
+            if any(key.startswith(f"EFP_{section.upper()}_") for key in cli_env):
+                updated.append(section)
 
     aws = cfg.get("aws") if isinstance(cfg.get("aws"), dict) else {}
     aws_section_present = isinstance(cfg.get("aws"), dict)
@@ -506,21 +431,6 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
             updated.append("aws")
         else:
             warnings.append("aws enabled but domain, username, and password are required")
-
-    jenkins = cfg.get("jenkins") if isinstance(cfg.get("jenkins"), dict) else {}
-    jenkins_section_present = isinstance(cfg.get("jenkins"), dict)
-    jenkins_enabled = jenkins_section_present and _section_enabled(jenkins)
-    if jenkins_enabled:
-        jenkins_username = _first_text(jenkins.get("username"))
-        jenkins_password = _first_clean_secret(jenkins.get("password"))
-        if jenkins_username and jenkins_password:
-            env["EFP_JENKINS_USERNAME"] = jenkins_username
-            env["EFP_JENKINS_PASSWORD"] = jenkins_password
-            env["JENKINS_USERNAME"] = jenkins_username
-            env["JENKINS_PASSWORD"] = jenkins_password
-            updated.append("jenkins")
-        else:
-            warnings.append("jenkins enabled but username and password are required")
 
     mobile = cfg.get("mobile-auto") if isinstance(cfg.get("mobile-auto"), dict) else {}
     mobile_section_present = isinstance(cfg.get("mobile-auto"), dict)

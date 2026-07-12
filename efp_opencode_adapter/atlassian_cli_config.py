@@ -1,25 +1,18 @@
+"""Build redacted jira/confluence status for reporting.
+
+jira/confluence config no longer reaches the Go CLIs through a config.yaml file
+write; it is projected into the EFP_-prefixed env convention by
+``tools_config_env.build_cli_env`` (merged into the managed child env by
+``runtime_env.build_runtime_env_from_config``). This module now only derives the
+redacted status / instance counts surfaced in the boot-projection reporting.
+"""
+
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass, replace
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
-import yaml
-
-from .settings import Settings
-
 _REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
-
-
-def _read_yaml_mapping(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
 
 
 @dataclass(frozen=True)
@@ -186,57 +179,3 @@ def build_atlassian_cli_config(runtime_config: dict) -> tuple[dict, AtlassianCLI
         redacted_status=status,
     )
     return config, result
-
-
-def _chmod_best_effort(path: Path, mode: int, warnings: list[str], warning: str) -> None:
-    try:
-        path.chmod(mode)
-    except OSError:
-        warnings.append(warning)
-
-
-def write_atlassian_cli_config(settings: Settings, runtime_config: dict) -> AtlassianCLIConfigResult:
-    config, result = build_atlassian_cli_config(runtime_config)
-    # Merge jira/confluence into the shared EFP config file (what EFP_CONFIG
-    # points to and every CLI resolves first), mirroring how the mobile-auto
-    # section is written. Previously this was a separate JSON under
-    # ATLASSIAN_CONFIG, which EFP_CONFIG outranks -- so the CLI never saw it and
-    # confluence/jira failed. RootConfig is one multi-section schema, so
-    # co-locating jira/confluence next to mobile-auto/aws is the expected shape.
-    path = settings.efp_config_path
-    warnings = list(result.warnings)
-    env = {"ATLASSIAN_CONFIG": str(path)}
-
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _chmod_best_effort(path.parent, 0o700, warnings, "unable to set EFP config directory permissions")
-    except OSError as exc:
-        raise OSError("unable to create EFP config directory") from exc
-
-    existing = _read_yaml_mapping(path)
-    existing.pop("jira", None)
-    existing.pop("confluence", None)
-    if result.configured:
-        for section in ("jira", "confluence"):
-            if config.get(section):
-                existing[section] = config[section]
-        if not existing.get("version"):
-            existing["version"] = config.get("version", 1)
-
-    # Never delete the shared file just because atlassian is empty -- it may
-    # still hold mobile-auto/aws. Only remove it if the merge left it empty.
-    if existing:
-        tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp_path.write_text(
-            yaml.safe_dump(existing, sort_keys=False, allow_unicode=True), encoding="utf-8"
-        )
-        _chmod_best_effort(tmp_path, 0o600, warnings, "unable to set EFP config file permissions")
-        tmp_path.replace(path)
-        _chmod_best_effort(path, 0o600, warnings, "unable to set EFP config file permissions")
-    elif path.exists():
-        try:
-            path.unlink()
-        except OSError:
-            warnings.append("unable to remove stale EFP config file")
-
-    return replace(result, path=str(path), env=env, warnings=warnings)

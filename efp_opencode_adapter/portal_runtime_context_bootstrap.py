@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .atlassian_cli_config import write_atlassian_cli_config
+from .atlassian_cli_config import build_atlassian_cli_config
 from .opencode_config import build_opencode_config, write_opencode_config
 from .opencode_auth import build_opencode_auth_from_runtime_config, clear_opencode_auth_provider
 from .copilot_plugin_auth import redact_copilot_secrets, save_or_clear_copilot_plugin_credential
@@ -106,12 +106,14 @@ def apply_boot_projection(settings: Settings, payload: dict[str, Any]) -> BootPr
     if auth_build.warning:
         warnings.append(auth_build.warning)
 
-    atlassian_result = write_atlassian_cli_config(settings, runtime_config)
+    # jira/confluence no longer write a config.yaml file; they are projected
+    # into the EFP_-prefixed env by build_runtime_env_from_config. This only
+    # derives the redacted status / instance counts for reporting.
+    _, atlassian_result = build_atlassian_cli_config(runtime_config)
     warnings.extend([item for item in atlassian_result.warnings if item not in warnings])
     if atlassian_result.configured and "atlassian" not in updated_sections:
         updated_sections.append("atlassian")
     env_result = build_runtime_env_from_config(settings, runtime_config)
-    env_result.env.update(atlassian_result.env)
     warnings.extend([item for item in env_result.warnings if item not in warnings])
     mobile_result = write_mobile_cli_config(settings, runtime_config)
     env_result.env.update(mobile_result.env)

@@ -1,11 +1,8 @@
 import json
-import stat
-from pathlib import Path
 
 import pytest
 
-from efp_opencode_adapter.atlassian_cli_config import build_atlassian_cli_config, write_atlassian_cli_config
-from efp_opencode_adapter.settings import Settings
+from efp_opencode_adapter.atlassian_cli_config import build_atlassian_cli_config
 
 
 def test_jira_username_password_becomes_basic_password():
@@ -68,20 +65,17 @@ def test_redacted_secret_strings_are_ignored():
     assert result.jira_instances == 0
 
 
-def test_write_config_uses_private_file_mode(tmp_path, monkeypatch):
-    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
-    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("ATLASSIAN_CONFIG", str(tmp_path / "home" / ".config" / "atlassian" / "config.json"))
-    settings = Settings.from_env()
-
-    result = write_atlassian_cli_config(settings, {
+def test_build_atlassian_cli_config_writes_no_file_and_returns_empty_env(tmp_path):
+    # jira/confluence are no longer written to any config file; the builder only
+    # derives reporting status now, so it must not touch the filesystem.
+    _, result = build_atlassian_cli_config({
         "jira": {"enabled": True, "instances": [{"name": "jira-main", "url": "https://jira.example", "token": "secret"}]},
     })
 
-    path = Path(result.path)
-    assert path.exists()
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert result.env == {"ATLASSIAN_CONFIG": str(path)}
+    assert result.configured is True
+    assert result.path == ""
+    assert result.env == {}
+    assert not list(tmp_path.iterdir())
 
 
 def test_redacted_status_never_contains_secret_values():

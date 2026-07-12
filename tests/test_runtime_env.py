@@ -71,6 +71,7 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
         },
         "jenkins": {
             "enabled": True,
+            "url": "https://ci.example/",
             "username": "jenkins-user",
             "password": "jenkins-password",
         },
@@ -88,7 +89,12 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
         "debug": {"enabled": True, "log_level": "DEBUG"},
     }
     r = build_runtime_env_from_config(s, cfg)
-    assert r.env["JIRA_EMAIL"] == "u" and r.env["JIRA_API_TOKEN"] == "x" and "JIRA_TOKEN" not in r.env
+    # jira/confluence/jenkins now flow through the EFP_-prefixed convention, not
+    # the old flat JIRA_*/CONFLUENCE_* vars.
+    assert r.env["EFP_JIRA_INSTANCES_0_BASE_URL"] == "https://j"
+    assert r.env["EFP_JIRA_INSTANCES_0_AUTH_USERNAME"] == "u"
+    assert r.env["EFP_JIRA_INSTANCES_0_AUTH_API_KEY"] == "x"
+    assert "JIRA_EMAIL" not in r.env and "JIRA_API_TOKEN" not in r.env
     aws_credentials = Path(r.env["AWS_SHARED_CREDENTIALS_FILE"])
     efp_config = Path(r.env["EFP_CONFIG"])
     assert "AWS_CONFIG_FILE" not in r.env
@@ -122,10 +128,10 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     assert "aws-user" in efp_config_text
     assert "aws-password" in efp_config_text
     assert "jenkins:" not in efp_config_text
-    assert r.env["EFP_JENKINS_USERNAME"] == "jenkins-user"
-    assert r.env["EFP_JENKINS_PASSWORD"] == "jenkins-password"
-    assert r.env["JENKINS_USERNAME"] == "jenkins-user"
-    assert r.env["JENKINS_PASSWORD"] == "jenkins-password"
+    assert r.env["EFP_JENKINS_INSTANCES_0_BASE_URL"] == "https://ci.example"
+    assert r.env["EFP_JENKINS_INSTANCES_0_AUTH_USERNAME"] == "jenkins-user"
+    assert r.env["EFP_JENKINS_INSTANCES_0_AUTH_PASSWORD"] == "jenkins-password"
+    assert "EFP_JENKINS_USERNAME" not in r.env and "JENKINS_USERNAME" not in r.env
     assert r.env["BROWSERSTACK_USERNAME"] == "bs-user"
     assert r.env["BROWSERSTACK_ACCESS_KEY"] == "bs-access-key"
     assert r.env["MOBILE_AUTO_STATE_DIR"] == str(s.mobile_state_dir)
@@ -138,8 +144,7 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
         assert oct(os.stat(p).st_mode & 0o777) == "0o600"
     redacted = redact_env_for_status(r.env)
     assert redacted["GITHUB_TOKEN"] is True
-    assert redacted["EFP_JENKINS_PASSWORD"] is True
-    assert redacted["JENKINS_PASSWORD"] is True
+    assert redacted["EFP_JENKINS_INSTANCES_0_AUTH_PASSWORD"] is True
     assert redacted["BROWSERSTACK_ACCESS_KEY"] is True
     assert redacted["HTTPS_PROXY"] == "http://[redacted]@h:1"
     assert "aws-password" not in json.dumps(redacted)
@@ -170,8 +175,10 @@ def test_runtime_env_respects_disabled_external_sections(tmp_path, monkeypatch):
         "jenkins": {"enabled": False, "username": "u", "password": "p"},
     }
     env = build_runtime_env_from_config(s, cfg).env
-    for key in ("GITHUB_TOKEN", "EFP_GITHUB_CONFIG_JSON", "JIRA_BASE_URL", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_BASE_URL", "EFP_CONFLUENCE_INSTANCES_JSON", "AWS_SHARED_CREDENTIALS_FILE", "EFP_JENKINS_USERNAME", "EFP_JENKINS_PASSWORD", "JENKINS_USERNAME", "JENKINS_PASSWORD", "BROWSERSTACK_USERNAME", "BROWSERSTACK_ACCESS_KEY"):
+    for key in ("GITHUB_TOKEN", "AWS_SHARED_CREDENTIALS_FILE", "BROWSERSTACK_USERNAME", "BROWSERSTACK_ACCESS_KEY"):
         assert key not in env
+    # No EFP_ jira/confluence/jenkins vars are emitted for disabled sections.
+    assert not any(key.startswith(("EFP_JIRA_", "EFP_CONFLUENCE_", "EFP_JENKINS_")) for key in env)
     assert env["EFP_CONFIG"] == str(s.efp_config_path)
     assert env["MOBILE_AUTO_STATE_DIR"] == str(s.mobile_state_dir)
 
@@ -187,17 +194,16 @@ def test_runtime_env_github_base_url_alias_and_api_token_aliases(tmp_path, monke
     s = _settings(tmp_path, monkeypatch)
     env = build_runtime_env_from_config(s, {"github": {"enabled": True, "base_url": "https://ghe.example/api/v3/", "api_token": "ghx"}}).env
     assert env["GITHUB_API_BASE_URL"] == "https://ghe.example/api/v3"
-    cfg_json = json.loads(env["EFP_GITHUB_CONFIG_JSON"])
-    assert cfg_json["base_url"] == "https://ghe.example/api/v3"
-    assert cfg_json["api_base_url"] == "https://ghe.example/api/v3"
+    assert env["GH_HOST"] == "ghe.example"
+    # EFP_GITHUB_CONFIG_JSON was a dead var never read by any CLI; it is gone.
+    assert "EFP_GITHUB_CONFIG_JSON" not in env
 
 
-def test_runtime_env_does_not_export_redacted_placeholders(tmp_path, monkeypatch):
+def test_runtime_env_github_does_not_export_redacted_placeholder(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
-    cfg = {"github": {"enabled": True, "api_token": "***REDACTED***"}, "jira": {"instances": [{"url": "https://j", "token": "[redacted]"}]}}
-    env = build_runtime_env_from_config(s, cfg).env
+    env = build_runtime_env_from_config(s, {"github": {"enabled": True, "api_token": "***REDACTED***"}}).env
     assert "GITHUB_TOKEN" not in env
-    assert "JIRA_TOKEN" not in env and "JIRA_API_TOKEN" not in env
+    assert "GH_TOKEN" not in env
 
 
 def test_empty_config_does_not_emit_external_json(tmp_path, monkeypatch):
@@ -205,8 +211,7 @@ def test_empty_config_does_not_emit_external_json(tmp_path, monkeypatch):
     env = build_runtime_env_from_config(s, {}).env
     assert "EFP_GITHUB_CONFIG_JSON" not in env
     assert "GITHUB_API_BASE_URL" not in env
-    assert "EFP_JIRA_INSTANCES_JSON" not in env
-    assert "EFP_CONFLUENCE_INSTANCES_JSON" not in env
+    assert not any(key.startswith(("EFP_JIRA_", "EFP_CONFLUENCE_", "EFP_JENKINS_")) for key in env)
     assert env["EFP_CONFIG"] == str(s.efp_config_path)
     assert env["MOBILE_AUTO_STATE_DIR"] == str(s.mobile_state_dir)
     assert env["MOBILE_AUTO_ARTIFACTS_DIR"] == str(s.mobile_artifacts_dir)
@@ -228,19 +233,28 @@ def test_runtime_env_aws_requires_all_portal_fields(tmp_path, monkeypatch):
     assert "AWS_SHARED_CREDENTIALS_FILE" not in env
 
 
-def test_runtime_env_jenkins_requires_username_and_password(tmp_path, monkeypatch):
+def test_runtime_env_jenkins_projects_efp_instance(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     result = build_runtime_env_from_config(
         s,
-        {
-            "jenkins": {
-                "enabled": True,
-                "username": "alice",
-            }
-        },
+        {"jenkins": {"enabled": True, "url": "https://ci.local/", "username": "alice", "password": "pw"}},
+    )
+    assert result.env["EFP_JENKINS_DEFAULT_INSTANCE"] == "jenkins"
+    assert result.env["EFP_JENKINS_INSTANCES_0_BASE_URL"] == "https://ci.local"
+    assert result.env["EFP_JENKINS_INSTANCES_0_AUTH_TYPE"] == "basic_password"
+    assert result.env["EFP_JENKINS_INSTANCES_0_AUTH_USERNAME"] == "alice"
+    assert result.env["EFP_JENKINS_INSTANCES_0_AUTH_PASSWORD"] == "pw"
+    assert "jenkins" in result.updated_sections
+
+
+def test_runtime_env_jenkins_without_base_url_is_dropped(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    result = build_runtime_env_from_config(
+        s,
+        {"jenkins": {"enabled": True, "username": "alice", "password": "pw"}},
     )
     assert result.env["EFP_CONFIG"] == str(s.efp_config_path)
-    assert "jenkins enabled but username and password are required" in result.warnings
+    assert not any(key.startswith("EFP_JENKINS_") for key in result.env)
 
 
 def test_runtime_env_aws_auth_failure_redacts_password(tmp_path, monkeypatch):
@@ -302,116 +316,69 @@ def test_redacted_github_placeholder_not_in_json_or_env(tmp_path, monkeypatch):
     assert "***REDACTED***" not in text
 
 
-def test_redacted_atlassian_placeholder_not_in_json_or_env(tmp_path, monkeypatch):
+def test_atlassian_username_api_token_projects_basic_api_key(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     cfg = {
-        "jira": {"enabled": True, "instances": [{"url": "https://j", "username": "u", "token": "[redacted]"}]},
-        "confluence": {"enabled": True, "instances": [{"url": "https://c/wiki", "username": "u", "token": "REDACTED"}]},
+        "jira": {"enabled": True, "instances": [{"name": "j", "url": "https://j/", "username": "j@example.com", "api_token": "jt", "api_version": "3"}]},
+        "confluence": {"enabled": True, "instances": [{"name": "c", "url": "https://c/wiki/", "username": "c@example.com", "api_token": "ct"}]},
     }
     env = build_runtime_env_from_config(s, cfg).env
-    text = json.dumps(env)
-    assert "JIRA_BASE_URL" not in env
-    assert "EFP_JIRA_INSTANCES_JSON" not in env
-    assert "CONFLUENCE_BASE_URL" not in env
-    assert "EFP_CONFLUENCE_INSTANCES_JSON" not in env
-    assert "[redacted]" not in text
-    assert "REDACTED" not in text
+    assert env["EFP_JIRA_INSTANCES_0_BASE_URL"] == "https://j"
+    assert env["EFP_JIRA_INSTANCES_0_API_VERSION"] == "3"
+    assert env["EFP_JIRA_INSTANCES_0_AUTH_TYPE"] == "basic_api_key"
+    assert env["EFP_JIRA_INSTANCES_0_AUTH_USERNAME"] == "j@example.com"
+    assert env["EFP_JIRA_INSTANCES_0_AUTH_API_KEY"] == "jt"
+    assert env["EFP_CONFLUENCE_INSTANCES_0_BASE_URL"] == "https://c/wiki"
+    assert env["EFP_CONFLUENCE_INSTANCES_0_AUTH_TYPE"] == "basic_api_key"
+    assert env["EFP_CONFLUENCE_INSTANCES_0_AUTH_API_KEY"] == "ct"
+    # The former flat JIRA_*/CONFLUENCE_* + EFP_*_INSTANCES_JSON vars are gone.
+    for key in ("JIRA_EMAIL", "JIRA_API_TOKEN", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_EMAIL", "CONFLUENCE_API_TOKEN", "EFP_CONFLUENCE_INSTANCES_JSON"):
+        assert key not in env
 
 
-def test_atlassian_aliases_still_work(tmp_path, monkeypatch):
+def test_jira_username_password_projects_basic_password_and_default_api_version(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     cfg = {
-        "jira": {"enabled": True, "instances": [{"url": "https://j/", "email": "j@example.com", "api_token": "jt", "project_key": "PROJ"}]},
-        "confluence": {"enabled": True, "instances": [{"url": "https://c/wiki/", "email": "c@example.com", "api_token": "ct", "space_key": "SPACE"}]},
+        "jira": {"enabled": True, "instances": [{"url": "https://jira.local", "username": "alice", "password": "pw", "project": "ENG"}]},
     }
     env = build_runtime_env_from_config(s, cfg).env
-    assert env["JIRA_EMAIL"] == "j@example.com" and env["JIRA_API_TOKEN"] == "jt" and env["JIRA_PROJECT_KEY"] == "PROJ"
-    assert env["CONFLUENCE_EMAIL"] == "c@example.com" and env["CONFLUENCE_API_TOKEN"] == "ct" and env["CONFLUENCE_SPACE_KEY"] == "SPACE"
-    jira_json = json.loads(env["EFP_JIRA_INSTANCES_JSON"])[0]
-    conf_json = json.loads(env["EFP_CONFLUENCE_INSTANCES_JSON"])[0]
-    assert jira_json == {"enabled": True, "url": "https://j", "token": "jt", "username": "j@example.com", "project": "PROJ", "api_version": "3"}
-    assert conf_json == {"enabled": True, "url": "https://c/wiki", "token": "ct", "username": "c@example.com", "space": "SPACE"}
+    assert env["EFP_JIRA_INSTANCES_0_AUTH_TYPE"] == "basic_password"
+    assert env["EFP_JIRA_INSTANCES_0_AUTH_USERNAME"] == "alice"
+    assert env["EFP_JIRA_INSTANCES_0_AUTH_PASSWORD"] == "pw"
+    # Native defaults api_version to "2" unless explicitly "3".
+    assert env["EFP_JIRA_INSTANCES_0_API_VERSION"] == "2"
+    assert env["EFP_JIRA_INSTANCES_0_REST_PATH"] == "/rest/api/2"
+    assert "JIRA_USERNAME" not in env and "JIRA_PASSWORD" not in env
 
 
-def test_uppercase_bracket_redacted_placeholder_not_exported(tmp_path, monkeypatch):
+def test_confluence_username_password_projects_basic_password(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     cfg = {
-        "github": {"enabled": True, "api_token": "[REDACTED]", "base_url": "https://ghe"},
-        "jira": {"enabled": True, "instances": [{"url": "https://j", "username": "u", "token": "[REDACTED]"}]},
-        "confluence": {"enabled": True, "instances": [{"url": "https://c/wiki", "username": "u", "token": "[REDACTED]"}]},
+        "confluence": {"enabled": True, "instances": [{"url": "https://confluence.local", "username": "alice", "password": "pw", "space": "DOCS"}]},
     }
     env = build_runtime_env_from_config(s, cfg).env
-    text = json.dumps(env)
-    assert "GITHUB_TOKEN" not in env
-    assert "EFP_GITHUB_CONFIG_JSON" not in env
-    assert "JIRA_BASE_URL" not in env
-    assert "EFP_JIRA_INSTANCES_JSON" not in env
-    assert "CONFLUENCE_BASE_URL" not in env
-    assert "EFP_CONFLUENCE_INSTANCES_JSON" not in env
-    assert "[REDACTED]" not in text
+    assert env["EFP_CONFLUENCE_INSTANCES_0_AUTH_TYPE"] == "basic_password"
+    assert env["EFP_CONFLUENCE_INSTANCES_0_AUTH_USERNAME"] == "alice"
+    assert env["EFP_CONFLUENCE_INSTANCES_0_AUTH_PASSWORD"] == "pw"
+    assert "CONFLUENCE_USERNAME" not in env and "CONFLUENCE_PASSWORD" not in env
 
-
-
-def test_jira_username_password_exports_password_not_api_token(tmp_path, monkeypatch):
-    s = _settings(tmp_path, monkeypatch)
-    cfg = {
-        "jira": {
-            "enabled": True,
-            "instances": [{"url": "https://jira.local", "username": "alice", "password": "pw", "project": "ENG"}],
-        }
-    }
-    env = build_runtime_env_from_config(s, cfg).env
-    assert env["JIRA_USERNAME"] == "alice"
-    assert env["JIRA_PASSWORD"] == "pw"
-    assert "JIRA_EMAIL" not in env
-    assert "JIRA_API_TOKEN" not in env
-    jira_json = json.loads(env["EFP_JIRA_INSTANCES_JSON"])[0]
-    assert jira_json["username"] == "alice"
-    assert jira_json["password"] == "pw"
-    assert "token" not in jira_json
-    assert jira_json["api_version"] == "2"
-
-
-def test_jira_username_api_token_exports_email_api_token(tmp_path, monkeypatch):
-    s = _settings(tmp_path, monkeypatch)
-    cfg = {
-        "jira": {
-            "enabled": True,
-            "instances": [{"url": "https://site.atlassian.net", "username": "alice@example.com", "api_token": "api-token", "project_key": "ENG"}],
-        }
-    }
-    env = build_runtime_env_from_config(s, cfg).env
-    assert env["JIRA_EMAIL"] == "alice@example.com"
-    assert env["JIRA_API_TOKEN"] == "api-token"
-    assert "JIRA_PASSWORD" not in env
-    jira_json = json.loads(env["EFP_JIRA_INSTANCES_JSON"])[0]
-    assert jira_json["token"] == "api-token"
-    assert "password" not in jira_json
-    assert jira_json["api_version"] == "3"
-
-
-def test_confluence_username_password_exports_password_not_api_token(tmp_path, monkeypatch):
-    s = _settings(tmp_path, monkeypatch)
-    cfg = {
-        "confluence": {
-            "enabled": True,
-            "instances": [{"url": "https://confluence.local", "username": "alice", "password": "pw", "space": "DOCS"}],
-        }
-    }
-    env = build_runtime_env_from_config(s, cfg).env
-    assert env["CONFLUENCE_USERNAME"] == "alice"
-    assert env["CONFLUENCE_PASSWORD"] == "pw"
-    assert "CONFLUENCE_EMAIL" not in env
-    assert "CONFLUENCE_API_TOKEN" not in env
-    conf_json = json.loads(env["EFP_CONFLUENCE_INSTANCES_JSON"])[0]
-    assert conf_json["password"] == "pw"
-    assert "token" not in conf_json
 
 def test_strip_managed_external_env_removes_old_secret_but_keeps_path(monkeypatch):
     monkeypatch.setenv("JIRA_TOKEN", "old")
     monkeypatch.setenv("PATH", "/usr/bin")
     stripped = strip_managed_external_env(os.environ)
     assert "JIRA_TOKEN" not in stripped
+    assert stripped["PATH"] == "/usr/bin"
+
+
+def test_strip_managed_external_env_removes_efp_convention_prefixes(monkeypatch):
+    monkeypatch.setenv("EFP_JIRA_INSTANCES_0_AUTH_TOKEN", "stale")
+    monkeypatch.setenv("EFP_CONFLUENCE_INSTANCES_0_BASE_URL", "https://stale")
+    monkeypatch.setenv("EFP_JENKINS_DEFAULT_INSTANCE", "stale")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    stripped = strip_managed_external_env(os.environ)
+    for key in ("EFP_JIRA_INSTANCES_0_AUTH_TOKEN", "EFP_CONFLUENCE_INSTANCES_0_BASE_URL", "EFP_JENKINS_DEFAULT_INSTANCE"):
+        assert key not in stripped
     assert stripped["PATH"] == "/usr/bin"
 
 
