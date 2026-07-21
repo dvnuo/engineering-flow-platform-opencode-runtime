@@ -20,6 +20,7 @@ from .opencode_auth import build_opencode_auth_from_runtime_config, clear_openco
 from .copilot_plugin_auth import redact_copilot_secrets, save_or_clear_copilot_plugin_credential
 from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_profile_config_for_storage
 from .runtime_env import aws_status_from_env, build_runtime_env_from_config, write_runtime_env_file
+from .runtime_profile_projection import project_canonical_for_runtime
 from .git_cli_auth import write_git_gh_auth_assets
 from .mobile_cli_config import write_mobile_cli_config
 from .settings import Settings, load_profile_env_payload
@@ -72,10 +73,17 @@ def apply_boot_projection(settings: Settings, payload: dict[str, Any]) -> BootPr
     """Project the parsed apply-payload dict into files and the managed child env.
 
     ``payload`` is the full apply-payload JSON from EFP_PROFILE_CONFIG:
-    ``{"runtime_profile_id", "name", "revision", "runtime_type", "config": {...}}``.
-    An empty ``config`` is a fully valid profile (run with base config).
+    ``{"runtime_profile_id", "name", "revision", "config": {...}}``. The Secret
+    now stores ONE runtime-agnostic canonical ``config`` (no ``runtime_type``
+    field); this adapter applies the opencode projection to it below. An empty
+    ``config`` is a fully valid profile (run with base config).
     """
     runtime_config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    # Apply the opencode projection to the canonical config at boot. This
+    # transforms the LLM into the opencode form (provider ``github-copilot``,
+    # model ``github-copilot/<model>``) that downstream opencode.json / auth
+    # building expects — restoring what the portal used to bake into the Secret.
+    runtime_config = project_canonical_for_runtime(runtime_config, "opencode")
     runtime_profile_id = payload.get("runtime_profile_id")
     revision = payload.get("revision")
 

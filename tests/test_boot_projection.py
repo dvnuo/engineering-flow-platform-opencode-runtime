@@ -7,6 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.copilot_plugin_auth import copilot_plugin_auth_path
 from efp_opencode_adapter.portal_runtime_context_bootstrap import apply_boot_projection, run_boot_projection_from_env
 from efp_opencode_adapter.profile_store import ProfileOverlayStore
+from efp_opencode_adapter.runtime_profile_projection import project_canonical_for_runtime
 from efp_opencode_adapter.runtime_env import strip_managed_external_env
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import (
@@ -56,6 +57,43 @@ class FakeProcessManager:
 
     def status_snapshot(self):
         return {"managed": True}
+
+
+def test_project_canonical_transforms_copilot_llm_to_opencode_form():
+    canonical = {"llm": {"provider": "github_copilot", "model": "gpt-5.6-terra"}}
+    projected = project_canonical_for_runtime(canonical, "opencode")
+    assert projected["llm"]["provider"] == "github-copilot"
+    assert projected["llm"]["model"] == "github-copilot/gpt-5.6-terra"
+    # Input is not mutated.
+    assert canonical["llm"] == {"provider": "github_copilot", "model": "gpt-5.6-terra"}
+
+
+def test_project_canonical_leaves_non_copilot_provider_uncoerced():
+    # A non-copilot provider is never coerced to github-copilot. (The opencode
+    # projection does prefix a bare model with its provider, matching portal's
+    # old byte-for-byte output; an already-qualified model stays put.)
+    canonical = {"llm": {"provider": "anthropic", "model": "anthropic/claude-opus-4"}}
+    projected = project_canonical_for_runtime(canonical, "opencode")
+    assert projected["llm"]["provider"] == "anthropic"
+    assert projected["llm"]["model"] == "anthropic/claude-opus-4"
+
+
+def test_boot_projection_end_to_end_with_canonical_copilot_llm():
+    # Secret now stores the canonical (github_copilot + bare model) LLM form;
+    # the boot projection must transform it so opencode.json ends up correct.
+    settings = Settings.from_env()
+    config = {
+        "llm": {
+            "provider": "github_copilot",
+            "model": "gpt-5.6-terra",
+            "api_key": "gho_TEST",
+            "base_url": "http://litellm.local/v1",
+        },
+    }
+    apply_boot_projection(settings, _payload(config))
+    cfg = json.loads(settings.opencode_config_path.read_text(encoding="utf-8"))
+    assert cfg["agent"]["efp-main"]["model"] == "github-copilot/gpt-5.6-terra"
+    assert "github-copilot" in cfg["provider"]
 
 
 def test_missing_profile_env_is_fatal(monkeypatch):
