@@ -20,6 +20,7 @@ from .opencode_auth import build_opencode_auth_from_runtime_config, clear_openco
 from .copilot_plugin_auth import redact_copilot_secrets, save_or_clear_copilot_plugin_credential
 from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_profile_config_for_storage
 from .runtime_env import aws_status_from_env, build_runtime_env_from_config, write_runtime_env_file
+from .runtime_profile_encryption import decrypt_sensitive_fields
 from .runtime_profile_projection import project_canonical_for_runtime
 from .git_cli_auth import write_git_gh_auth_assets
 from .mobile_cli_config import write_mobile_cli_config
@@ -79,6 +80,13 @@ def apply_boot_projection(settings: Settings, payload: dict[str, Any]) -> BootPr
     ``config`` is a fully valid profile (run with base config).
     """
     runtime_config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    # Decrypt the ENC:-prefixed sensitive values (api_key/token/password/etc.)
+    # that the portal wrote into the profile Secret, using EFP_CONFIG_KEY. This
+    # runs BEFORE the per-runtime projection so all downstream building sees
+    # plaintext. A no-op when the config has no ENC: values; raises (and lets
+    # boot fail loud / readiness stay down) if an ENC: value is present but
+    # EFP_CONFIG_KEY is unset or the wrong key.
+    runtime_config = decrypt_sensitive_fields(runtime_config)
     # Apply the opencode projection to the canonical config at boot. This
     # transforms the LLM into the opencode form (provider ``github-copilot``,
     # model ``github-copilot/<model>``) that downstream opencode.json / auth
