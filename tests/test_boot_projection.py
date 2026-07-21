@@ -68,14 +68,15 @@ def test_project_canonical_transforms_copilot_llm_to_opencode_form():
     assert canonical["llm"] == {"provider": "github_copilot", "model": "gpt-5.6-terra"}
 
 
-def test_project_canonical_leaves_non_copilot_provider_uncoerced():
-    # A non-copilot provider is never coerced to github-copilot. (The opencode
-    # projection does prefix a bare model with its provider, matching portal's
-    # old byte-for-byte output; an already-qualified model stays put.)
+def test_project_canonical_coerces_non_copilot_provider_to_copilot():
+    # GitHub Copilot is the only supported provider: a non-copilot provider is
+    # coerced to github-copilot at projection time (including a model's provider
+    # prefix). Portal-side canonicalization is what guarantees a valid Copilot
+    # model name reaches the runtime.
     canonical = {"llm": {"provider": "anthropic", "model": "anthropic/claude-opus-4"}}
     projected = project_canonical_for_runtime(canonical, "opencode")
-    assert projected["llm"]["provider"] == "anthropic"
-    assert projected["llm"]["model"] == "anthropic/claude-opus-4"
+    assert projected["llm"]["provider"] == "github-copilot"
+    assert projected["llm"]["model"] == "github-copilot/claude-opus-4"
 
 
 def test_boot_projection_end_to_end_with_canonical_copilot_llm():
