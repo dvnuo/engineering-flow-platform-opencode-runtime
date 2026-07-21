@@ -25,12 +25,10 @@ from typing import Any
 
 
 def normalize_provider_for_portal(value: str | None) -> str:
-    raw = (value or "").strip().lower()
-    if raw in {"github", "github-copilot", "copilot", "github_copilot"}:
-        return "github_copilot"
-    if raw in {"claude", "anthropic"}:
-        return "anthropic"
-    return raw
+    # GitHub Copilot is the only supported provider; coerce every value
+    # (copilot aliases, blank, and any legacy openai/anthropic value) to it.
+    _ = value
+    return "github_copilot"
 
 
 def normalize_provider_for_runtime(runtime_type: str, provider: str | None) -> str:
