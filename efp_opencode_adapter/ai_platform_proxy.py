@@ -257,7 +257,15 @@ class AIPlatformTokenManager:
                 raise AIPlatformCredentialMissing("AI Platform credential is not configured")
             if self._cache_valid(credential):
                 return self._cached  # type: ignore[return-value]
-            token = await exchange_ai_platform_token(credential)
+            # Route the iB2B exchange through the same outbound proxy the chat
+            # forwarding path uses (envs that need an egress proxy also need it
+            # for the STS call).
+            proxy_config = outbound_proxy_config_for_url(
+                self.settings, credential.ib2b_url or credential.chat_url
+            )
+            token = await exchange_ai_platform_token(
+                credential, trust_env=proxy_config.trust_env, proxy_url=proxy_config.proxy_url
+            )
             self._cached = token
             self._cached_fingerprint = credential.fingerprint()
             return token
@@ -318,6 +326,16 @@ async def ai_platform_proxy_handler(request: web.Request) -> web.StreamResponse:
         }
     )
     body = await request.read()
+    # opencode's OpenAI-compatible client does not know the AI Platform
+    # "usercase"; inject it as the request `user` field if configured and absent.
+    if internal.usercase and body:
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict) and not parsed.get("user"):
+                parsed["user"] = internal.usercase
+                body = json.dumps(parsed).encode("utf-8")
+        except (ValueError, TypeError):
+            pass
 
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), trust_env=proxy_config.trust_env) as session:

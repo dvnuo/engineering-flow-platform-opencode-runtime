@@ -100,6 +100,36 @@ def test_token_manager_missing_credential_raises(tmp_path):
         asyncio.run(tm.get_token())
 
 
+def test_loopback_guard_blocks_remote_and_spoofed_xff():
+    # The AI Platform proxy handler gates on this shared guard before any token
+    # fetch or upstream call.
+    from types import SimpleNamespace
+
+    from efp_opencode_adapter.copilot_proxy import _request_is_loopback
+
+    assert _request_is_loopback(SimpleNamespace(remote="8.8.8.8", headers={})) is False
+    assert _request_is_loopback(SimpleNamespace(remote="127.0.0.1", headers={})) is True
+    # loopback peer but a non-loopback first X-Forwarded-For hop -> rejected
+    assert _request_is_loopback(
+        SimpleNamespace(remote="127.0.0.1", headers={"X-Forwarded-For": "8.8.8.8, 127.0.0.1"})
+    ) is False
+
+
+def test_credential_present_requires_ib2b_or_token():
+    from efp_opencode_adapter.opencode_config import _ai_platform_credential_present
+
+    # username/password without an iB2B host cannot exchange -> not present
+    assert _ai_platform_credential_present(
+        {"ai_platform": {"chat": {"host": "h"}, "auth": {"username": "u", "password": "p"}}}
+    ) is False
+    # with an iB2B host -> present
+    assert _ai_platform_credential_present(
+        {"ai_platform": {"ib2b": {"host": "i"}, "auth": {"username": "u", "password": "p"}}}
+    ) is True
+    # a direct token -> present
+    assert _ai_platform_credential_present({"ai_platform": {"auth": {"token": "t"}}}) is True
+
+
 def test_provider_block_uses_proxy_and_auth_is_proxy(tmp_path):
     pb = provider_config_from_runtime_profile(_cfg(), _settings(tmp_path))
     block = pb["provider"]["ai-platform"]

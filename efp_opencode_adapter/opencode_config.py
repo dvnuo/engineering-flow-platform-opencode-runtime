@@ -42,7 +42,14 @@ def _ai_platform_credential_present(llm: dict) -> bool:
     auth = ap.get("auth") if isinstance(ap.get("auth"), dict) else {}
     if _clean_string(auth.get("token")):
         return True
-    return bool(_clean_string(auth.get("username")) and _clean_string(auth.get("password")))
+    # Username/password alone can't authenticate — the iB2B exchange also needs
+    # an endpoint. Match what exchange_ai_platform_token actually requires.
+    ib2b = ap.get("ib2b") if isinstance(ap.get("ib2b"), dict) else {}
+    return bool(
+        _clean_string(auth.get("username"))
+        and _clean_string(auth.get("password"))
+        and _clean_string(ib2b.get("host"))
+    )
 
 
 def model_from_runtime_profile(config: dict) -> str | None:
