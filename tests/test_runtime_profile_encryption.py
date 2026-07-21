@@ -13,10 +13,7 @@ import json
 import pytest
 
 from efp_opencode_adapter.portal_runtime_context_bootstrap import apply_boot_projection
-from efp_opencode_adapter.runtime_profile_encryption import (
-    decrypt_sensitive_fields,
-    encrypt_sensitive_fields,
-)
+from efp_opencode_adapter.runtime_profile_encryption import decrypt_sensitive_fields
 from efp_opencode_adapter.runtime_profile_projection import project_canonical_for_runtime
 from efp_opencode_adapter.settings import Settings
 
@@ -84,12 +81,12 @@ def test_enc_value_with_wrong_key_raises(monkeypatch):
         decrypt_sensitive_fields(config)
 
 
-def test_encrypt_decrypt_round_trip(monkeypatch):
+def test_decrypt_recovers_portal_ciphertext(monkeypatch):
+    # The runtime only decrypts. Feed it a portal-style ENC: token (built with
+    # the same sha256->Fernet derivation) and confirm the plaintext is recovered.
     monkeypatch.setenv("EFP_CONFIG_KEY", TEST_KEY)
-    config = {"llm": {"provider": "github_copilot", "api_key": "gho_SECRET"}}
-    encrypted = encrypt_sensitive_fields(config)
-    assert encrypted["llm"]["api_key"].startswith("ENC:")
-    assert decrypt_sensitive_fields(encrypted)["llm"]["api_key"] == "gho_SECRET"
+    config = {"llm": {"provider": "github_copilot", "api_key": _enc("gho_SECRET")}}
+    assert decrypt_sensitive_fields(config)["llm"]["api_key"] == "gho_SECRET"
 
 
 def test_boot_projection_decrypts_enc_secret_end_to_end(monkeypatch):
