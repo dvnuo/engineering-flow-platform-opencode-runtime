@@ -107,6 +107,7 @@ class Settings:
     copilot_proxy_base_url: str = "http://127.0.0.1:8000/api/internal/copilot"
     copilot_github_api_base_url: str = "https://api.github.com"
     copilot_api_base_url: str = "https://api.enterprise.githubcopilot.com"
+    ai_platform_proxy_base_url: str = "http://127.0.0.1:8000/api/internal/ai-platform"
 
     @classmethod
     def from_env(cls, opencode_url: str | None = None) -> "Settings":
@@ -115,6 +116,7 @@ class Settings:
         copilot_proxy_base_url = (os.getenv("EFP_COPILOT_PROXY_BASE_URL") or "http://127.0.0.1:8000/api/internal/copilot").rstrip("/")
         copilot_github_api_base_url = (os.getenv("EFP_COPILOT_GITHUB_API_BASE_URL") or "https://api.github.com").rstrip("/")
         copilot_api_base_url = (os.getenv("EFP_COPILOT_API_BASE_URL") or "https://api.enterprise.githubcopilot.com").rstrip("/")
+        ai_platform_proxy_base_url = (os.getenv("EFP_AI_PLATFORM_PROXY_BASE_URL") or "http://127.0.0.1:8000/api/internal/ai-platform").rstrip("/")
         return cls(
             opencode_url=opencode_url or os.getenv("EFP_OPENCODE_URL", "http://127.0.0.1:4096"),
             adapter_state_dir=adapter_state_dir,
@@ -148,4 +150,5 @@ class Settings:
             copilot_proxy_base_url=copilot_proxy_base_url,
             copilot_github_api_base_url=copilot_github_api_base_url,
             copilot_api_base_url=copilot_api_base_url,
+            ai_platform_proxy_base_url=ai_platform_proxy_base_url,
         )

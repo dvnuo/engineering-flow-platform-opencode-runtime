@@ -25,6 +25,7 @@ from .app_keys import (
     OPENCODE_WATCHDOG_TASK_KEY,
     REQUEST_BINDING_STORE_KEY,
     COPILOT_TOKEN_MANAGER_KEY,
+    AI_PLATFORM_TOKEN_MANAGER_KEY,
     BOOT_PROJECTION_KEY,
 )
 
@@ -53,6 +54,7 @@ from .usage_tracker import UsageTracker
 from .opencode_config import normalize_opencode_provider_id
 from .copilot_plugin_auth import CopilotTokenManager, load_copilot_plugin_credential
 from .copilot_proxy import copilot_proxy_handler
+from .ai_platform_proxy import AIPlatformTokenManager, ai_platform_proxy_handler
 from .path_utils import path_exists
 from .portal_runtime_context_bootstrap import run_boot_projection_from_env
 from .profile_store import ProfileOverlayStore, build_profile_status_payload, sanitize_public_secrets
@@ -440,6 +442,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app[REQUEST_BINDING_STORE_KEY] = RequestBindingStore()
     app[TASK_BACKGROUND_TASKS_KEY] = set()
     app[COPILOT_TOKEN_MANAGER_KEY] = CopilotTokenManager(settings)
+    app[AI_PLATFORM_TOKEN_MANAGER_KEY] = AIPlatformTokenManager(settings)
     injected_client = opencode_client is not None
     client = opencode_client or OpenCodeClient(settings)
     app[OPENCODE_CLIENT_KEY] = client
@@ -459,6 +462,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/actuator/health", health_handler)
     app.router.add_get("/ready", ready_handler)
     app.router.add_route("*", "/api/internal/copilot/{tail:.*}", copilot_proxy_handler)
+    app.router.add_route("*", "/api/internal/ai-platform/{tail:.*}", ai_platform_proxy_handler)
     app.router.add_get("/api/internal/runtime-profile/status", runtime_profile_status_handler)
     app.router.add_get("/api/internal/opencode/status", internal_opencode_status_handler)
     app.router.add_get("/api/internal/opencode/log-tail", internal_opencode_log_tail_handler)

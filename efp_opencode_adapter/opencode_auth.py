@@ -38,6 +38,11 @@ def build_opencode_auth_from_llm(llm: Mapping[str, Any]) -> AuthBuildResult:
     if provider == "github-copilot":
         return AuthBuildResult(provider=provider, auth_info=None, auth_type="copilot_plugin_proxy")
 
+    if provider == "ai-platform":
+        # The local AI Platform proxy supplies the real (short-lived) auth per
+        # request; no static key is written to auth.json.
+        return AuthBuildResult(provider=provider, auth_info=None, auth_type="ai_platform_proxy")
+
     if api_key:
         return AuthBuildResult(provider=provider, auth_info={"type": "api", "key": api_key}, auth_type="api")
     return AuthBuildResult(provider=provider)

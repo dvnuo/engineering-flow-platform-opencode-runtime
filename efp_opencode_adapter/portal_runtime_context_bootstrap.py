@@ -18,6 +18,7 @@ from .atlassian_cli_config import build_atlassian_cli_config
 from .opencode_config import build_opencode_config, write_opencode_config
 from .opencode_auth import build_opencode_auth_from_runtime_config, clear_opencode_auth_provider
 from .copilot_plugin_auth import redact_copilot_secrets, save_or_clear_copilot_plugin_credential
+from .ai_platform_proxy import save_or_clear_ai_platform_credential
 from .profile_store import ProfileOverlay, ProfileOverlayStore, sanitize_profile_config_for_storage
 from .runtime_env import aws_status_from_env, build_runtime_env_from_config, write_runtime_env_file
 from .runtime_profile_encryption import decrypt_sensitive_fields
@@ -99,6 +100,10 @@ def apply_boot_projection(settings: Settings, payload: dict[str, Any]) -> BootPr
     write_opencode_config(settings, generated)
     copilot_credential_result = save_or_clear_copilot_plugin_credential(settings, runtime_config)
     clear_opencode_auth_provider(settings, "github-copilot")
+    # AI Platform: persist (or clear) the proxy credential file the token
+    # manager reads, and never leave a static key in auth.json.
+    save_or_clear_ai_platform_credential(settings, runtime_config)
+    clear_opencode_auth_provider(settings, "ai-platform")
 
     auth_build = build_opencode_auth_from_runtime_config(runtime_config)
     auth_written = False

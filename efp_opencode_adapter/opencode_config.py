@@ -14,6 +14,8 @@ EFP_WORKSPACE_INSTRUCTIONS_GLOB = ".efp/instructions/*.instructions.md"
 
 COPILOT_RESPONSES_PROVIDER_NPM = "@ai-sdk/openai"
 COPILOT_PROXY_API_KEY_PLACEHOLDER = "efp-copilot-proxy"
+AI_PLATFORM_PROVIDER_NPM = "@ai-sdk/openai-compatible"
+AI_PLATFORM_PROXY_API_KEY_PLACEHOLDER = "efp-ai-platform-proxy"
 
 
 def normalize_opencode_provider_id(provider: str | None) -> str:
@@ -23,11 +25,31 @@ def normalize_opencode_provider_id(provider: str | None) -> str:
         "copilot": "github-copilot",
         "github_copilot": "github-copilot",
         "github-copilot": "github-copilot",
+        "ai_platform": "ai-platform",
+        "ai-platform": "ai-platform",
+        "ai platform": "ai-platform",
         "claude": "anthropic",
         "anthropic": "anthropic",
         "openai": "openai",
     }
     return aliases.get(raw, raw)
+
+
+def _ai_platform_credential_present(llm: dict) -> bool:
+    ap = llm.get("ai_platform") if isinstance(llm.get("ai_platform"), dict) else None
+    if not isinstance(ap, dict):
+        return False
+    auth = ap.get("auth") if isinstance(ap.get("auth"), dict) else {}
+    if _clean_string(auth.get("token")):
+        return True
+    # Username/password alone can't authenticate — the iB2B exchange also needs
+    # an endpoint. Match what exchange_ai_platform_token actually requires.
+    ib2b = ap.get("ib2b") if isinstance(ap.get("ib2b"), dict) else {}
+    return bool(
+        _clean_string(auth.get("username"))
+        and _clean_string(auth.get("password"))
+        and _clean_string(ib2b.get("host"))
+    )
 
 
 def model_from_runtime_profile(config: dict) -> str | None:
@@ -78,6 +100,10 @@ def provider_config_from_runtime_profile(runtime_config: dict, settings: Setting
         proxy_base_url = (settings.copilot_proxy_base_url if settings else Settings.from_env().copilot_proxy_base_url).strip().rstrip("/")
         if proxy_base_url:
             options["baseURL"] = proxy_base_url
+    elif provider == "ai-platform" and _ai_platform_credential_present(llm):
+        proxy_base_url = (settings.ai_platform_proxy_base_url if settings else Settings.from_env().ai_platform_proxy_base_url).strip().rstrip("/")
+        if proxy_base_url:
+            options["baseURL"] = proxy_base_url
     elif isinstance(base_url, str) and base_url.strip():
         options["baseURL"] = base_url.strip().rstrip("/")
     timeout_ms = _int_or_none(llm.get("timeout_ms") or llm.get("timeout"))
@@ -94,6 +120,12 @@ def provider_config_from_runtime_profile(runtime_config: dict, settings: Setting
         # Authorization and replaces it with the internal Copilot token.
         options.setdefault("apiKey", COPILOT_PROXY_API_KEY_PLACEHOLDER)
         return {"provider": {provider: {"npm": COPILOT_RESPONSES_PROVIDER_NPM, "options": options}}}
+    if provider == "ai-platform" and options.get("baseURL"):
+        # AI Platform is an OpenAI-compatible /chat/completions endpoint behind a
+        # local loopback proxy that injects a fresh short-lived trust token per
+        # request. The apiKey is a placeholder; the proxy supplies the real auth.
+        options.setdefault("apiKey", AI_PLATFORM_PROXY_API_KEY_PLACEHOLDER)
+        return {"provider": {provider: {"npm": AI_PLATFORM_PROVIDER_NPM, "options": options}}}
     if not options:
         return {}
     return {"provider": {provider: {"options": options}}}

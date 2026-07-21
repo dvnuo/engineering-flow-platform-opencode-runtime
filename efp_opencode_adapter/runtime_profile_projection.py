@@ -24,17 +24,26 @@ from typing import Any
 # --- provider_projection (folded in verbatim) --------------------------------
 
 
+_AI_PLATFORM_ALIASES = {"ai_platform", "ai-platform", "ai platform"}
+
+
 def normalize_provider_for_portal(value: str | None) -> str:
-    # GitHub Copilot is the only supported provider; coerce every value
-    # (copilot aliases, blank, and any legacy openai/anthropic value) to it.
-    _ = value
+    # Two supported providers: github_copilot (default) and ai_platform.
+    # Anything blank/unknown (incl. copilot aliases and legacy openai/anthropic)
+    # falls back to github_copilot.
+    raw = (value or "").strip().lower()
+    if raw in _AI_PLATFORM_ALIASES:
+        return "ai_platform"
     return "github_copilot"
 
 
 def normalize_provider_for_runtime(runtime_type: str, provider: str | None) -> str:
     portal_provider = normalize_provider_for_portal(provider)
-    if (runtime_type or "").strip().lower() == "opencode" and portal_provider == "github_copilot":
-        return "github-copilot"
+    if (runtime_type or "").strip().lower() == "opencode":
+        if portal_provider == "github_copilot":
+            return "github-copilot"
+        if portal_provider == "ai_platform":
+            return "ai-platform"
     return portal_provider
 
 
@@ -82,19 +91,18 @@ def project_llm_for_runtime(llm: dict, runtime_type: str) -> dict:
         if normalized_model:
             projected["model"] = normalized_model
 
-    if not _is_copilot_provider(provider_hint):
-        projected.pop("oauth", None)
-        projected.pop("oauth_by_runtime", None)
-        return projected
-
-    token = str(projected.get("api_key") or "").strip()
+    # Portal-only oauth fields never reach a runtime.
     projected.pop("oauth", None)
     projected.pop("oauth_by_runtime", None)
 
-    if token:
-        projected["api_key"] = token
-    else:
-        projected.pop("api_key", None)
+    if _is_copilot_provider(provider_hint):
+        token = str(projected.get("api_key") or "").strip()
+        if token:
+            projected["api_key"] = token
+        else:
+            projected.pop("api_key", None)
+    # For ai_platform the rich block (llm.ai_platform: chat/ib2b endpoints +
+    # auth credentials) is preserved as-is for the runtime to consume.
     return projected
 
 
