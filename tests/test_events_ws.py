@@ -27,7 +27,6 @@ async def test_events_ws(tmp_path, monkeypatch):
             break
     types = {e["type"] for e in events}
     assert "chat.started" in types
-    assert "llm_thinking" in types
     assert "chat.completed" in types
 
     ws2 = await client.ws_connect("/api/events?session_id=portal-filter")

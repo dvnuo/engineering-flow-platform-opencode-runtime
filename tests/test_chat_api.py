@@ -100,7 +100,7 @@ async def test_chat_short_request_completes_without_long_task_metadata(tmp_path,
         assert payload["response"] == "echo: hello"
         assert payload["session_id"] == "s1"
         assert app[SESSION_STORE_KEY].get("s1").last_message == "echo: hello"
-        assert {"chat.started", "llm_thinking", "chat.completed"} <= set(_event_types(payload))
+        assert {"chat.started", "chat.completed"} <= set(_event_types(payload))
         encoded = json.dumps(payload)
         for forbidden in ("continuation.", "timeout_recovery", "transport_recovery", "stream_detached", "chat_run"):
             assert forbidden not in encoded

@@ -13,7 +13,7 @@ Runtime events expose stable cross-layer fields: `type/event_type`, `engine`, `r
 `session_id`, `task_id`, `request_id`, `agent_id`, `group_id`, `coordination_run_id`.
 
 ## Chat events
-`execution.started`, `llm_thinking`, `assistant_delta`, `complete`, `execution.completed`, `execution.failed`.
+`execution.started`, `assistant_delta`, `complete`, `execution.completed`, `execution.failed`.
 
 ## Task events
 `task.accepted`, `task.started`, `task.completed`, `task.cancelled` and normalized tool/permission events mapped to task context.

@@ -124,10 +124,6 @@ def chat_started_event(**kwargs: Any) -> dict[str, Any]:
     return build_thinking_event("execution.started", state="running", summary="Execution started", **kwargs)
 
 
-def llm_thinking_event(*, message: str = "OpenCode is thinking", **kwargs: Any) -> dict[str, Any]:
-    return build_thinking_event("llm_thinking", state="running", summary="LLM thinking", data={"message": safe_preview(message)}, **kwargs)
-
-
 def assistant_delta_event(*, text: str, **kwargs: Any) -> dict[str, Any]:
     preview = safe_preview(text, 500)
     return build_thinking_event("assistant_delta", state="running", summary="Assistant delta", data={"delta": preview, "message": preview}, **kwargs)
