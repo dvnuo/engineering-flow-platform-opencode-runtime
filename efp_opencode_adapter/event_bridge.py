@@ -10,7 +10,7 @@ from typing import Any
 from .profile_store import sanitize_public_secrets
 from .thinking_events import safe_preview, utc_now_iso
 from .trace_context import add_trace_context, build_trace_context
-from .opencode_message_adapter import extract_visible_text_from_parts, extract_reasoning_texts_from_parts
+from .opencode_message_adapter import extract_visible_text_from_parts
 
 
 def _sanitize_event_value(value: Any, max_chars: int) -> Any:
@@ -289,9 +289,9 @@ def _step_status_event_type(part_type: str, status: str) -> str:
 
 
 def _text_status_event_type(part_type: str, status: str) -> str:
-    if part_type not in {"text", "reasoning"}:
+    if part_type != "text":
         return ""
-    prefix = "session.next.reasoning" if part_type == "reasoning" else "session.next.text"
+    prefix = "session.next.text"
     if status in {"start", "started", "created", "open", "pending", "running"}:
         return f"{prefix}.started"
     if status in _TERMINAL_SUCCESS_STATUSES or status in _TERMINAL_FAILED_STATUSES:
@@ -333,8 +333,6 @@ def _projected_type_for_event(*, raw_type: str, legacy_type: str, data: dict[str
         return "permission.resolved"
     if legacy_type in {"message.delta", "assistant_delta"}:
         return "session.next.text.delta"
-    if legacy_type in {"llm_thinking", "opencode.reasoning"}:
-        return "session.next.reasoning.delta"
     if legacy_type.startswith("tool."):
         return _tool_event_type_from_status(status, legacy_type)
     if legacy_type == "opencode.step.started":
@@ -345,8 +343,6 @@ def _projected_type_for_event(*, raw_type: str, legacy_type: str, data: dict[str
         return "session.next.step.ended"
     if raw_type == "message.part.delta":
         part_type = str(data.get("part_type") or "").lower()
-        if part_type == "reasoning":
-            return "session.next.reasoning.delta"
         if part_type == "tool" and field in {"input", "args", "arguments", "params"}:
             return "session.next.tool.input.delta"
     if raw_type == "message.part.updated":
@@ -591,10 +587,7 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         metadata_incomplete = not role or not ptype
         role_explicit_user = "user" in role_values
         if field == "text" and delta and not ignored and not synthetic and not role_explicit_user:
-            if ptype == "reasoning":
-                normalized_type = "llm_thinking"
-                text = delta
-            elif ptype in {"", "text"} and role in {"", "assistant"}:
+            if ptype in {"", "text"} and role in {"", "assistant"}:
                 normalized_type = "message.delta"
                 text = delta
         values["__part_field"] = field
@@ -643,8 +636,6 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     }
     if normalized_type in {"assistant_delta", "message.delta"} and s_text:
         data["delta"] = s_text
-        data["message"] = s_text
-    elif normalized_type in {"llm_thinking", "opencode.reasoning"} and s_text:
         data["message"] = s_text
     data["message_role"] = _sanitize_event_text(values.get("__message_role") or message_role or "", 100)
     data["part_type"] = _sanitize_event_text(values.get("__part_type") or (part_meta or {}).get("type") or "", 100)

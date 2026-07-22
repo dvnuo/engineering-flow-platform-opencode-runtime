@@ -33,7 +33,6 @@ from .opencode_ids import is_opencode_message_id, new_opencode_message_id, requi
 from .opencode_message_adapter import (
     extract_assistant_message_ids,
     extract_last_assistant_visible_text,
-    extract_reasoning_texts_from_parts,
     find_latest_assistant_completion,
     message_id as adapter_message_id,
     message_role as adapter_message_role,
@@ -878,18 +877,6 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             runtime_events=runtime_events,
             metadata={"opencode_session_id": record.opencode_session_id, "trace_context": trace_context},
         )
-        thinking = _event_payload(
-            "llm_thinking",
-            session_id=portal_session_id,
-            request_id=request_id,
-            opencode_session_id=record.opencode_session_id,
-            state="running",
-            summary="OpenCode is thinking.",
-            data={"message": "OpenCode is thinking"},
-            trace_context=trace_context,
-        )
-        await _publish_event(bus, runtime_events, thinking)
-
         before_messages: list[dict[str, Any]] = []
         try:
             before_messages = await client.list_messages(record.opencode_session_id)
@@ -983,21 +970,6 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
             assistant_text = _non_success_assistant_text(completion_state, completion_reason)
             incomplete_reason = completion_reason or completion_state
             ok = False
-
-        payload_message = response_payload.get("message") if isinstance(response_payload, dict) else None
-        if isinstance(payload_message, dict):
-            for item in extract_reasoning_texts_from_parts(payload_message.get("parts")):
-                reasoning = _event_payload(
-                    "llm_thinking",
-                    session_id=portal_session_id,
-                    request_id=request_id,
-                    opencode_session_id=record.opencode_session_id,
-                    state="running",
-                    summary=safe_preview(item, 300),
-                    data={"message": safe_preview(item, 300)},
-                    trace_context=trace_context,
-                )
-                await _publish_event(bus, runtime_events, reasoning)
 
         user_message_id, assistant_message_id = _detect_new_message_ids(before_messages, after_messages)
         user_message_id = user_message_id or initial_user_message_id

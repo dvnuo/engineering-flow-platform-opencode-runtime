@@ -321,7 +321,6 @@ async def test_chat_with_corrupted_existing_chatlog_recovers_and_succeeds(tmp_pa
 
     event_types = [event["type"] for event in body["runtime_events"]]
     assert "execution.started" in event_types
-    assert "llm_thinking" in event_types
     assert "complete" in event_types
     assert "execution.completed" in event_types
 

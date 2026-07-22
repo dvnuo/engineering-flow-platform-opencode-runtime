@@ -53,18 +53,6 @@ def extract_visible_text_from_parts(parts: Any, *, include_synthetic: bool = Fal
     return "\n".join(out).strip()
 
 
-def extract_reasoning_texts_from_parts(parts: Any) -> list[str]:
-    if not isinstance(parts, list):
-        return []
-    out: list[str] = []
-    for part in parts:
-        if not isinstance(part, dict):
-            continue
-        if part.get("type") == "reasoning" and isinstance(part.get("text"), str) and part.get("text").strip():
-            out.append(part["text"])
-    return out
-
-
 def message_to_visible_text(message: Any) -> str:
     if isinstance(message, str):
         return message

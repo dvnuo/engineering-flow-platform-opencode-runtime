@@ -79,7 +79,6 @@ async def test_chat_api_accepts_opencode_list_response_payload(tmp_path, monkeyp
 
     event_types = {event["type"] for event in body["runtime_events"]}
     assert "execution.started" in event_types
-    assert "llm_thinking" in event_types
     assert "assistant_delta" in event_types
     assert "complete" in event_types
     assert "execution.completed" in event_types

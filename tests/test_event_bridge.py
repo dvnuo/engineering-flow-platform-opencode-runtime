@@ -338,28 +338,34 @@ def test_message_part_delta_requires_assistant_role_and_text_part(tmp_path, monk
     assert event["data"]["part_type"] == "text"
 
 
-def test_reasoning_delta_maps_to_llm_thinking(tmp_path, monkeypatch):
+def test_reasoning_delta_not_streamed_as_reasoning_event(tmp_path, monkeypatch):
+    # Reasoning display events were removed: a reasoning part.delta must not be
+    # projected to a reasoning-typed display event; it falls back to opencode.raw.
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
     settings = Settings.from_env()
     paths = ensure_state_dirs(settings)
     event = normalize_opencode_event({"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "reasoning text"}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="assistant", part_meta={"type": "reasoning", "ignored": False, "synthetic": False})
-    assert event["type"] == "session.next.reasoning.delta"
-    assert event["legacy_type"] == "llm_thinking"
+    assert event["type"] == "opencode.raw"
+    assert not event["type"].startswith("session.next.reasoning")
+    assert event.get("legacy_type") != "llm_thinking"
     assert event["raw_type"] == "message.part.delta"
-    assert event["data"]["message"] == "reasoning text"
+    assert event["data"]["part_type"] == "reasoning"
     assert event["opencode_message_id"] == "m-assistant"
 
 
-def test_reasoning_delta_uses_canonical_part_metadata_when_cache_missing(tmp_path, monkeypatch):
+def test_reasoning_delta_from_canonical_metadata_not_streamed(tmp_path, monkeypatch):
+    # Reasoning detected via canonical part metadata (cache miss) is likewise
+    # not turned into a reasoning display event.
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
     settings = Settings.from_env()
     paths = ensure_state_dirs(settings)
     event = normalize_opencode_event({"payload": {"type": "message.part.delta", "properties": {"sessionID": "oc-1", "messageID": "m-assistant", "partID": "p1", "field": "text", "delta": "thinking", "part": {"id": "p1", "messageID": "m-assistant", "type": "reasoning"}}}}, session_store=SessionStore(paths.sessions_dir), task_store=TaskStore(paths.tasks_dir), settings=settings, message_role="assistant", part_meta={})
-    assert event["type"] == "session.next.reasoning.delta"
-    assert event["legacy_type"] == "llm_thinking"
-    assert event["data"]["message"] == "thinking"
+    assert event["type"] == "opencode.raw"
+    assert not event["type"].startswith("session.next.reasoning")
+    assert event.get("legacy_type") != "llm_thinking"
+    assert event["data"]["part_type"] == "reasoning"
 
 
 def test_message_part_delta_user_role_not_streamed(tmp_path, monkeypatch):

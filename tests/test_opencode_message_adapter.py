@@ -1,7 +1,6 @@
 from efp_opencode_adapter.opencode_message_adapter import (
     find_latest_assistant_completion,
     extract_assistant_message_ids,
-    extract_reasoning_texts_from_parts,
     extract_visible_text_from_parts,
     extract_last_assistant_visible_text,
     message_to_visible_text,
@@ -16,7 +15,6 @@ def test_visible_text_extraction_filters_non_text_parts():
         {"type": "step-finish", "reason": "stop"},
     ]
     assert extract_visible_text_from_parts(parts) == "Hi. How can I help?"
-    assert extract_reasoning_texts_from_parts(parts) == ["hidden reasoning"]
     assert "reasoning" not in message_to_visible_text({"role": "assistant", "parts": parts})
 
 

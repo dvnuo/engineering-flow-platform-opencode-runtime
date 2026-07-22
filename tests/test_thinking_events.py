@@ -1,12 +1,10 @@
 import json
 
-from efp_opencode_adapter.thinking_events import assistant_delta_event, chat_failed_event, chat_started_event, llm_thinking_event, permission_request_event, safe_preview
+from efp_opencode_adapter.thinking_events import assistant_delta_event, chat_failed_event, chat_started_event, permission_request_event, safe_preview
 
 def test_events_shapes():
     e = chat_started_event(session_id='s', request_id='r')
     assert e['type'] == 'execution.started' and e['event_type'] == 'execution.started'
-    t = llm_thinking_event(session_id='s', request_id='r')
-    assert t['session_id'] == 's' and t['request_id'] == 'r'
     d = assistant_delta_event(session_id='s', request_id='r', text='x'*1000)
     assert len(d['data']['delta']) < 600
 
