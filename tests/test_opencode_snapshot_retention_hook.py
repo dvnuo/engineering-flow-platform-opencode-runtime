@@ -27,9 +27,8 @@ def _git(git_dir: Path, *args: str, work_tree: Path | None = None) -> str:
     ).stdout.strip()
 
 
-def _create_unreferenced_trees(root: Path) -> tuple[Path, str]:
-    git_dir = root / "snapshot.git"
-    work_tree = root / "work"
+def _create_unreferenced_trees(git_dir: Path) -> tuple[Path, str]:
+    work_tree = git_dir.parent / f"{git_dir.name}-work"
     work_tree.mkdir(parents=True)
     _git(git_dir, "init", "--bare", "--quiet")
 
@@ -64,16 +63,22 @@ def _tree_exists(git_dir: Path, tree: str) -> bool:
     reason="snapshot retention hook runs in the Linux runtime image",
 )
 @pytest.mark.parametrize("snapshot_root_source", ["data_dir", "xdg_data_home"])
+@pytest.mark.parametrize(
+    "snapshot_layout",
+    [("project",), ("project", "worktree")],
+    ids=["direct-child", "project-worktree"],
+)
 def test_recent_objects_hook_only_preserves_opencode_snapshot_store(
     tmp_path: Path,
     snapshot_root_source: str,
+    snapshot_layout: tuple[str, ...],
 ):
     data_dir = tmp_path / "opencode-data"
     xdg_data_home = tmp_path / "xdg-data"
     snapshot_data_dir = (
         data_dir if snapshot_root_source == "data_dir" else xdg_data_home / "opencode"
     )
-    snapshot_repo = snapshot_data_dir / "snapshot" / "project" / "worktree"
+    snapshot_repo = snapshot_data_dir.joinpath("snapshot", *snapshot_layout)
     control_repo = tmp_path / "ordinary-repo"
     snapshot_git, snapshot_tree = _create_unreferenced_trees(snapshot_repo)
     control_git, control_tree = _create_unreferenced_trees(control_repo)

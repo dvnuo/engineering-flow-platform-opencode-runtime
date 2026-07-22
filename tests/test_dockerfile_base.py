@@ -121,7 +121,8 @@ def test_dockerfile_preserves_opencode_snapshot_objects_during_git_gc():
     assert "git config --system --get gc.recentObjectsHook" in smoke
     assert 'data_roots+=("${OPENCODE_DATA_DIR}")' in hook
     assert 'data_roots+=("${XDG_DATA_HOME%/}/opencode")' in hook
-    assert '"${snapshot_root}"/*/*' in hook
+    assert 'relative="${git_dir#"${snapshot_root}/"}"' in hook
+    assert '"${relative}" != */*/*' in hook
     assert "git show-index" in hook
 
 

@@ -13,12 +13,12 @@ fi
 matched=0
 for data_dir in "${data_roots[@]}"; do
   snapshot_root="${data_dir%/}/snapshot"
-  case "${git_dir}" in
-    "${snapshot_root}"/*/*)
-      matched=1
-      break
-      ;;
-  esac
+  [[ "${git_dir}" == "${snapshot_root}/"* ]] || continue
+  relative="${git_dir#"${snapshot_root}/"}"
+  if [[ -n "${relative}" && "${relative}" != */*/* ]]; then
+    matched=1
+    break
+  fi
 done
 [[ "${matched}" == "1" ]] || exit 0
 
