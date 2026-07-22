@@ -244,10 +244,17 @@ RUN python3 -m venv /opt/venv \
 
 COPY entrypoint.sh /tmp/entrypoint.sh
 COPY scripts/smoke.sh /app/runtime/scripts/smoke.sh
+COPY scripts/opencode-snapshot-recent-objects /usr/local/bin/opencode-snapshot-recent-objects
 
-RUN sed -i 's/\r$//' /tmp/entrypoint.sh /app/runtime/scripts/smoke.sh \
+RUN sed -i 's/\r$//' \
+    /tmp/entrypoint.sh \
+    /app/runtime/scripts/smoke.sh \
+    /usr/local/bin/opencode-snapshot-recent-objects \
   && install -o root -g root -m 0755 /tmp/entrypoint.sh /usr/local/bin/entrypoint.sh \
-  && chmod 0755 /app/runtime/scripts/smoke.sh \
+  && chmod 0755 /app/runtime/scripts/smoke.sh /usr/local/bin/opencode-snapshot-recent-objects \
+  && bash -n /usr/local/bin/opencode-snapshot-recent-objects \
+  && git config --system gc.recentObjectsHook /usr/local/bin/opencode-snapshot-recent-objects \
+  && test "$(git config --system --get gc.recentObjectsHook)" = "/usr/local/bin/opencode-snapshot-recent-objects" \
   && rm -f /tmp/entrypoint.sh \
   && mkdir -p \
     /workspace/.opencode/skills \

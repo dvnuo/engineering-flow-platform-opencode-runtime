@@ -101,6 +101,30 @@ def test_dockerfile_installs_only_opencode_runtime_package():
     assert 'test "${actual}" = "${OPENCODE_VERSION}"' in text
 
 
+def test_dockerfile_preserves_opencode_snapshot_objects_during_git_gc():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "Dockerfile").read_text(encoding="utf-8")
+    hook = (root / "scripts" / "opencode-snapshot-recent-objects").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "COPY scripts/opencode-snapshot-recent-objects "
+        "/usr/local/bin/opencode-snapshot-recent-objects"
+    ) in text
+    assert (
+        "git config --system gc.recentObjectsHook "
+        "/usr/local/bin/opencode-snapshot-recent-objects"
+    ) in text
+    assert "bash -n /usr/local/bin/opencode-snapshot-recent-objects" in text
+    smoke = (root / "scripts" / "smoke.sh").read_text(encoding="utf-8")
+    assert "git config --system --get gc.recentObjectsHook" in smoke
+    assert 'data_roots+=("${OPENCODE_DATA_DIR}")' in hook
+    assert 'data_roots+=("${XDG_DATA_HOME%/}/opencode")' in hook
+    assert '"${snapshot_root}"/*/*' in hook
+    assert "git show-index" in hook
+
+
 def test_entrypoint_bootstrap_order_for_managed_adapter_server():
     root = Path(__file__).resolve().parents[1]
     text = (root / "entrypoint.sh").read_text(encoding="utf-8")
