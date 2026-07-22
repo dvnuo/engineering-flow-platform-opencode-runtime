@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null)" || exit 0
+data_roots=("${HOME:-/root}/.local/share/opencode")
+if [[ -n "${OPENCODE_DATA_DIR:-}" ]]; then
+  data_roots+=("${OPENCODE_DATA_DIR}")
+fi
+if [[ -n "${XDG_DATA_HOME:-}" ]]; then
+  data_roots+=("${XDG_DATA_HOME%/}/opencode")
+fi
+
+matched=0
+for data_dir in "${data_roots[@]}"; do
+  snapshot_root="${data_dir%/}/snapshot"
+  [[ "${git_dir}" == "${snapshot_root}/"* ]] || continue
+  relative="${git_dir#"${snapshot_root}/"}"
+  if [[ -n "${relative}" && "${relative}" != */*/* ]]; then
+    matched=1
+    break
+  fi
+done
+[[ "${matched}" == "1" ]] || exit 0
+
+while IFS= read -r object_path; do
+  object_dir="${object_path%/*}"
+  object_id="${object_dir##*/}${object_path##*/}"
+  if [[ "${object_id}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+    printf '%s\n' "${object_id}"
+  fi
+done < <(find "${git_dir}/objects" -mindepth 2 -maxdepth 2 -type f 2>/dev/null)
+
+shopt -s nullglob
+for index in "${git_dir}"/objects/pack/*.idx; do
+  git show-index <"${index}" | awk '{print $2}'
+done
