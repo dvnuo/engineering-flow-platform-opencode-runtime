@@ -34,6 +34,25 @@ _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 _HANDLER_MARKER = "_efp_stdout_handler"
 _FALSEY = {"0", "false", "no", "off", ""}
 
+# Kubernetes probes and Spring-actuator scanners are the overwhelming majority
+# of inbound requests (96.8% of the access lines in a 25-minute production
+# sample), which buries the handful of real API calls. Their access lines drop
+# to DEBUG so they stay available when debug logging is on.
+PROBE_PATHS = frozenset({"/ready", "/readyz", "/health", "/healthz", "/live"})
+ACTUATOR_PATH_PREFIX = "/actuator"
+
+
+def is_probe_path(path: str) -> bool:
+    """True for probe/scanner paths whose access lines belong at DEBUG.
+
+    Matches the probe paths exactly and anything under /actuator (including
+    bare /actuator); a path that merely contains the word is a real request.
+    """
+    normalized = str(path or "").rstrip("/") or "/"
+    if normalized in PROBE_PATHS:
+        return True
+    return normalized == ACTUATOR_PATH_PREFIX or normalized.startswith(ACTUATOR_PATH_PREFIX + "/")
+
 
 def resolve_log_level(env: Mapping[str, str] | None = None) -> int:
     """EFP_LOG_LEVEL, then LOG_LEVEL, then EFP_DEBUG=1 => DEBUG, else INFO."""
@@ -85,14 +104,25 @@ def resolve_request_id(request: web.Request) -> str:
 
 @web.middleware
 async def request_logging_middleware(request: web.Request, handler):
-    """One stdout line per request in, one per request out (always)."""
+    """One stdout line per request in, one per request out (always).
+
+    Probe traffic is demoted to DEBUG only while it succeeds. ``/ready`` and
+    ``/health`` report failure by *returning* 503 rather than raising, and
+    aiohttp's own access log is disabled because this middleware replaces it
+    (``access_log=None`` on both the AppRunner and run_app), so keying the
+    level on the path alone would leave a pod stuck failing readiness with
+    nothing at INFO to explain why -- the single most important signal when a
+    pod will not come up.
+    """
     request_id = resolve_request_id(request)
     request[REQUEST_ID_KEY] = request_id
     method = _field(request.method)
     path = _field(request.path)
     started = time.monotonic()
     status: object = 500
-    logger.info("http.start method=%s path=%s request_id=%s", method, path, _field(request_id))
+    is_probe = is_probe_path(request.path)
+    level = logging.DEBUG if is_probe else logging.INFO
+    logger.log(level, "http.start method=%s path=%s request_id=%s", method, path, _field(request_id))
     try:
         response = await handler(request)
         status = getattr(response, "status", 0) or 0
@@ -105,7 +135,13 @@ async def request_logging_middleware(request: web.Request, handler):
         raise
     finally:
         duration_ms = (time.monotonic() - started) * 1000.0
-        logger.info(
+        # Only a *successful* probe stays quiet; a failing one is the line the
+        # operator most needs. Non-int statuses (the "cancelled" sentinel, the
+        # 500 default) count as not-success.
+        succeeded = isinstance(status, int) and 0 < status < 400
+        end_level = logging.DEBUG if (is_probe and succeeded) else logging.INFO
+        logger.log(
+            end_level,
             "http.end method=%s path=%s status=%s duration_ms=%.1f request_id=%s",
             method,
             path,

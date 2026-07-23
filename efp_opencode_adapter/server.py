@@ -434,6 +434,16 @@ def resolve_upload_client_max_size() -> int:
     return (mb + UPLOAD_TRANSPORT_HEADROOM_MB) * 1024 * 1024
 
 
+async def flush_chatlog_store(app: web.Application) -> None:
+    """Land any coalesced chatlog event appends before the process goes away."""
+    store = app.get(CHATLOG_STORE_KEY)
+    if store is not None and hasattr(store, "flush_all"):
+        try:
+            store.flush_all()
+        except Exception:
+            pass
+
+
 def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None, *, start_event_bridge: bool | None = None, opencode_process_manager: OpenCodeProcessManager | None = None) -> web.Application:
     app = web.Application(
         client_max_size=resolve_upload_client_max_size(),
@@ -460,6 +470,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             opencode_process_manager.event_bus = app[EVENT_BUS_KEY]
         app[OPENCODE_PROCESS_MANAGER_KEY] = opencode_process_manager
     app.on_cleanup.append(cleanup_task_background_tasks)
+    app.on_cleanup.append(flush_chatlog_store)
     app[PORTAL_METADATA_CLIENT_KEY] = PortalMetadataClient(settings, pending_file=state_paths.portal_metadata_pending_file)
     app[RECOVERY_MANAGER_KEY] = RecoveryManager(settings=settings, state_paths=state_paths, session_store=app[SESSION_STORE_KEY], chatlog_store=app[CHATLOG_STORE_KEY], opencode_client=app[OPENCODE_CLIENT_KEY])
     managed_opencode = opencode_process_manager is not None
