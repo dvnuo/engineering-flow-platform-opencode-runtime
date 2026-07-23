@@ -244,6 +244,10 @@ RUN python3 -m venv /opt/venv \
 
 COPY entrypoint.sh /tmp/entrypoint.sh
 COPY scripts/smoke.sh /app/runtime/scripts/smoke.sh
+# The effective gc.recentObjectsHook registration for the opencode child is the
+# one efp_opencode_adapter/git_cli_auth.py writes into GIT_CONFIG_GLOBAL: the
+# child is spawned with GIT_CONFIG_NOSYSTEM=1, so the --system scope below is
+# belt-and-braces for interactive shells only, never the mechanism.
 COPY scripts/opencode-snapshot-recent-objects /usr/local/bin/opencode-snapshot-recent-objects
 
 RUN sed -i 's/\r$//' \

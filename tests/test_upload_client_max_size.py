@@ -8,6 +8,8 @@ EFP_MAX_UPLOAD_MB wiring and its transport headroom.
 from pathlib import Path
 
 from efp_opencode_adapter import server
+from efp_opencode_adapter.server import create_app
+from efp_opencode_adapter.settings import Settings
 
 _HEADROOM = server.UPLOAD_TRANSPORT_HEADROOM_MB
 _DEFAULT = server.DEFAULT_MAX_UPLOAD_MB
@@ -39,5 +41,9 @@ def test_default_matches_native_runtime():
 
 
 def test_create_app_is_wired_with_client_max_size():
+    # Asserted on the built app (not the source text) so the wiring stays locked
+    # no matter which other web.Application(...) arguments are added.
     source = Path("efp_opencode_adapter/server.py").read_text(encoding="utf-8")
-    assert "web.Application(client_max_size=resolve_upload_client_max_size())" in source
+    assert "client_max_size=resolve_upload_client_max_size()" in source
+    app = create_app(Settings.from_env())
+    assert app._client_max_size == server.resolve_upload_client_max_size()

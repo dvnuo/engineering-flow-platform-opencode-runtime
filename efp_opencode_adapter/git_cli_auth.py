@@ -1,15 +1,39 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from .settings import Settings
 
+# The image also registers this hook with `git config --system`, but the
+# opencode child is spawned with GIT_CONFIG_NOSYSTEM=1 (runtime_env), so
+# /etc/gitconfig is never read and the system registration is inert. The
+# effective registration is the one written into the file GIT_CONFIG_GLOBAL
+# points at, below.
+GC_RECENT_OBJECTS_HOOK_PATH = "/usr/local/bin/opencode-snapshot-recent-objects"
+GC_RECENT_OBJECTS_HOOK_ENV = "EFP_GC_RECENT_OBJECTS_HOOK"
+
 
 def _clean(value: object, default: str = "") -> str:
     text = str(value or "").strip()
     return text if text else default
+
+
+def _gc_recent_objects_hook_command() -> str:
+    """Command git gc runs to learn which unreferenced objects to keep.
+
+    Overridable (as a full command) so non-image environments can point at the
+    checked-out script; empty when the hook is not installed, so an ordinary
+    dev box does not get a gc that fails on every repository.
+    """
+    override = _clean(os.getenv(GC_RECENT_OBJECTS_HOOK_ENV))
+    if override:
+        return override.replace("\\", "/")
+    if Path(GC_RECENT_OBJECTS_HOOK_PATH).exists():
+        return GC_RECENT_OBJECTS_HOOK_PATH
+    return ""
 
 
 def _sanitize_git_config_value(value: object, default: str = "") -> str:
@@ -77,6 +101,9 @@ esac
     author_email = _sanitize_git_config_value(env.get("GIT_AUTHOR_EMAIL"), "efp@example.invalid")
     credential_store_config_path = str(credential_store_path).replace("\\", "/")
 
+    gc_hook_command = _sanitize_git_config_value(_gc_recent_objects_hook_command())
+    gc_section = f"\n[gc]\n\trecentObjectsHook = {gc_hook_command}\n" if gc_hook_command else ""
+
     gitconfig = f"""[user]
 \tname = {author_name}
 \temail = {author_email}
@@ -90,7 +117,7 @@ esac
 [url "https://{host}/"]
 \tinsteadOf = git@{host}:
 \tinsteadOf = ssh://git@{host}/
-"""
+{gc_section}"""
     _write_text(gitconfig_path, gitconfig, 0o600)
 
     validation = subprocess.run(
@@ -123,4 +150,5 @@ esac
         "askpass_path": str(askpass_path),
         "gitconfig_path": str(gitconfig_path),
         "credential_store_path": str(credential_store_path),
+        "gc_recent_objects_hook": gc_hook_command,
     }

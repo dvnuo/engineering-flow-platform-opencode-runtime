@@ -45,6 +45,7 @@ from .compat_api import (
 from .event_bus import EventBus, events_ws_handler
 from .event_bridge import OpenCodeEventBridge
 from .file_routes import register_file_routes
+from .logging_setup import configure_logging, request_logging_middleware
 from .opencode_client import OpenCodeClient, OpenCodeClientError
 from .permissions_api import permission_respond_handler
 from .portal_metadata_client import PortalMetadataClient
@@ -60,7 +61,7 @@ from .portal_runtime_context_bootstrap import run_boot_projection_from_env
 from .profile_store import ProfileOverlayStore, build_profile_status_payload, sanitize_public_secrets
 from .runtime_env import aws_status_from_env, build_runtime_env_from_config, read_runtime_env_file
 from .thinking_events import safe_preview
-from .opencode_process import OpenCodeProcessManager
+from .opencode_process import LOG_TAIL_PREVIEW_CHARS, OpenCodeProcessManager
 from .session_store import SessionStore
 from .task_store import TaskStore
 from .tasks_api import cancel_task_handler, cleanup_task_background_tasks, execute_task_handler, get_task_full_handler, get_task_handler
@@ -396,14 +397,19 @@ async def internal_opencode_log_tail_handler(request: web.Request) -> web.Respon
         lines = 200
     lines = max(1, min(lines, 2000))
     if manager is not None and hasattr(manager, "log_tail"):
-        text = manager.log_tail(lines)
+        # The manager sanitizes (and safe_preview below re-scans) only what the
+        # response keeps: the request must never carry the cost of the whole
+        # ring through two full redaction passes on the event loop.
+        text = manager.log_tail(lines, max_chars=LOG_TAIL_PREVIEW_CHARS)
     else:
         log_path = settings.adapter_state_dir / "opencode-serve.log"
         try:
             text = "\n".join(log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-lines:])
         except Exception:
             text = ""
-    return web.json_response({"success": True, "engine": "opencode", "lines": lines, "log_tail": safe_preview(text, 20000)})
+    return web.json_response(
+        {"success": True, "engine": "opencode", "lines": lines, "log_tail": safe_preview(text, LOG_TAIL_PREVIEW_CHARS)}
+    )
 
 
 DEFAULT_MAX_UPLOAD_MB = 25
@@ -429,7 +435,10 @@ def resolve_upload_client_max_size() -> int:
 
 
 def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None, *, start_event_bridge: bool | None = None, opencode_process_manager: OpenCodeProcessManager | None = None) -> web.Application:
-    app = web.Application(client_max_size=resolve_upload_client_max_size())
+    app = web.Application(
+        client_max_size=resolve_upload_client_max_size(),
+        middlewares=[request_logging_middleware],
+    )
     app[SETTINGS_KEY] = settings
     state_paths = ensure_state_dirs(settings)
     app[STATE_PATHS_KEY] = state_paths
@@ -536,6 +545,9 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             "env_hash": projection.env_hash,
             "env": dict(projection.env),
         }
+        # The profile's debug settings are projected for the child; apply them
+        # to the adapter's own logger too before the child starts.
+        configure_logging({**os.environ, **projection.env})
         # Scrub the full Secret blob before any child process can spawn.
         os.environ.pop(PROFILE_CONFIG_ENV, None)
         await manager.start(projection.env, reason="startup")
@@ -570,11 +582,14 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
 
 
 async def run_server(host: str, port: int, settings: Settings) -> None:
+    configure_logging()
     print(f"adapter listening on {host}:{port}")
     print(f"opencode url {settings.opencode_url}")
     print(f"configured opencode version {settings.opencode_version or 'not enforced'}")
     app = create_app(settings)
-    runner = web.AppRunner(app)
+    # request_logging_middleware is the per-request log; aiohttp's own access
+    # log (invisible before the adapter had a handler) would only duplicate it.
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, host=host, port=port)
     await site.start()
@@ -589,6 +604,7 @@ def main() -> None:
     parser.add_argument("--opencode-url", default=None)
     parser.add_argument("--manage-opencode", action="store_true")
     args = parser.parse_args()
+    configure_logging()
     settings = Settings.from_env(opencode_url=args.opencode_url)
     print(f"adapter listening on {args.host}:{args.port}")
     print(f"opencode url {settings.opencode_url}")
@@ -599,7 +615,9 @@ def main() -> None:
         app = create_app(settings, client, opencode_process_manager=manager)
     else:
         app = create_app(settings)
-    web.run_app(app, host=args.host, port=args.port)
+    # access_log=None: request_logging_middleware already emits one start/end
+    # pair per request; aiohttp's access log would only duplicate it.
+    web.run_app(app, host=args.host, port=args.port, access_log=None)
 
 
 if __name__ == "__main__":
