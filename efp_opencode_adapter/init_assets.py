@@ -9,6 +9,7 @@ from .opencode_config import build_opencode_config, merge_with_existing_config, 
 from .runtime_env import ensure_opencode_xdg_data_home
 from .settings import Settings
 from .skill_sync import sync_runtime_skills
+from .workspace_gitignore import ensure_workspace_gitignore
 
 
 
@@ -29,6 +30,7 @@ def init_assets(settings: Settings) -> None:
     sync_runtime_skills(settings)
 
     ensure_default_agents_md(settings)
+    ensure_workspace_gitignore(settings)
     _refresh_managed_opencode_config(settings)
 
 
