@@ -1,8 +1,17 @@
+import shutil
+
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from efp_opencode_adapter import state as state_mod
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
+from efp_opencode_adapter.state import (
+    STATE_HEALTH_CACHE_TTL_SECONDS,
+    build_state_health_snapshot,
+    ensure_state_dirs,
+    reset_state_health_cache,
+)
 
 
 class FakeHealthyClient:
@@ -136,3 +145,45 @@ async def test_health_client_exception_is_degraded_and_does_not_leak_secret(monk
     assert "token" not in combined.lower()
 
     await client.close()
+
+
+def test_state_health_probe_is_cached_for_a_short_window():
+    """k8s and the actuator scanners poll health several times a second; each
+    snapshot writes probe files into six PVC directories, so a burst must cost
+    one pass -- while a PVC that turns unusable is still reported within the TTL."""
+    settings = Settings.from_env()
+    paths = ensure_state_dirs(settings)
+    reset_state_health_cache()
+
+    assert build_state_health_snapshot(settings, paths, now=100.0)["healthy"] is True
+
+    # The PVC turns unusable: probing chatlogs_dir now fails, because it is a file.
+    shutil.rmtree(paths.chatlogs_dir)
+    paths.chatlogs_dir.write_text("not a directory", encoding="utf-8")
+
+    inside_ttl = build_state_health_snapshot(settings, paths, now=100.0 + STATE_HEALTH_CACHE_TTL_SECONDS - 0.01)
+    assert inside_ttl["healthy"] is True
+
+    after_ttl = build_state_health_snapshot(settings, paths, now=100.0 + STATE_HEALTH_CACHE_TTL_SECONDS + 0.01)
+    assert after_ttl["healthy"] is False
+    assert after_ttl["paths"]["chatlogs_dir"]["writable"] is False
+
+
+@pytest.mark.asyncio
+async def test_repeated_health_probes_do_not_touch_the_filesystem_again(monkeypatch):
+    reset_state_health_cache()
+    app = create_app(Settings.from_env(), opencode_client=FakeHealthyClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        assert (await client.get("/health")).status == 200
+
+        probed = []
+        original = state_mod.probe_writable
+        monkeypatch.setattr(state_mod, "probe_writable", lambda p: (probed.append(p), original(p))[1])
+        for _ in range(10):
+            assert (await client.get("/actuator/health")).status == 200
+
+        assert probed == []
+    finally:
+        await client.close()

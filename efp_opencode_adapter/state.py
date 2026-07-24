@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
 from .profile_store import sanitize_public_secrets
 from .settings import Settings
+
+# Every /health (and /actuator/health) hit mkdir+writes+unlinks a probe file in
+# six directories on the EFS PVC, on the event loop, and k8s plus the Spring
+# actuator scanners hit those endpoints several times a second. The snapshot is
+# cached for a short window so a burst of probes costs one pass, while a PVC
+# that turns read-only is still reported within the TTL.
+STATE_HEALTH_CACHE_TTL_SECONDS = 5.0
+
+_state_health_cache: dict[tuple[str, str, str], tuple[float, dict]] = {}
+
+
+def reset_state_health_cache() -> None:
+    _state_health_cache.clear()
 
 
 @dataclass(frozen=True)
@@ -54,7 +68,18 @@ def probe_writable(path: Path) -> dict:
         return {"path": str(path), "exists": path.exists(), "writable": False, "error": _public_error(exc)}
 
 
-def build_state_health_snapshot(settings: Settings, state_paths: CompatStatePaths) -> dict:
+def build_state_health_snapshot(
+    settings: Settings,
+    state_paths: CompatStatePaths,
+    *,
+    ttl_seconds: float = STATE_HEALTH_CACHE_TTL_SECONDS,
+    now: float | None = None,
+) -> dict:
+    key = (str(state_paths.root), str(settings.opencode_data_dir), str(settings.workspace_dir))
+    moment = time.monotonic() if now is None else float(now)
+    cached = _state_health_cache.get(key)
+    if cached is not None and (moment - cached[0]) < float(ttl_seconds):
+        return cached[1]
     paths = {
         "adapter_state_dir": probe_writable(state_paths.root),
         "tasks_dir": probe_writable(state_paths.tasks_dir),
@@ -63,4 +88,6 @@ def build_state_health_snapshot(settings: Settings, state_paths: CompatStatePath
         "opencode_data_dir": probe_writable(settings.opencode_data_dir),
         "workspace_dir": probe_writable(settings.workspace_dir),
     }
-    return {"healthy": all(bool(item.get("writable")) for item in paths.values()), "paths": paths}
+    snapshot = {"healthy": all(bool(item.get("writable")) for item in paths.values()), "paths": paths}
+    _state_health_cache[key] = (moment, snapshot)
+    return snapshot

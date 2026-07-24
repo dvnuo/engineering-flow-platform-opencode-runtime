@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -86,7 +88,9 @@ from .settings import (
     profile_env_revision,
 )
 from .state import build_state_health_snapshot, ensure_state_dirs
-import asyncio
+
+
+logger = logging.getLogger(__name__)
 
 
 def _boot_projection_snapshot(app: web.Application) -> dict[str, Any] | None:
@@ -434,6 +438,16 @@ def resolve_upload_client_max_size() -> int:
     return (mb + UPLOAD_TRANSPORT_HEADROOM_MB) * 1024 * 1024
 
 
+async def flush_chatlog_store(app: web.Application) -> None:
+    """Land any coalesced chatlog event appends before the process goes away."""
+    store = app.get(CHATLOG_STORE_KEY)
+    if store is not None and hasattr(store, "flush_all"):
+        try:
+            await asyncio.to_thread(store.flush_all)
+        except Exception:
+            logger.warning("chatlog.flush_all.failed", exc_info=True)
+
+
 def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None, *, start_event_bridge: bool | None = None, opencode_process_manager: OpenCodeProcessManager | None = None) -> web.Application:
     app = web.Application(
         client_max_size=resolve_upload_client_max_size(),
@@ -567,6 +581,11 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     if should_start_event_bridge:
         app.on_startup.append(_start_event_bridge)
         app.on_cleanup.append(_cleanup_event_bridge)
+    # Stop every producer before landing coalesced events. Registering this
+    # before the event bridge cleanup leaves a race where the bridge appends
+    # another event after the final flush.
+    app.on_cleanup.append(flush_chatlog_store)
+
     async def _cleanup_opencode_watchdog(app):
         task = app.get(OPENCODE_WATCHDOG_TASK_KEY)
         if task:

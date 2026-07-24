@@ -7,6 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter.logging_setup import (
     REQUEST_ID_KEY,
     configure_logging,
+    is_probe_path,
     request_logging_middleware,
     resolve_log_level,
 )
@@ -17,6 +18,14 @@ from test_t06_helpers import FakeOpenCodeClient
 
 def _lines(caplog, prefix):
     return [record.getMessage() for record in caplog.records if record.getMessage().startswith(prefix)]
+
+
+def _http_records(caplog, level):
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == level and record.getMessage().startswith("http.")
+    ]
 
 
 def _build_app(handler, path="/probe", method="GET"):
@@ -87,6 +96,81 @@ async def test_middleware_logs_end_line_when_handler_raises(caplog):
 
     assert response.status == 502
     assert "status=502" in _lines(caplog, "http.end")[0]
+
+
+async def _get_and_capture(caplog, path):
+    async def handler(request):
+        return web.json_response({"ok": True})
+
+    client = TestClient(TestServer(_build_app(handler, path=path)))
+    await client.start_server()
+    try:
+        with caplog.at_level(logging.DEBUG, logger="efp_opencode_adapter.logging_setup"):
+            await client.get(path)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    ["/ready", "/readyz", "/health", "/healthz", "/live", "/actuator", "/actuator/health", "/actuator/threaddump"],
+)
+async def test_probe_requests_are_logged_at_debug_and_never_at_info(caplog, path):
+    await _get_and_capture(caplog, path)
+
+    assert _http_records(caplog, logging.INFO) == []
+    debug_lines = _http_records(caplog, logging.DEBUG)
+    assert len(debug_lines) == 2
+    assert debug_lines[0].startswith("http.start") and f"path={path}" in debug_lines[0]
+    assert debug_lines[1].startswith("http.end") and "status=200" in debug_lines[1]
+
+
+@pytest.mark.asyncio
+async def test_failing_probe_end_line_resurfaces_at_info(caplog):
+    """A probe demoted to DEBUG must return to INFO when it FAILS.
+
+    /ready and /health report failure by returning 503, not by raising, and
+    this middleware replaces aiohttp's own access log (access_log=None), so a
+    pod stuck failing readiness would otherwise emit nothing at INFO.
+    """
+    async def handler(request):
+        return web.json_response({"ready": False}, status=503)
+
+    client = TestClient(TestServer(_build_app(handler, path="/ready")))
+    await client.start_server()
+    try:
+        with caplog.at_level(logging.DEBUG, logger="efp_opencode_adapter.logging_setup"):
+            await client.get("/ready")
+    finally:
+        await client.close()
+
+    info_lines = _http_records(caplog, logging.INFO)
+    assert any(l.startswith("http.end") and "status=503" in l for l in info_lines)
+    assert not any(l.startswith("http.end") for l in _http_records(caplog, logging.DEBUG))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/chat/stream", "/api/sessions", "/api/actuator-report", "/myactuator"])
+async def test_real_requests_stay_at_info(caplog, path):
+    await _get_and_capture(caplog, path)
+
+    info_lines = _http_records(caplog, logging.INFO)
+    assert len(info_lines) == 2
+    assert info_lines[0].startswith("http.start") and f"path={path}" in info_lines[0]
+    assert info_lines[1].startswith("http.end")
+    assert _http_records(caplog, logging.DEBUG) == []
+
+
+def test_is_probe_path_matches_probes_only():
+    assert is_probe_path("/ready") and is_probe_path("/health") and is_probe_path("/live")
+    assert is_probe_path("/healthz") and is_probe_path("/readyz")
+    assert is_probe_path("/actuator") and is_probe_path("/actuator/") and is_probe_path("/actuator/env")
+    assert not is_probe_path("/api/actuator-report")
+    assert not is_probe_path("/myactuator")
+    assert not is_probe_path("/api/health-report")
+    assert not is_probe_path("/api/chat/stream")
+    assert not is_probe_path("/")
 
 
 def test_create_app_wires_the_request_logging_middleware(tmp_path, monkeypatch):
