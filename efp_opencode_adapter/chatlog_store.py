@@ -48,8 +48,14 @@ class ChatLogStore:
 
         self._cache[name] = payload
         self._cache.move_to_end(name)
+        # Never evict the payload being remembered. When every older entry is
+        # pending this may temporarily exceed the cap, but the current payload
+        # is about to become pending too; evicting it here can leave a pending
+        # name without its payload and lose coalesced events.
         for candidate in [
-            key for key in self._cache if key not in self._pending
+            key
+            for key in self._cache
+            if key != name and key not in self._pending
         ][: max(0, len(self._cache) - self.max_cached_sessions)]:
             self._cache.pop(candidate, None)
             self._last_write_at.pop(candidate, None)
@@ -62,15 +68,17 @@ class ChatLogStore:
         return self.chatlogs_dir / f"{self._sanitize(session_id)}.json"
 
     def get(self, session_id: str) -> dict | None:
-        cached = self._cache.get(self._sanitize(session_id))
+        name = self._sanitize(session_id)
+        cached = self._cache.get(name)
         if cached is not None:
+            self._cache.move_to_end(name)
             return cached
         p = self._path(session_id)
         if not p.exists():
             return None
         payload = json.loads(p.read_text(encoding="utf-8"))
         if isinstance(payload, dict):
-            self._remember(self._sanitize(session_id), payload)
+            self._remember(name, payload)
         return payload
 
     def _write(self, session_id: str, payload: dict) -> dict:

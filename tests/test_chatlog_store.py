@@ -142,6 +142,49 @@ def test_flush_all_persists_pending_event_appends(tmp_path):
     assert s.flush_all() == 0
 
 
+def test_pending_sessions_do_not_evict_a_new_pending_session(tmp_path):
+    clock = _FakeClock()
+    s = ChatLogStore(
+        tmp_path,
+        event_flush_interval_seconds=10.0,
+        max_cached_sessions=2,
+        clock=clock,
+    )
+    for session_id in ("a", "b"):
+        s.start_entry(session_id, request_id="r1", message="hello")
+        s.append_event(
+            session_id,
+            request_id="r1",
+            event={"type": f"{session_id}.pending"},
+        )
+
+    s.start_entry("c", request_id="r1", message="hello")
+    for index in range(5):
+        s.append_event(
+            "c",
+            request_id="r1",
+            event={"type": f"c.{index}"},
+        )
+
+    # Pending entries are pinned even when that temporarily exceeds the cache
+    # cap; otherwise the name remains pending without a payload to flush.
+    assert "c" in s._cache
+    assert "c" in s._pending
+    assert s.flush("c") is True
+    assert _disk_event_types(tmp_path, "c") == [f"c.{index}" for index in range(5)]
+
+
+def test_cache_hits_refresh_lru_order(tmp_path):
+    s = ChatLogStore(tmp_path, max_cached_sessions=2)
+    s.start_entry("a", request_id="r1", message="hello")
+    s.start_entry("b", request_id="r1", message="hello")
+
+    assert s.get("a") is not None
+    s.start_entry("c", request_id="r1", message="hello")
+
+    assert list(s._cache) == ["a", "c"]
+
+
 def test_deleted_session_is_not_served_from_memory(tmp_path):
     clock = _FakeClock()
     s = ChatLogStore(tmp_path, event_flush_interval_seconds=10.0, clock=clock)

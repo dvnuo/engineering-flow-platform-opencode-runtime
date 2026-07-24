@@ -1,8 +1,11 @@
+import logging
+
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from efp_opencode_adapter.app_keys import SESSION_STORE_KEY
-from efp_opencode_adapter.server import create_app
+from efp_opencode_adapter import server as server_mod
+from efp_opencode_adapter.app_keys import CHATLOG_STORE_KEY, SESSION_STORE_KEY
+from efp_opencode_adapter.server import create_app, flush_chatlog_store
 from efp_opencode_adapter.session_store import SessionRecord
 from efp_opencode_adapter.settings import Settings
 from test_t06_helpers import FakeOpenCodeClient
@@ -74,3 +77,50 @@ async def test_shutdown_lands_coalesced_chatlog_events_on_disk(tmp_path, monkeyp
 
     on_disk = json.loads(chatlog_path.read_text(encoding="utf-8"))
     assert [e["type"] for e in on_disk["entries"][-1]["runtime_events"]] == ["tool.started"]
+
+
+@pytest.mark.asyncio
+async def test_chatlog_cleanup_offloads_flush_and_warns_on_failure(
+    monkeypatch,
+    caplog,
+):
+    calls = []
+
+    class FailingStore:
+        def flush_all(self):
+            calls.append("flush_all")
+            raise OSError("disk unavailable")
+
+    async def fake_to_thread(function, *args):
+        calls.append("to_thread")
+        return function(*args)
+
+    monkeypatch.setattr(server_mod.asyncio, "to_thread", fake_to_thread)
+    app = {CHATLOG_STORE_KEY: FailingStore()}
+
+    with caplog.at_level(logging.WARNING, logger=server_mod.__name__):
+        await flush_chatlog_store(app)
+
+    assert calls == ["to_thread", "flush_all"]
+    assert "chatlog.flush_all.failed" in caplog.text
+
+
+def test_chatlog_flush_runs_after_event_bridge_cleanup(tmp_path, monkeypatch):
+    class EventStreamClient(FakeOpenCodeClient):
+        async def event_stream(self):
+            if False:
+                yield {}
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    app = create_app(
+        Settings.from_env(),
+        opencode_client=EventStreamClient(),
+        start_event_bridge=True,
+    )
+
+    cleanup_names = [callback.__name__ for callback in app.on_cleanup]
+
+    assert cleanup_names.index("_cleanup_event_bridge") < cleanup_names.index(
+        "flush_chatlog_store"
+    )
