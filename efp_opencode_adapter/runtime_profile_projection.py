@@ -222,6 +222,9 @@ def _has_enabled_jenkins_config(config: dict[str, Any]) -> bool:
     jenkins = config.get("jenkins")
     if not isinstance(jenkins, dict) or jenkins.get("enabled") is not True:
         return False
+    if isinstance(jenkins.get("instances"), list):
+        # Multi-instance Jenkins profiles are shaped like jira/confluence.
+        return _has_enabled_instance_section(config, "jenkins")
     username = str(jenkins.get("username") or "").strip()
     password = str(jenkins.get("password") or "").strip()
     return bool(username and password)

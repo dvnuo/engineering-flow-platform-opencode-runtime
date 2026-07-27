@@ -24,9 +24,10 @@ def build_tools_config_json(effective_config: dict[str, Any]) -> dict[str, Any]:
     (internal/config/config.go): top-level keys version/jira/confluence/
     jenkins/aws/visual/mobile-auto. Jira/Confluence/Jenkins sections are
     transformed from the profile shape into the tools instances shape (Jenkins
-    is a single flat instance wrapped into a one-element list); the other
-    sections are taken from the effective config verbatim. Empty sections are
-    omitted.
+    goes through the same multi-instance projection as Jira/Confluence, with
+    the legacy flat Jenkins profile normalised into a one-element list); the
+    other sections are taken from the effective config verbatim. Empty sections
+    are omitted.
 
     The returned dict is flattened by :func:`flatten_config_to_env` into the
     EFP_-prefixed indexed env vars the Go CLIs consume.
@@ -39,22 +40,14 @@ def build_tools_config_json(effective_config: dict[str, Any]) -> dict[str, Any]:
     if isinstance(version, int) and not isinstance(version, bool):
         root["version"] = version
 
-    for product in ("jira", "confluence"):
-        section = effective_config.get(product)
+    for product in ("jira", "confluence", "jenkins"):
+        section = _normalized_product_config(effective_config.get(product), product=product)
         instances = _build_product_instances(section, product=product)
         if not instances:
             continue
         root[product] = {
             "default_instance": _default_instance_name(section, instances),
             "instances": [_tools_instance_config(instance, product=product) for instance in instances],
-        }
-
-    jenkins_section = effective_config.get("jenkins")
-    jenkins_instances = _build_jenkins_instances(jenkins_section)
-    if jenkins_instances:
-        root["jenkins"] = {
-            "default_instance": _default_instance_name(jenkins_section, jenkins_instances),
-            "instances": [_tools_instance_config(instance, product="jenkins") for instance in jenkins_instances],
         }
 
     for section_name in ("aws", "visual", "mobile-auto"):
@@ -170,29 +163,44 @@ def _build_product_instances(product_config: Any, *, product: str) -> list[dict[
             instance = {
                 "name": name,
                 "base_url": base_url,
-                "rest_path": str(raw.get("rest_path") or "/rest/api"),
+                "rest_path": str(raw.get("rest_path") or _default_rest_path(product)),
                 "auth": auth,
             }
         instances.append(instance)
     return instances
 
 
-def _build_jenkins_instances(section: Any) -> list[dict[str, Any]]:
-    """Wrap the flat Jenkins profile section into a single tools instance.
+def _default_rest_path(product: str) -> str:
+    """Return the per-product REST prefix used when an instance omits one.
 
-    The Jenkins profile is a single flat ``{enabled, url, username, password}``
-    block (not a multi-instance list like Jira/Confluence), so it maps to a
-    one-element instances list. Dropped (returns ``[]``) when disabled or when
-    no base URL is present, since the Jenkins CLI requires a base URL.
+    Atlassian CLIs address a REST base below the site URL; the Jenkins CLI
+    talks to the controller root, so Jenkins deliberately keeps an EMPTY
+    rest_path (injecting an Atlassian-style prefix would break every URL).
     """
-    if not isinstance(section, dict) or section.get("enabled") is False:
-        return []
-    base_url = _profile_instance_base_url(section)
-    if not base_url:
-        return []
-    auth = _build_auth(section)
-    name = str(section.get("name") or "jenkins").strip() or "jenkins"
-    return [{"name": name, "base_url": base_url, "rest_path": str(section.get("rest_path") or ""), "auth": auth}]
+    return "" if product == "jenkins" else "/rest/api"
+
+
+def _normalized_product_config(product_config: Any, *, product: str) -> Any:
+    """Normalise a product section to the multi-instance ``instances`` shape.
+
+    Jenkins profiles saved before the Portal grew a multi-instance Jenkins UI
+    carry the flat ``{enabled, url, username, password}`` shape. Wrap such a
+    section into a one-element ``instances`` list (named "jenkins" unless the
+    section names it) so the generic builder projects it exactly as the old
+    Jenkins-only builder did. Sections that already carry ``instances`` and all
+    other products are returned unchanged.
+    """
+    if product != "jenkins" or not isinstance(product_config, dict):
+        return product_config
+    if isinstance(product_config.get("instances"), list):
+        return product_config
+    legacy_instance = {
+        key: value
+        for key, value in product_config.items()
+        if key not in ("enabled", "instances", "default_instance")
+    }
+    legacy_instance["name"] = str(product_config.get("name") or "jenkins").strip() or "jenkins"
+    return {**product_config, "instances": [legacy_instance]}
 
 
 def _profile_instance_base_url(raw: dict[str, Any]) -> str:

@@ -114,3 +114,122 @@ def test_build_tools_config_json_keeps_aws_mobile_version_verbatim():
     assert root["aws"] == {"enabled": True, "domain": "HBEU"}
     assert root["mobile-auto"] == {"enabled": True, "default_provider": "browserstack"}
     assert set(root) >= {"jira", "confluence", "jenkins", "aws", "mobile-auto", "version"}
+
+
+# ---------------------------------------------------------------------------
+# Jenkins multi-instance projection (aligned with jira/confluence)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_flat_jenkins_profile_projection_is_unchanged():
+    """Backward compatibility: the flat saved shape projects exactly as before."""
+    root = build_tools_config_json(
+        {
+            "jenkins": {
+                "enabled": True,
+                "url": "https://ci.example/",
+                "username": "ciuser",
+                "password": "cipass",
+            }
+        }
+    )
+    assert root["jenkins"] == {
+        "default_instance": "jenkins",
+        "instances": [
+            {
+                "name": "jenkins",
+                "base_url": "https://ci.example",
+                "rest_path": "",
+                "auth": {"type": "basic_password", "username": "ciuser", "password": "cipass"},
+            }
+        ],
+    }
+    assert flatten_config_to_env(root) == {
+        "EFP_JENKINS_DEFAULT_INSTANCE": "jenkins",
+        "EFP_JENKINS_INSTANCES_0_NAME": "jenkins",
+        "EFP_JENKINS_INSTANCES_0_BASE_URL": "https://ci.example",
+        "EFP_JENKINS_INSTANCES_0_AUTH_TYPE": "basic_password",
+        "EFP_JENKINS_INSTANCES_0_AUTH_USERNAME": "ciuser",
+        "EFP_JENKINS_INSTANCES_0_AUTH_PASSWORD": "cipass",
+    }
+
+
+def test_build_cli_env_projects_multiple_jenkins_instances():
+    env = build_cli_env(
+        {
+            "jenkins": {
+                "enabled": True,
+                "instances": [
+                    {"name": "ci", "url": "https://ci.example/", "username": "ciuser", "password": "cipass"},
+                    {"name": "release", "url": "https://release.example", "token": "rtok"},
+                    {"name": "ci", "url": "https://ci2.example", "token": "ci2tok"},
+                    {"name": "off", "url": "https://off.example", "enabled": False},
+                    {"name": "no-url", "token": "ignored"},
+                ],
+            }
+        }
+    )
+    assert env["EFP_JENKINS_DEFAULT_INSTANCE"] == "ci"
+    assert env["EFP_JENKINS_INSTANCES_0_NAME"] == "ci"
+    assert env["EFP_JENKINS_INSTANCES_0_BASE_URL"] == "https://ci.example"
+    assert env["EFP_JENKINS_INSTANCES_0_AUTH_USERNAME"] == "ciuser"
+    assert env["EFP_JENKINS_INSTANCES_0_AUTH_PASSWORD"] == "cipass"
+    assert env["EFP_JENKINS_INSTANCES_1_NAME"] == "release"
+    assert env["EFP_JENKINS_INSTANCES_1_BASE_URL"] == "https://release.example"
+    assert env["EFP_JENKINS_INSTANCES_1_AUTH_TOKEN"] == "rtok"
+    # Duplicate names are deduped exactly like jira/confluence.
+    assert env["EFP_JENKINS_INSTANCES_2_NAME"] == "ci-2"
+    assert env["EFP_JENKINS_INSTANCES_2_BASE_URL"] == "https://ci2.example"
+    # Disabled and url-less instances never reach the CLI env.
+    assert "EFP_JENKINS_INSTANCES_3_NAME" not in env
+    assert not any(value == "https://off.example" for value in env.values())
+
+
+def test_jenkins_instances_keep_empty_rest_path_unlike_atlassian():
+    """Jenkins must never inherit the Atlassian /rest/api default."""
+    env = build_cli_env(
+        {
+            "jenkins": {"enabled": True, "instances": [{"name": "ci", "url": "https://ci.example"}]},
+            "confluence": {"enabled": True, "instances": [{"name": "docs", "url": "https://docs.example"}]},
+        }
+    )
+    assert "EFP_JENKINS_INSTANCES_0_REST_PATH" not in env
+    assert env["EFP_CONFLUENCE_INSTANCES_0_REST_PATH"] == "/rest/api"
+
+
+def test_jenkins_explicit_default_instance_wins():
+    env = build_cli_env(
+        {
+            "jenkins": {
+                "enabled": True,
+                "default_instance": "release",
+                "instances": [
+                    {"name": "ci", "url": "https://ci.example"},
+                    {"name": "release", "url": "https://release.example"},
+                ],
+            }
+        }
+    )
+    assert env["EFP_JENKINS_DEFAULT_INSTANCE"] == "release"
+
+
+def test_jenkins_unknown_default_instance_falls_back_to_first():
+    env = build_cli_env(
+        {
+            "jenkins": {
+                "enabled": True,
+                "default_instance": "nope",
+                "instances": [
+                    {"name": "ci", "url": "https://ci.example"},
+                    {"name": "release", "url": "https://release.example"},
+                ],
+            }
+        }
+    )
+    assert env["EFP_JENKINS_DEFAULT_INSTANCE"] == "ci"
+
+
+def test_disabled_jenkins_section_drops_all_instances():
+    assert build_cli_env(
+        {"jenkins": {"enabled": False, "instances": [{"name": "ci", "url": "https://ci.example"}]}}
+    ) == {}
