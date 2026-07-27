@@ -225,9 +225,15 @@ def _has_enabled_jenkins_config(config: dict[str, Any]) -> bool:
     if isinstance(jenkins.get("instances"), list):
         # Multi-instance Jenkins profiles are shaped like jira/confluence.
         return _has_enabled_instance_section(config, "jenkins")
-    username = str(jenkins.get("username") or "").strip()
-    password = str(jenkins.get("password") or "").strip()
-    return bool(username and password)
+    # Legacy flat section (pre multi-instance Jenkins UI): judged by the same
+    # rule, as a single instance. Requiring username+password here instead
+    # would get it wrong in both directions -- it claimed Jenkins was usable
+    # with no endpoint at all (the projection drops such a section, so the
+    # agent was told about a CLI it could not use), and it denied a valid
+    # url+token profile that the CLI does support.
+    return _has_enabled_instance_section(
+        {"jenkins": {"enabled": True, "instances": [jenkins]}}, "jenkins"
+    )
 
 
 def _has_enabled_mobile_config(config: dict[str, Any]) -> bool:
