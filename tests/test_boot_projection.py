@@ -97,6 +97,30 @@ def test_boot_projection_end_to_end_with_canonical_copilot_llm():
     assert "github-copilot" in cfg["provider"]
 
 
+def test_native_cli_instructions_recognise_multi_instance_jenkins():
+    # The Jenkins profile now carries instances[] like jira/confluence; the CLI
+    # tool instructions must still be injected for the native runtime.
+    config = {
+        "jenkins": {
+            "enabled": True,
+            "instances": [
+                {"name": "ci", "url": "https://ci.example", "username": "u", "password": "p"}
+            ],
+        }
+    }
+    assert project_canonical_for_runtime(config, "native")["instruction_texts"]
+    # Legacy flat shape keeps working.
+    assert project_canonical_for_runtime(
+        {"jenkins": {"enabled": True, "url": "https://ci.example", "username": "u", "password": "p"}},
+        "native",
+    )["instruction_texts"]
+    # No usable instance -> no instructions.
+    assert "instruction_texts" not in project_canonical_for_runtime(
+        {"jenkins": {"enabled": True, "instances": [{"name": "ci", "username": "u", "password": "p"}]}},
+        "native",
+    )
+
+
 def test_missing_profile_env_is_fatal(monkeypatch):
     monkeypatch.delenv("EFP_PROFILE_CONFIG", raising=False)
     with pytest.raises(ProfileEnvError, match="EFP_PROFILE_CONFIG is not set"):
