@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import inspect
@@ -63,6 +64,14 @@ def portal_author_metadata_from_request(request: web.Request) -> dict[str, str]:
     headers = getattr(request, "headers", {})
     source = str(headers.get("X-Portal-Author-Source") or "").strip().lower()
     if source != "portal":
+        return {}
+    app = getattr(request, "app", {})
+    settings = app.get(SETTINGS_KEY) if hasattr(app, "get") else None
+    expected_token = str(getattr(settings, "portal_internal_token", None) or "").strip()
+    supplied_token = str(headers.get("X-Portal-Internal-Token") or "").strip()
+    if not expected_token or not supplied_token:
+        return {}
+    if not hmac.compare_digest(expected_token, supplied_token):
         return {}
 
     def _clean(name: str, max_length: int) -> str:

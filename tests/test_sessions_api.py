@@ -80,6 +80,7 @@ async def test_session_history_keeps_original_portal_user_when_viewed_by_another
             }
 
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("PORTAL_INTERNAL_TOKEN", "runtime-token")
     app = create_app(Settings.from_env(), opencode_client=_MessageIdAwareFakeOpenCodeClient())
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -89,6 +90,7 @@ async def test_session_history_keeps_original_portal_user_when_viewed_by_another
             json={"message": "hello from Bob", "session_id": "shared-session"},
             headers={
                 "X-Portal-Author-Source": "portal",
+                "X-Portal-Internal-Token": "runtime-token",
                 "X-Portal-User-Id": "user-2",
                 "X-Portal-User-Name": "Bob",
             },
@@ -99,6 +101,7 @@ async def test_session_history_keeps_original_portal_user_when_viewed_by_another
             "/api/sessions/shared-session",
             headers={
                 "X-Portal-Author-Source": "portal",
+                "X-Portal-Internal-Token": "runtime-token",
                 "X-Portal-User-Id": "user-1",
                 "X-Portal-User-Name": "Alice",
             },
