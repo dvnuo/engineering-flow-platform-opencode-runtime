@@ -1,5 +1,9 @@
-from efp_opencode_adapter.chat_api import extract_assistant_text
+from efp_opencode_adapter.chat_api import (
+    extract_assistant_text,
+    portal_author_metadata_from_request,
+)
 from efp_opencode_adapter.sessions_api import _to_efp_messages
+from efp_opencode_adapter.user_display_store import UserDisplayStore
 
 
 def test_to_efp_messages_supports_opencode_info_parts_shape():
@@ -15,6 +19,64 @@ def test_to_efp_messages_supports_opencode_info_parts_shape():
     assert out[1]["id"] == "a1"
     assert out[1]["role"] == "assistant"
     assert out[1]["content"] == "hi"
+
+
+def test_to_efp_messages_promotes_persisted_user_author(tmp_path):
+    display_store = UserDisplayStore(tmp_path / "user-display.json")
+    display_store.put_user_message(
+        portal_session_id="portal-session",
+        opencode_session_id="opencode-session",
+        opencode_message_id="u1",
+        display_content="hello from Bob",
+        metadata={
+            "author_id": "user-2",
+            "author_name": "Bob",
+            "author_type": "human",
+            "author_source": "portal",
+        },
+    )
+    raw = [
+        {
+            "info": {"id": "u1", "role": "user"},
+            "parts": [{"type": "text", "text": "internal prompt"}],
+        }
+    ]
+
+    out = _to_efp_messages(
+        raw,
+        display_store=display_store,
+        portal_session_id="portal-session",
+        opencode_session_id="opencode-session",
+    )
+
+    assert out[0]["content"] == "hello from Bob"
+    assert out[0]["author_id"] == "user-2"
+    assert out[0]["author_name"] == "Bob"
+    assert out[0]["author_type"] == "human"
+    assert out[0]["author_source"] == "portal"
+
+
+def test_portal_author_metadata_requires_trusted_source_header():
+    class _TrustedRequest:
+        headers = {
+            "X-Portal-Author-Source": "portal",
+            "X-Portal-User-Id": " user-2 ",
+            "X-Portal-User-Name": " Bob ",
+        }
+
+    class _UntrustedRequest:
+        headers = {
+            "X-Portal-User-Id": "user-1",
+            "X-Portal-User-Name": "Alice",
+        }
+
+    assert portal_author_metadata_from_request(_TrustedRequest()) == {
+        "author_type": "human",
+        "author_source": "portal",
+        "author_id": "user-2",
+        "author_name": "Bob",
+    }
+    assert portal_author_metadata_from_request(_UntrustedRequest()) == {}
 
 
 def test_extract_assistant_text_supports_opencode_info_parts_shape():

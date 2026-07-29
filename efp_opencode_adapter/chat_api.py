@@ -8,7 +8,7 @@ import inspect
 import os
 import re
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
 from aiohttp import web
@@ -56,6 +56,33 @@ DATA_URL_RE = re.compile(r"data:[A-Za-z0-9.+/_-]+(?:;[A-Za-z0-9.+/_=-]+)*;base64
 TERMINAL_ASSISTANT_COMPLETION_STATES = {"completed", "blocked", "error", "empty_final"}
 RUNNING_CHATLOG_STATUSES = {"running", "accepted", "queued", "in_progress"}
 RECOVERABLE_SEND_ACCEPTANCE_PROBE_SECONDS = 5.0
+
+
+def portal_author_metadata_from_request(request: web.Request) -> dict[str, str]:
+    """Read trusted Portal author headers for persistence on user messages."""
+    headers = getattr(request, "headers", {})
+    source = str(headers.get("X-Portal-Author-Source") or "").strip().lower()
+    if source != "portal":
+        return {}
+
+    def _clean(name: str, max_length: int) -> str:
+        value = str(headers.get(name) or "").replace("\r", " ").replace("\n", " ").strip()
+        return value[:max_length]
+
+    author_id = _clean("X-Portal-User-Id", 128)
+    author_name = _clean("X-Portal-User-Name", 255)
+    if not author_id and not author_name:
+        return {}
+
+    metadata = {
+        "author_type": "human",
+        "author_source": "portal",
+    }
+    if author_id:
+        metadata["author_id"] = author_id
+    if author_name:
+        metadata["author_name"] = author_name
+    return metadata
 
 
 def _stable_runtime_event_id(*, event_type: str, session_id: str, request_id: str, opencode_session_id: str, data: dict[str, Any] | None) -> str:
@@ -778,7 +805,12 @@ async def _maybe_apply_skill_invocation(
     return True, response_payload, None, skill_debug
 
 
-async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, Any]) -> dict[str, Any]:
+async def handle_chat_payload_for_app(
+    app: web.Application,
+    payload: dict[str, Any],
+    *,
+    author_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     message = payload.get("message")
     if not isinstance(message, str) or not message.strip():
         raise _bad_request("message_required")
@@ -889,17 +921,22 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
         display_store = app.get(USER_DISPLAY_STORE_KEY)
         if display_store is not None:
             try:
+                display_metadata = {
+                    "source": "portal_original_user_message",
+                    "request_id": request_id,
+                    "internal_model_content_hidden": True,
+                }
+                for key in ("author_id", "author_name", "author_type", "author_source"):
+                    value = (author_metadata or {}).get(key)
+                    if isinstance(value, str) and value.strip():
+                        display_metadata[key] = value.strip()
                 display_store.put_user_message(
                     portal_session_id=portal_session_id,
                     opencode_session_id=record.opencode_session_id,
                     opencode_message_id=initial_user_message_id,
                     display_content=message,
                     display_attachments=display_store.sanitize_display_attachments(attachments),
-                    metadata={
-                        "source": "portal_original_user_message",
-                        "request_id": request_id,
-                        "internal_model_content_hidden": True,
-                    },
+                    metadata=display_metadata,
                 )
             except Exception:
                 logger.warning("failed to save user display message", exc_info=True)
@@ -1211,7 +1248,11 @@ async def handle_chat_payload_for_app(app: web.Application, payload: dict[str, A
 
 
 async def handle_chat_payload(request: web.Request, payload: dict[str, Any]) -> dict[str, Any]:
-    return await handle_chat_payload_for_app(request.app, payload)
+    return await handle_chat_payload_for_app(
+        request.app,
+        payload,
+        author_metadata=portal_author_metadata_from_request(request),
+    )
 
 
 async def chat_handler(request: web.Request) -> web.Response:
@@ -1241,7 +1282,11 @@ async def chat_handler(request: web.Request) -> web.Response:
                 },
                 status=409,
             )
-    result = await handle_chat_payload_for_app(request.app, payload)
+    result = await handle_chat_payload_for_app(
+        request.app,
+        payload,
+        author_metadata=portal_author_metadata_from_request(request),
+    )
     return web.json_response(result)
 
 
@@ -1560,7 +1605,13 @@ async def chat_stream_handler(request: web.Request) -> web.StreamResponse:
     bus = request.app[EVENT_BUS_KEY]
     subscriber = bus.subscribe({"session_id": session_id, "request_id": request_id})
     chat_run_registry.start(session_id=session_id, request_id=request_id)
-    chat_task = asyncio.create_task(handle_chat_payload_for_app(request.app, payload))
+    chat_task = asyncio.create_task(
+        handle_chat_payload_for_app(
+            request.app,
+            payload,
+            author_metadata=portal_author_metadata_from_request(request),
+        )
+    )
     chat_run_registry.attach_task(request_id, chat_task)
 
     def _record_chat_task_done(task: asyncio.Task) -> None:

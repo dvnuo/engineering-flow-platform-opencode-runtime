@@ -43,6 +43,82 @@ async def test_sessions_endpoints_keep_basic_opencode_contract(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_session_history_keeps_original_portal_user_when_viewed_by_another_user(
+    tmp_path,
+    monkeypatch,
+):
+    class _MessageIdAwareFakeOpenCodeClient(FakeOpenCodeClient):
+        async def send_message(
+            self,
+            session_id,
+            *,
+            parts,
+            model,
+            agent,
+            system=None,
+            message_id=None,
+            no_reply=None,
+            tools=None,
+        ):
+            user_text = parts[0].get("text", "")
+            user = {
+                "id": message_id or f"u-{len(self.messages[session_id]) + 1}",
+                "role": "user",
+                "parts": [{"type": "text", "text": user_text}],
+            }
+            assistant = {
+                "id": f"a-{len(self.messages[session_id]) + 2}",
+                "role": "assistant",
+                "parts": [{"type": "text", "text": f"echo: {user_text}"}],
+            }
+            self.messages[session_id].extend([user, assistant])
+            return {
+                "message": assistant,
+                "usage": {"input_tokens": 10, "output_tokens": 5, "cost": 0.001},
+                "model": model or "test-model",
+                "provider": "test-provider",
+            }
+
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=_MessageIdAwareFakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        chat = await client.post(
+            "/api/chat",
+            json={"message": "hello from Bob", "session_id": "shared-session"},
+            headers={
+                "X-Portal-Author-Source": "portal",
+                "X-Portal-User-Id": "user-2",
+                "X-Portal-User-Name": "Bob",
+            },
+        )
+        assert chat.status == 200
+
+        detail_response = await client.get(
+            "/api/sessions/shared-session",
+            headers={
+                "X-Portal-Author-Source": "portal",
+                "X-Portal-User-Id": "user-1",
+                "X-Portal-User-Name": "Alice",
+            },
+        )
+        assert detail_response.status == 200
+        detail = await detail_response.json()
+        user_message = next(
+            message
+            for message in detail["messages"]
+            if message.get("role") == "user"
+        )
+        assert user_message["author_id"] == "user-2"
+        assert user_message["author_name"] == "Bob"
+        assert user_message["author_type"] == "human"
+        assert user_message["author_source"] == "portal"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_session_detail_exposes_running_chatlog_for_portal_recovery(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
     app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())

@@ -17,7 +17,7 @@ from .app_keys import (
     USER_DISPLAY_STORE_KEY,
 )
 
-from .chat_api import handle_chat_payload_for_app
+from .chat_api import handle_chat_payload_for_app, portal_author_metadata_from_request
 from .opencode_client import OpenCodeClientError
 from .opencode_ids import new_opencode_message_id
 from .opencode_message_adapter import message_to_visible_text, to_efp_message
@@ -186,6 +186,12 @@ def _to_efp_messages(
                 efp["display_content"] = visible
                 display_attachments = display.get("display_attachments")
                 efp["attachments"] = display_attachments if isinstance(display_attachments, list) else []
+                display_metadata = display.get("metadata")
+                if isinstance(display_metadata, dict):
+                    for key in ("author_id", "author_name", "author_type", "author_source"):
+                        value = display_metadata.get(key)
+                        if not efp.get(key) and isinstance(value, str) and value.strip():
+                            efp[key] = value.strip()
                 metadata = efp.setdefault("metadata", {})
                 metadata["display_content_source"] = "portal_original_user_message"
                 metadata["internal_model_content_hidden"] = True
@@ -914,6 +920,7 @@ async def _run_async_edit_resend(
     app: web.Application,
     *,
     payload: dict[str, Any],
+    author_metadata: dict[str, str],
     session_id: str,
     request_id: str,
     opencode_session_id: str,
@@ -921,7 +928,7 @@ async def _run_async_edit_resend(
     replacement_user_message_id: str,
 ) -> None:
     try:
-        await handle_chat_payload_for_app(app, payload)
+        await handle_chat_payload_for_app(app, payload, author_metadata=author_metadata)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -1011,6 +1018,7 @@ async def _edit_message_async_from_body(request: web.Request, body: dict[str, An
             _run_async_edit_resend(
                 request.app,
                 payload=payload,
+                author_metadata=portal_author_metadata_from_request(request),
                 session_id=sid,
                 request_id=request_id,
                 opencode_session_id=updated_record.opencode_session_id,
@@ -1114,17 +1122,19 @@ async def edit_message_handler(request: web.Request) -> web.Response:
     display_store = request.app.get(USER_DISPLAY_STORE_KEY)
     if display_store is not None and replacement_user_message_id:
         try:
+            display_metadata = {
+                "source": "portal_original_user_message",
+                "edited_from_message_id": mid,
+                "internal_model_content_hidden": True,
+                **portal_author_metadata_from_request(request),
+            }
             display_store.put_user_message(
                 portal_session_id=sid,
                 opencode_session_id=updated_record.opencode_session_id,
                 opencode_message_id=replacement_user_message_id,
                 display_content=content,
                 display_attachments=[],
-                metadata={
-                    "source": "portal_original_user_message",
-                    "edited_from_message_id": mid,
-                    "internal_model_content_hidden": True,
-                },
+                metadata=display_metadata,
             )
         except Exception:
             logger.warning("failed to save edited user display message", exc_info=True)
