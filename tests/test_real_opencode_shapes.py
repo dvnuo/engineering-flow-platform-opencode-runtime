@@ -1,10 +1,7 @@
-from types import SimpleNamespace
-
 from efp_opencode_adapter.chat_api import (
     extract_assistant_text,
     portal_author_metadata_from_request,
 )
-from efp_opencode_adapter.app_keys import SETTINGS_KEY
 from efp_opencode_adapter.sessions_api import _to_efp_messages
 from efp_opencode_adapter.user_display_store import UserDisplayStore
 
@@ -59,35 +56,24 @@ def test_to_efp_messages_promotes_persisted_user_author(tmp_path):
     assert out[0]["author_source"] == "portal"
 
 
-def test_portal_author_metadata_requires_trusted_source_header():
+def test_portal_author_metadata_requires_portal_source_header():
     class _TrustedRequest:
-        app = {
-            SETTINGS_KEY: SimpleNamespace(portal_internal_token="runtime-token"),
-        }
         headers = {
             "X-Portal-Author-Source": "portal",
-            "X-Portal-Internal-Token": "runtime-token",
             "X-Portal-User-Id": " user-2 ",
             "X-Portal-User-Name": " Bob ",
         }
 
     class _UntrustedRequest:
-        app = {
-            SETTINGS_KEY: SimpleNamespace(portal_internal_token="runtime-token"),
-        }
         headers = {
-            "X-Portal-Author-Source": "portal",
-            "X-Portal-Internal-Token": "wrong-token",
+            "X-Portal-Author-Source": "runtime",
             "X-Portal-User-Id": "user-1",
             "X-Portal-User-Name": "Alice",
         }
 
-    class _MarkerOnlyRequest:
-        app = {}
+    class _NoIdentityRequest:
         headers = {
             "X-Portal-Author-Source": "portal",
-            "X-Portal-User-Id": "user-1",
-            "X-Portal-User-Name": "Alice",
         }
 
     assert portal_author_metadata_from_request(_TrustedRequest()) == {
@@ -97,7 +83,7 @@ def test_portal_author_metadata_requires_trusted_source_header():
         "author_name": "Bob",
     }
     assert portal_author_metadata_from_request(_UntrustedRequest()) == {}
-    assert portal_author_metadata_from_request(_MarkerOnlyRequest()) == {}
+    assert portal_author_metadata_from_request(_NoIdentityRequest()) == {}
 
 
 def test_extract_assistant_text_supports_opencode_info_parts_shape():
