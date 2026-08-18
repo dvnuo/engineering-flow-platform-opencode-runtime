@@ -1,6 +1,7 @@
 """AI Platform opencode proxy: credential file, token manager, config/auth."""
 import asyncio
 import dataclasses
+import json
 
 import pytest
 
@@ -113,6 +114,38 @@ def test_loopback_guard_blocks_remote_and_spoofed_xff():
     assert _request_is_loopback(
         SimpleNamespace(remote="127.0.0.1", headers={"X-Forwarded-For": "8.8.8.8, 127.0.0.1"})
     ) is False
+
+
+def test_ai_platform_request_body_removes_metadata_and_injects_usercase():
+    body = json.dumps(
+        {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hello"}],
+            "metadata": {"session_id": "secret-runtime-detail"},
+        }
+    ).encode("utf-8")
+
+    sanitized = json.loads(
+        apx._sanitize_ai_platform_request_body(body, usercase="uc")
+    )
+
+    assert "metadata" not in sanitized
+    assert sanitized["model"] == "gpt-5.4"
+    assert sanitized["messages"] == [{"role": "user", "content": "hello"}]
+    assert sanitized["user"] == "uc"
+
+
+def test_ai_platform_request_body_preserves_existing_user_and_invalid_json():
+    body = json.dumps(
+        {"messages": [], "metadata": {}, "user": "existing-user"}
+    ).encode("utf-8")
+    sanitized = json.loads(
+        apx._sanitize_ai_platform_request_body(body, usercase="uc")
+    )
+
+    assert "metadata" not in sanitized
+    assert sanitized["user"] == "existing-user"
+    assert apx._sanitize_ai_platform_request_body(b"not-json", usercase="uc") == b"not-json"
 
 
 def test_credential_present_requires_ib2b_or_token():

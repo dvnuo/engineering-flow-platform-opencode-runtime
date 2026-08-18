@@ -292,6 +292,27 @@ def _tracking_id(prefix: str) -> str:
     return "{0}-{1}".format(prefix or DEFAULT_AI_PLATFORM_TRACKING_PREFIX, time.strftime("%Y%m%d%H%M%S", time.gmtime()))
 
 
+def _sanitize_ai_platform_request_body(body: bytes, *, usercase: str = "") -> bytes:
+    """Remove unsupported request fields before forwarding to AI Platform."""
+    if not body:
+        return body
+    try:
+        parsed = json.loads(body)
+    except (ValueError, TypeError):
+        return body
+    if not isinstance(parsed, dict):
+        return body
+
+    changed = "metadata" in parsed
+    parsed.pop("metadata", None)
+    if usercase and not parsed.get("user"):
+        parsed["user"] = usercase
+        changed = True
+    if not changed:
+        return body
+    return json.dumps(parsed).encode("utf-8")
+
+
 async def ai_platform_proxy_handler(request: web.Request) -> web.StreamResponse:
     if not _request_is_loopback(request):
         return _json_error(403, "forbidden")
@@ -325,17 +346,10 @@ async def ai_platform_proxy_handler(request: web.Request) -> web.StreamResponse:
             "x-usersession-id": tracking,
         }
     )
-    body = await request.read()
-    # opencode's OpenAI-compatible client does not know the AI Platform
-    # "usercase"; inject it as the request `user` field if configured and absent.
-    if internal.usercase and body:
-        try:
-            parsed = json.loads(body)
-            if isinstance(parsed, dict) and not parsed.get("user"):
-                parsed["user"] = internal.usercase
-                body = json.dumps(parsed).encode("utf-8")
-        except (ValueError, TypeError):
-            pass
+    body = _sanitize_ai_platform_request_body(
+        await request.read(),
+        usercase=internal.usercase,
+    )
 
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), trust_env=proxy_config.trust_env) as session:
