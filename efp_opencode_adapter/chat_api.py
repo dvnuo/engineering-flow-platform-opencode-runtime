@@ -26,6 +26,7 @@ from .app_keys import (
     USER_DISPLAY_STORE_KEY,
 )
 from .attachment_service import build_opencode_attachment_parts
+from .inference_settings import normalize_reasoning_effort, reasoning_effort_from_metadata
 from .chat_run_registry import chat_run_registry
 from .opencode_client import OpenCodeClientError
 from .opencode_config import normalize_opencode_provider_id
@@ -143,6 +144,11 @@ def _model_from_chat_payload(payload: dict[str, Any], metadata: dict[str, Any], 
     if provider:
         return f"{normalize_opencode_provider_id(provider)}/{model}"
     return model
+
+
+def _reasoning_effort_from_chat_payload(payload: dict[str, Any], metadata: dict[str, Any]) -> str | None:
+    direct = normalize_reasoning_effort(payload.get("reasoning_effort"))
+    return direct or reasoning_effort_from_metadata(metadata)
 
 
 def _extract_session_id(payload: Any) -> str:
@@ -277,17 +283,23 @@ async def _send_message(
     model: str | None,
     agent: str | None,
     system: str | None,
+    variant: str | None,
     message_id: str,
 ) -> Any:
     kwargs: dict[str, Any] = {"parts": parts, "model": model, "agent": agent, "system": system}
     if hasattr(client, "send_message") and callable(getattr(client, "send_message")):
         try:
             sig = inspect.signature(client.send_message)
-            accepts_message_id = "message_id" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            accepts_message_id = "message_id" in sig.parameters or accepts_kwargs
+            accepts_variant = "variant" in sig.parameters or accepts_kwargs
         except (TypeError, ValueError):
             accepts_message_id = True
+            accepts_variant = True
         if accepts_message_id:
             kwargs["message_id"] = message_id
+        if variant and accepts_variant:
+            kwargs["variant"] = variant
         return await client.send_message(session_id, **kwargs)
 
     if hasattr(client, "prompt_async") and callable(getattr(client, "prompt_async")):
@@ -298,6 +310,8 @@ async def _send_message(
             payload["agent"] = agent
         if system:
             payload["system"] = system
+        if variant:
+            payload["variant"] = variant
         return await client.prompt_async(session_id, payload)
 
     raise OpenCodeClientError("OpenCode client does not support send_message")
@@ -413,6 +427,7 @@ async def _send_message_with_recoverable_transport_probe(
     model: str | None,
     agent: str | None,
     system: str | None,
+    variant: str | None,
     message_id: str,
     before_messages: list[dict[str, Any]],
     expected_user_text: str,
@@ -427,6 +442,7 @@ async def _send_message_with_recoverable_transport_probe(
                 model=model,
                 agent=agent,
                 system=system,
+                variant=variant,
                 message_id=message_id,
             ),
             None,
@@ -649,6 +665,7 @@ async def _maybe_apply_skill_invocation(
     model: str | None,
     agent: str | None,
     system: str | None,
+    variant: str | None,
     message_id: str,
     runtime_events: list[dict[str, Any]],
     trace_context: dict[str, str],
@@ -800,6 +817,7 @@ async def _maybe_apply_skill_invocation(
         model=model,
         agent=agent,
         system=system,
+        variant=variant,
         message_id=message_id,
     )
     return True, response_payload, None, skill_debug
@@ -822,6 +840,10 @@ async def handle_chat_payload_for_app(
     request_id = _request_id_from_payload(payload)
     title = _normalize_title(_optional_str(metadata.get("title")) or message[:60])
     model = _model_from_chat_payload(payload, metadata, runtime_profile)
+    try:
+        reasoning_effort = _reasoning_effort_from_chat_payload(payload, metadata)
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from exc
     agent = _optional_str(payload.get("agent")) or _optional_str(metadata.get("agent"))
     system = _optional_str(payload.get("system")) or _optional_str(metadata.get("system"))
     system = f"{system}{FINAL_RESPONSE_CONTRACT_SUFFIX}" if system else FINAL_RESPONSE_CONTRACT_SUFFIX.strip()
@@ -951,6 +973,7 @@ async def handle_chat_payload_for_app(
             model=model,
             agent=agent,
             system=system,
+            variant=reasoning_effort,
             message_id=initial_user_message_id,
             runtime_events=runtime_events,
             trace_context=trace_context,
@@ -965,6 +988,7 @@ async def handle_chat_payload_for_app(
                 model=model,
                 agent=agent,
                 system=system,
+                variant=reasoning_effort,
                 message_id=initial_user_message_id,
                 before_messages=before_messages,
                 expected_user_text=message,

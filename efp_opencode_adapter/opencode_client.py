@@ -494,6 +494,7 @@ class OpenCodeClient:
         model: str | None,
         agent: str | None,
         system: str | None = None,
+        variant: str | None = None,
         message_id: str | None = None,
         no_reply: bool | None = None,
         tools: dict | None = None,
@@ -512,6 +513,8 @@ class OpenCodeClient:
             payload["agent"] = agent
         if system:
             payload["system"] = system
+        if variant:
+            payload["variant"] = variant
         submit_timeout = max(300, int(getattr(self.settings, "chat_submit_timeout_seconds", getattr(self.settings, "chat_completion_timeout_seconds", 300))))
         return await self._request_json("POST", f"/session/{session_id}/message", json=payload, expected_statuses=(200,), timeout_seconds=submit_timeout)
 

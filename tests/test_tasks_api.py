@@ -138,6 +138,61 @@ def test_public_task_status_is_compact_and_full_payload_is_available():
 
 
 @pytest.mark.asyncio
+async def test_task_maps_request_inference_to_model_and_variant(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        response = await client.post(
+            "/api/tasks/execute",
+            json={
+                "task_id": "t-inference",
+                "task_type": "generic_agent_task",
+                "input_payload": {},
+                "metadata": {
+                    "inference": {"reasoning_effort": "high"},
+                    "runtime_profile": {"model": "github-copilot/gpt-5.6-sol"},
+                },
+            },
+        )
+
+        assert response.status == 202
+        prompt_payload = fake.prompt_async_calls[0][1]
+        assert prompt_payload["model"] == "github-copilot/gpt-5.6-sol"
+        assert prompt_payload["variant"] == "high"
+    finally:
+        await cleanup_task_background_tasks(app)
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_task_rejects_invalid_reasoning_before_creating_runtime_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = FakeTaskOpenCodeClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        response = await client.post(
+            "/api/tasks/execute",
+            json={
+                "task_id": "t-invalid-inference",
+                "task_type": "generic_agent_task",
+                "input_payload": {},
+                "metadata": {"inference": {"reasoning_effort": "extreme"}},
+            },
+        )
+
+        assert response.status == 400
+        assert fake.create_calls == 0
+        assert fake.prompt_async_calls == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_task_events_include_trace_context_and_group_metadata(tmp_path, monkeypatch):
     monkeypatch.setenv('EFP_ADAPTER_STATE_DIR', str(tmp_path / 'state'))
     monkeypatch.setenv('EFP_TASK_COMPLETION_POLL_SECONDS', '0.01')

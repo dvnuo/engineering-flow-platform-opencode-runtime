@@ -80,6 +80,37 @@ class NotAcceptedDisconnectedClient(FakeOpenCodeClient):
         )
 
 
+class VariantCaptureClient(FakeOpenCodeClient):
+    def __init__(self):
+        super().__init__()
+        self.variants = []
+
+    async def send_message(
+        self,
+        session_id,
+        *,
+        parts,
+        model,
+        agent,
+        system=None,
+        variant=None,
+        message_id=None,
+        no_reply=None,
+        tools=None,
+    ):
+        self.variants.append(variant)
+        return await super().send_message(
+            session_id,
+            parts=parts,
+            model=model,
+            agent=agent,
+            system=system,
+            message_id=message_id,
+            no_reply=no_reply,
+            tools=tools,
+        )
+
+
 def _event_types(payload):
     return [event.get("type") for event in payload.get("runtime_events", [])]
 
@@ -104,6 +135,42 @@ async def test_chat_short_request_completes_without_long_task_metadata(tmp_path,
         encoded = json.dumps(payload)
         for forbidden in ("continuation.", "timeout_recovery", "transport_recovery", "stream_detached", "chat_run"):
             assert forbidden not in encoded
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_maps_reasoning_effort_to_opencode_variant(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = VariantCaptureClient()
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/chat",
+            json={"message": "think", "session_id": "s-variant", "request_id": "r-variant", "reasoning_effort": "xhigh"},
+        )
+
+        assert resp.status == 200
+        assert fake.variants == ["xhigh"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_rejects_unsupported_reasoning_effort(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = create_app(Settings.from_env(), opencode_client=FakeOpenCodeClient())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/chat",
+            json={"message": "think", "session_id": "s-invalid-variant", "reasoning_effort": "extreme"},
+        )
+
+        assert resp.status == 400
     finally:
         await client.close()
 

@@ -417,10 +417,11 @@ async def test_send_message_includes_message_id_no_reply_and_tools(monkeypatch):
     await server.start_server()
     monkeypatch.setenv("EFP_OPENCODE_URL", server_base_url(server))
     client = OpenCodeClient(Settings.from_env())
-    await client.send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model="m", agent="a", message_id="msg_test_1", no_reply=True, tools={"x": False})
+    await client.send_message("ses-1", parts=[{"type": "text", "text": "hi"}], model="m", agent="a", variant="xhigh", message_id="msg_test_1", no_reply=True, tools={"x": False})
     assert captured["body"]["messageID"] == "msg_test_1"
     assert captured["body"]["noReply"] is True
     assert captured["body"]["tools"] == {"x": False}
+    assert captured["body"]["variant"] == "xhigh"
     await server.close()
 
 
