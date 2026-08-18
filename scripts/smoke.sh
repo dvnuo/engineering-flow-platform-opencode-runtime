@@ -85,7 +85,7 @@ require_runtime_tool BrowserStackLocal
 prepare_container_runtime
 prepare_maven_settings
 docker build --build-arg MAVEN_SETTINGS_DIR="${MAVEN_SETTINGS_DIR}" -t efp-opencode-runtime:test .
-docker run -d --name "${NAME}" -p 8000:8000 -e OPENCODE_DATA_DIR=/root/.local/share/opencode -e EFP_ADAPTER_STATE_DIR=/root/.local/share/efp-compat -v "$(volume_spec "${WORKSPACE_DIR}" /workspace)" -v "$(volume_spec "${ADAPTER_STATE_DIR}" /root/.local/share/efp-compat)" -v "$(volume_spec "${OPENCODE_STATE_DIR}" /root/.local/share/opencode)" -v "$(volume_spec "${SKILLS_DIR}" /app/skills ro)" efp-opencode-runtime:test >/dev/null
+docker run -d --name "${NAME}" -p 8000:8000 -e 'EFP_PROFILE_CONFIG={"config":{}}' -e OPENCODE_DATA_DIR=/root/.local/share/opencode -e EFP_ADAPTER_STATE_DIR=/root/.local/share/efp-compat -v "$(volume_spec "${WORKSPACE_DIR}" /workspace)" -v "$(volume_spec "${ADAPTER_STATE_DIR}" /root/.local/share/efp-compat)" -v "$(volume_spec "${OPENCODE_STATE_DIR}" /root/.local/share/opencode)" -v "$(volume_spec "${SKILLS_DIR}" /app/skills ro)" efp-opencode-runtime:test >/dev/null
 for _ in $(seq 1 60); do curl -fsS http://localhost:8000/health >"${HEALTH_FILE}" && break || true; sleep 1; done
 jq -e '.state.healthy == true' "${HEALTH_FILE}" >/dev/null
 curl -fsS http://localhost:8000/api/skills | jq -e '.count >= 1' >/dev/null

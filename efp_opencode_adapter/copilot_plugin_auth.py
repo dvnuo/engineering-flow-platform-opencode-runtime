@@ -20,9 +20,9 @@ from .settings import Settings
 
 
 COPILOT_PLUGIN_HEADERS = {
-    "User-Agent": "GitHubCopilotChat/0.35.0",
-    "Editor-Version": "vscode/1.107.0",
-    "Editor-Plugin-Version": "copilot-chat/0.35.0",
+    "User-Agent": "GitHubCopilotChat/0.41.0",
+    "Editor-Version": "vscode/1.133.0",
+    "Editor-Plugin-Version": "copilot-chat/0.41.0",
     "Copilot-Integration-Id": "vscode-chat",
 }
 TOKEN_REFRESH_MARGIN_SECONDS = 300

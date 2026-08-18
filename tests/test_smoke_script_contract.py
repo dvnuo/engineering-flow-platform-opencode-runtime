@@ -10,6 +10,7 @@ def test_smoke_script_runs_health_skills_capabilities_and_optional_contract_test
     assert 'curl -fsS http://localhost:8000/health' in script
     assert 'curl -fsS http://localhost:8000/api/skills' in script
     assert 'curl -fsS http://localhost:8000/api/capabilities' in script
+    assert '-e \'EFP_PROFILE_CONFIG={"config":{}}\'' in script
     assert 'RUN_RUNTIME_CONTRACT_TESTS' in script
     assert 'python -m pytest -q runtime_contract_tests' in script
 
