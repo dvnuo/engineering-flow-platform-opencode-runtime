@@ -36,6 +36,7 @@ from .task_store import (
     utc_now_iso,
 )
 from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
+from .inference_settings import reasoning_effort_from_metadata
 
 TERMINAL = {"success", "error", "blocked", "cancelled"}
 TASK_STATUS_EVENT_TAIL_ITEMS = 10
@@ -671,6 +672,11 @@ async def execute_task_handler(request: web.Request) -> web.Response:
             return web.json_response({"ok": True, "status": "accepted", "task_id": task_id, "request_id": existing.request_id}, status=202)
         return web.json_response(_to_public(existing), status=200)
 
+    try:
+        reasoning_effort = reasoning_effort_from_metadata(metadata)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
     client = request.app[OPENCODE_CLIENT_KEY]
     try:
         session_record = await _ensure_session(request, portal_session_id, task_type, task_id)
@@ -740,6 +746,8 @@ async def execute_task_handler(request: web.Request) -> web.Response:
             prompt_payload["system"] = metadata.get("system_prompt")
         elif task_type == "agent_async_task":
             prompt_payload["system"] = AGENT_ASYNC_TASK_DEFAULT_SYSTEM_PROMPT
+        if reasoning_effort:
+            prompt_payload["variant"] = reasoning_effort
 
         opencode_message_id = new_opencode_message_id()
         prompt_payload["messageID"] = opencode_message_id

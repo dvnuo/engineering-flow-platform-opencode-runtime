@@ -60,12 +60,22 @@ class FakeProcessManager:
 
 
 def test_project_canonical_transforms_copilot_llm_to_opencode_form():
-    canonical = {"llm": {"provider": "github_copilot", "model": "gpt-5.6-terra"}}
+    canonical = {
+        "llm": {
+            "provider": "github_copilot",
+            "model": "gpt-5.6-terra",
+            "reasoning_effort": "max",
+            "max_context_tokens": 1_000_000,
+        }
+    }
     projected = project_canonical_for_runtime(canonical, "opencode")
     assert projected["llm"]["provider"] == "github-copilot"
     assert projected["llm"]["model"] == "github-copilot/gpt-5.6-terra"
+    assert projected["llm"]["reasoning_effort"] == "max"
+    assert "max_context_tokens" not in projected["llm"]
+    assert "max_context_tokens" not in projected
     # Input is not mutated.
-    assert canonical["llm"] == {"provider": "github_copilot", "model": "gpt-5.6-terra"}
+    assert canonical["llm"]["max_context_tokens"] == 1_000_000
 
 
 def test_project_canonical_coerces_non_copilot_provider_to_copilot():

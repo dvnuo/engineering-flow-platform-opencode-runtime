@@ -292,6 +292,10 @@ def project_canonical_for_runtime(
     projected = deepcopy(canonical) if isinstance(canonical, dict) else {}
     llm = projected.get("llm")
     if isinstance(llm, dict):
-        projected["llm"] = project_llm_for_runtime(llm, runtime_type)
+        projected_llm = project_llm_for_runtime(llm, runtime_type)
+        max_context_tokens = projected_llm.pop("max_context_tokens", None)
+        projected["llm"] = projected_llm
+        if not is_opencode_runtime_type(runtime_type) and isinstance(max_context_tokens, int):
+            projected["max_context_tokens"] = max_context_tokens
     projected = strip_opencode_runtime_restrictions(projected, runtime_type)
     return _with_native_cli_tool_instructions(projected, runtime_type)
