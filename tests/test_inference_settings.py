@@ -22,6 +22,10 @@ def test_reasoning_effort_falls_back_to_runtime_profile():
     assert reasoning_effort_from_metadata(metadata) == "high"
 
 
+def test_reasoning_effort_accepts_max():
+    assert normalize_reasoning_effort(" MAX ") == "max"
+
+
 def test_reasoning_effort_rejects_unsupported_values():
     with pytest.raises(ValueError, match="unsupported_reasoning_effort"):
         normalize_reasoning_effort("extreme")

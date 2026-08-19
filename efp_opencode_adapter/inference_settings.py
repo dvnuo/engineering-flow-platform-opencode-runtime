@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
-SUPPORTED_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+SUPPORTED_REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 def normalize_reasoning_effort(value: Any) -> str | None:
