@@ -58,6 +58,7 @@ from .opencode_config import normalize_opencode_provider_id
 from .copilot_plugin_auth import CopilotTokenManager, load_copilot_plugin_credential
 from .copilot_proxy import copilot_proxy_handler
 from .ai_platform_proxy import AIPlatformTokenManager, ai_platform_proxy_handler
+from .context_api import compact_session_handler, context_usage_handler
 from .path_utils import path_exists
 from .portal_runtime_context_bootstrap import run_boot_projection_from_env
 from .profile_store import ProfileOverlayStore, build_profile_status_payload, sanitize_public_secrets
@@ -514,6 +515,8 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_post("/api/clear", clear_sessions_handler)
     app.router.add_get("/api/sessions/{session_id}/status", session_status_handler)
     app.router.add_get("/api/sessions/{session_id}/chatlog", session_chatlog_handler)
+    app.router.add_get("/api/sessions/{session_id}/context-usage", context_usage_handler)
+    app.router.add_post("/api/sessions/{session_id}/compact", compact_session_handler)
     app.router.add_post("/api/sessions/{session_id}/rename", rename_session_handler)
     app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/edit/async", edit_message_async_handler)
     app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/edit", edit_message_handler)

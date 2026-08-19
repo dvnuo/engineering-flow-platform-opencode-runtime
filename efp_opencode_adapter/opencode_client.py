@@ -430,6 +430,37 @@ class OpenCodeClient:
                 return tools
         raise OpenCodeClientError("unexpected tool ids response shape", payload=data)
 
+    async def list_tools(
+        self,
+        provider_id: str,
+        model_id: str,
+        *,
+        timeout_seconds: int = 30,
+    ) -> list[dict[str, Any]]:
+        path = f"/experimental/tool?{urlencode({'provider': provider_id, 'model': model_id})}"
+        data = await self._request_json(
+            "GET",
+            path,
+            expected_statuses=(200,),
+            timeout_seconds=timeout_seconds,
+        )
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if isinstance(data, dict):
+            tools = data.get("tools") or data.get("data") or []
+            if isinstance(tools, list):
+                return [item for item in tools if isinstance(item, dict)]
+        raise OpenCodeClientError("unexpected tool response shape", payload=data)
+
+    async def list_providers(self, timeout_seconds: int = 30) -> dict[str, Any]:
+        data = await self._request_json(
+            "GET",
+            "/provider",
+            expected_statuses=(200,),
+            timeout_seconds=timeout_seconds,
+        )
+        return data if isinstance(data, dict) else {"all": data}
+
     async def create_session(self, title: str | None = None) -> dict:
         return await self._request_json("POST", "/session", json={"title": title} if title else {}, expected_statuses=(200, 201))
 
@@ -481,6 +512,27 @@ class OpenCodeClient:
 
     async def get_session_messages(self, session_id: str) -> list[dict]:
         return await self.list_messages(session_id)
+
+    async def summarize_session(
+        self,
+        session_id: str,
+        *,
+        provider_id: str,
+        model_id: str,
+        auto: bool = False,
+        timeout_seconds: int = 180,
+    ) -> Any:
+        return await self._request_json(
+            "POST",
+            f"/session/{session_id}/summarize",
+            json={
+                "providerID": provider_id,
+                "modelID": model_id,
+                "auto": bool(auto),
+            },
+            expected_statuses=(200, 202, 204),
+            timeout_seconds=timeout_seconds,
+        )
 
     async def get_message(self, session_id: str, message_id: str) -> dict:
         data = await self._request_json("GET", f"/session/{session_id}/message/{message_id}")
