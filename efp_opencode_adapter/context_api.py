@@ -31,6 +31,11 @@ _TOOL_PART_TYPES = {
     "tool_result",
 }
 _BUSY_STATES = {"busy", "in_progress", "pending", "queued", "retry", "running"}
+_IGNORED_PART_TYPES = {"compaction", "snapshot", "step-finish", "step-start"}
+
+
+class _SessionStatusUnavailable(RuntimeError):
+    """Raised when OpenCode cannot confirm whether a session is idle."""
 
 
 def _estimate_tokens(value: Any) -> int:
@@ -64,6 +69,98 @@ def _message_parts(message: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return [part for part in parts if isinstance(part, Mapping)]
 
 
+def _message_id(message: Mapping[str, Any]) -> str:
+    info = _message_info(message)
+    return str(info.get("id") or message.get("id") or "").strip()
+
+
+def _message_parent_id(message: Mapping[str, Any]) -> str:
+    info = _message_info(message)
+    return str(
+        info.get("parentID")
+        or info.get("parent_id")
+        or message.get("parentID")
+        or message.get("parent_id")
+        or ""
+    ).strip()
+
+
+def _compaction_part(message: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    return next(
+        (
+            part
+            for part in _message_parts(message)
+            if str(part.get("type") or "").strip().lower() == "compaction"
+        ),
+        None,
+    )
+
+
+def _is_completed_compaction_summary(message: Mapping[str, Any]) -> bool:
+    info = _message_info(message)
+    return (
+        str(info.get("role") or "").strip().lower() == "assistant"
+        and info.get("summary") is True
+        and bool(info.get("finish"))
+        and not info.get("error")
+    )
+
+
+def _active_context_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mirror OpenCode's filterCompacted boundary for model-visible history."""
+
+    result: list[dict[str, Any]] = []
+    completed_parent_ids: set[str] = set()
+    retain_until_id: str | None = None
+    for message in reversed(messages):
+        result.append(message)
+        message_id = _message_id(message)
+        if retain_until_id:
+            if message_id == retain_until_id:
+                break
+            continue
+
+        info = _message_info(message)
+        role = str(info.get("role") or "").strip().lower()
+        if role == "user" and message_id in completed_parent_ids:
+            part = _compaction_part(message)
+            if part is None:
+                continue
+            tail_start_id = str(
+                part.get("tail_start_id")
+                or part.get("tailStartID")
+                or part.get("tailStartId")
+                or ""
+            ).strip()
+            if not tail_start_id:
+                break
+            retain_until_id = tail_start_id
+            if message_id == retain_until_id:
+                break
+            continue
+
+        if _is_completed_compaction_summary(message):
+            parent_id = _message_parent_id(message)
+            if parent_id:
+                completed_parent_ids.add(parent_id)
+
+    result.reverse()
+    return result
+
+
+def _context_message_count(messages: list[dict[str, Any]]) -> int:
+    count = 0
+    for message in messages:
+        parts = _message_parts(message)
+        if parts and all(
+            str(part.get("type") or "").strip().lower() == "compaction"
+            for part in parts
+        ):
+            continue
+        count += 1
+    return count
+
+
 def _model_ref(messages: list[dict[str, Any]], record: Any) -> tuple[str | None, str | None]:
     for message in reversed(messages):
         info = _message_info(message)
@@ -90,6 +187,10 @@ def _latest_actual_input_tokens(messages: list[dict[str, Any]]) -> int:
         info = _message_info(message)
         if str(info.get("role") or "").strip().lower() != "assistant":
             continue
+        # A compaction summary's input usage describes the summarization request,
+        # not the smaller active context that exists after the new boundary.
+        if info.get("summary") is True or str(info.get("mode") or "").lower() == "compaction":
+            return 0
         tokens = info.get("tokens") or message.get("tokens") or message.get("usage")
         if not isinstance(tokens, Mapping):
             continue
@@ -112,15 +213,21 @@ def _history_estimates(messages: list[dict[str, Any]]) -> tuple[int, int]:
     conversation = 0
     tool_activity = 0
     for message in messages:
+        parts = _message_parts(message)
+        if parts and all(
+            str(part.get("type") or "").strip().lower() == "compaction"
+            for part in parts
+        ):
+            continue
         info = _message_info(message)
         conversation += _estimate_tokens(
             {"role": info.get("role") or message.get("role") or "unknown"}
         )
-        for part in _message_parts(message):
+        for part in parts:
             part_type = str(part.get("type") or "").strip().lower()
             if part_type in _TOOL_PART_TYPES or "tool" in part_type:
                 tool_activity += _estimate_tokens(part)
-            elif part_type not in {"step-start", "step-finish", "snapshot"}:
+            elif part_type not in _IGNORED_PART_TYPES:
                 conversation += _estimate_tokens(part)
     return conversation, tool_activity
 
@@ -211,15 +318,24 @@ def _scaled_categories(
 
 async def _busy_state(client: Any, opencode_session_id: str) -> tuple[bool, str | None]:
     if not hasattr(client, "get_session_status"):
-        return False, None
+        raise _SessionStatusUnavailable("OpenCode session status API is unavailable.")
     try:
         payload = await client.get_session_status(timeout_seconds=30)
     except TypeError:
-        payload = await client.get_session_status()
-    except Exception:
-        return False, None
+        try:
+            payload = await client.get_session_status()
+        except Exception as exc:
+            raise _SessionStatusUnavailable(
+                "Unable to verify whether the OpenCode session is idle."
+            ) from exc
+    except Exception as exc:
+        raise _SessionStatusUnavailable(
+            "Unable to verify whether the OpenCode session is idle."
+        ) from exc
     if not isinstance(payload, Mapping):
-        return False, None
+        raise _SessionStatusUnavailable(
+            "OpenCode session status returned an unexpected response."
+        )
     sessions = payload.get("sessions")
     candidates = sessions if isinstance(sessions, Mapping) else payload
     state_payload = candidates.get(opencode_session_id) if isinstance(candidates, Mapping) else None
@@ -309,17 +425,25 @@ async def context_usage_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "session_not_found"}, status=404)
     try:
         messages = await client.list_messages(record.opencode_session_id)
-        snapshot = await _build_snapshot(client, record, messages)
-        busy, state = await _busy_state(client, record.opencode_session_id)
+        active_messages = _active_context_messages(messages)
+        snapshot = await _build_snapshot(client, record, active_messages)
     except OpenCodeClientError as exc:
         return web.json_response(
             {"error": "opencode_error", "detail": str(exc)}, status=502
         )
-    eligible = len(messages) > 1 and not busy
+    status_error = None
+    try:
+        busy, state = await _busy_state(client, record.opencode_session_id)
+    except _SessionStatusUnavailable as exc:
+        busy, state, status_error = False, "unavailable", str(exc)
+    message_count = _context_message_count(active_messages)
+    eligible = message_count > 1 and not busy and status_error is None
     reason = None
-    if busy:
+    if status_error:
+        reason = status_error
+    elif busy:
         reason = "A response is currently running."
-    elif len(messages) <= 1:
+    elif message_count <= 1:
         reason = "There is not enough conversation history to compact."
     snapshot.update(
         {
@@ -346,18 +470,26 @@ async def compact_session_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "session_not_found"}, status=404)
     try:
         messages = await client.list_messages(record.opencode_session_id)
-        if len(messages) <= 1:
+        active_messages = _active_context_messages(messages)
+        before_count = _context_message_count(active_messages)
+        if before_count <= 1:
             return web.json_response(
                 {"error": "not_enough_history"}, status=422
             )
-        busy, _ = await _busy_state(client, record.opencode_session_id)
+        try:
+            busy, _ = await _busy_state(client, record.opencode_session_id)
+        except _SessionStatusUnavailable as exc:
+            return web.json_response(
+                {"error": "session_status_unavailable", "detail": str(exc)},
+                status=503,
+            )
         if busy:
             return web.json_response(
                 {"error": "session_busy", "detail": "Cannot compact while a response is running."},
                 status=409,
             )
-        before = await _build_snapshot(client, record, messages)
-        provider_id, model_id = _model_ref(messages, record)
+        before = await _build_snapshot(client, record, active_messages)
+        provider_id, model_id = _model_ref(active_messages, record)
         if not provider_id or not model_id:
             return web.json_response(
                 {"error": "model_unavailable", "detail": "Send one message with a selected model before compacting."},
@@ -371,7 +503,9 @@ async def compact_session_handler(request: web.Request) -> web.Response:
             timeout_seconds=180,
         )
         compacted_messages = await client.list_messages(record.opencode_session_id)
-        after = await _build_snapshot(client, record, compacted_messages)
+        active_compacted_messages = _active_context_messages(compacted_messages)
+        after_count = _context_message_count(active_compacted_messages)
+        after = await _build_snapshot(client, record, active_compacted_messages)
         after.update(
             {
                 "success": True,
@@ -379,8 +513,12 @@ async def compact_session_handler(request: web.Request) -> web.Response:
                 "compact": {
                     "supported": True,
                     "in_progress": False,
-                    "eligible": len(compacted_messages) > 1,
-                    "reason": None,
+                    "eligible": after_count > 1,
+                    "reason": (
+                        None
+                        if after_count > 1
+                        else "There is not enough conversation history to compact."
+                    ),
                 },
             }
         )
@@ -389,8 +527,10 @@ async def compact_session_handler(request: web.Request) -> web.Response:
                 "success": True,
                 "session_id": session_id,
                 "checkpoint_id": None,
-                "before_message_count": len(messages),
-                "after_message_count": len(compacted_messages),
+                "before_message_count": before_count,
+                "after_message_count": after_count,
+                "persisted_before_message_count": len(messages),
+                "persisted_after_message_count": len(compacted_messages),
                 "before": before,
                 "after": after,
             }

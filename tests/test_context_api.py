@@ -2,6 +2,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from efp_opencode_adapter.app_keys import SESSION_STORE_KEY
+from efp_opencode_adapter.context_api import _active_context_messages
 from efp_opencode_adapter.opencode_client import OpenCodeClient
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.session_store import SessionRecord
@@ -13,8 +14,11 @@ class ContextOpenCodeClient(FakeOpenCodeClient):
     def __init__(self):
         super().__init__()
         self.summarize_calls = []
+        self.status_error = None
 
     async def get_session_status(self, timeout_seconds=30):
+        if self.status_error is not None:
+            raise self.status_error
         return {}
 
     async def list_tools(self, provider_id, model_id, timeout_seconds=30):
@@ -54,21 +58,28 @@ class ContextOpenCodeClient(FakeOpenCodeClient):
             }
         )
         self.messages[session_id] = [
+            *self.messages[session_id],
             {
                 "info": {
-                    "id": "u-summary",
+                    "id": "u-compact",
                     "role": "user",
                     "model": {"providerID": provider_id, "modelID": model_id},
                 },
-                "parts": [{"type": "text", "text": "Compacted conversation summary"}],
+                "parts": [{"type": "compaction", "auto": False}],
             },
             {
                 "info": {
                     "id": "a-summary",
                     "role": "assistant",
-                    "tokens": {"input": 200, "cache": {"read": 0, "write": 0}},
+                    "parentID": "u-compact",
+                    "summary": True,
+                    "finish": "stop",
+                    "mode": "compaction",
+                    "modelID": model_id,
+                    "providerID": provider_id,
+                    "tokens": {"input": 800, "cache": {"read": 0, "write": 0}},
                 },
-                "parts": [{"type": "text", "text": "Ready to continue"}],
+                "parts": [{"type": "text", "text": "Compacted conversation summary"}],
             },
         ]
         return True
@@ -180,12 +191,21 @@ async def test_context_usage_and_manual_compact_share_portal_contract(tmp_path, 
 
         compact_response = await client.post("/api/sessions/portal-context/compact", json={})
         compacted = await compact_response.json()
+        refreshed_response = await client.get("/api/sessions/portal-context/context-usage")
+        refreshed = await refreshed_response.json()
 
         assert compact_response.status == 200
         assert compacted["success"] is True
         assert compacted["before_message_count"] == 4
-        assert compacted["after_message_count"] == 2
-        assert compacted["after"]["used_tokens"] == 200
+        assert compacted["after_message_count"] == 1
+        assert compacted["persisted_before_message_count"] == 4
+        assert compacted["persisted_after_message_count"] == 6
+        assert compacted["after"]["scope"] == "current_estimate"
+        assert compacted["after"]["used_tokens"] < compacted["before"]["used_tokens"]
+        assert compacted["after"]["compact"]["eligible"] is False
+        assert refreshed_response.status == 200
+        assert refreshed["used_tokens"] == compacted["after"]["used_tokens"]
+        assert refreshed["scope"] == "current_estimate"
         assert fake.summarize_calls == [
             {
                 "session_id": "oc-context",
@@ -194,5 +214,90 @@ async def test_context_usage_and_manual_compact_share_portal_contract(tmp_path, 
                 "auto": False,
             }
         ]
+    finally:
+        await client.close()
+
+
+def test_active_context_messages_honors_compaction_tail_boundary():
+    messages = [
+        {"info": {"id": "u-1", "role": "user"}, "parts": [{"type": "text", "text": "old"}]},
+        {"info": {"id": "a-1", "role": "assistant"}, "parts": [{"type": "text", "text": "old"}]},
+        {"info": {"id": "u-2", "role": "user"}, "parts": [{"type": "text", "text": "recent"}]},
+        {"info": {"id": "a-2", "role": "assistant"}, "parts": [{"type": "text", "text": "recent"}]},
+        {
+            "info": {"id": "u-compact", "role": "user"},
+            "parts": [{"type": "compaction", "tail_start_id": "u-2"}],
+        },
+        {
+            "info": {
+                "id": "a-summary",
+                "parentID": "u-compact",
+                "role": "assistant",
+                "summary": True,
+                "finish": "stop",
+            },
+            "parts": [{"type": "text", "text": "summary"}],
+        },
+    ]
+
+    active = _active_context_messages(messages)
+
+    assert [message["info"]["id"] for message in active] == [
+        "u-2",
+        "a-2",
+        "u-compact",
+        "a-summary",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_status_failure_disables_get_and_blocks_manual_compact(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = ContextOpenCodeClient()
+    fake.status_error = RuntimeError("status unavailable")
+    fake.sessions["oc-context"] = {"id": "oc-context", "title": "Context"}
+    fake.messages["oc-context"] = [
+        {
+            "info": {
+                "id": "u-1",
+                "role": "user",
+                "model": {"providerID": "github-copilot", "modelID": "gpt-5.4"},
+            },
+            "parts": [{"type": "text", "text": "Question"}],
+        },
+        {
+            "info": {"id": "a-1", "role": "assistant"},
+            "parts": [{"type": "text", "text": "Answer"}],
+        },
+    ]
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord(
+            "portal-context",
+            "oc-context",
+            "Context",
+            None,
+            "github-copilot/gpt-5.4",
+            "a",
+            "b",
+            "",
+            2,
+        )
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        usage_response = await client.get("/api/sessions/portal-context/context-usage")
+        usage = await usage_response.json()
+        compact_response = await client.post("/api/sessions/portal-context/compact", json={})
+        compact = await compact_response.json()
+
+        assert usage_response.status == 200
+        assert usage["compact"]["eligible"] is False
+        assert usage["compact"]["runtime_state"] == "unavailable"
+        assert "verify" in usage["compact"]["reason"].lower()
+        assert compact_response.status == 503
+        assert compact["error"] == "session_status_unavailable"
+        assert fake.summarize_calls == []
     finally:
         await client.close()
