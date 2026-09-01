@@ -47,10 +47,46 @@ At minimum, runtime provides:
 - `/api/skills`
 - `/api/capabilities`
 - `/api/permissions/respond`
+- `/api/personalization`
+- `/api/sessions/{session_id}/pending-input`
+- `/api/sessions/{session_id}/permission/respond`
 - `/api/tasks/execute`
 - `/api/queue/status`
 - `/api/server-files/*`
 - `/api/events/ws`
+
+## Assistant personalization
+`/api/personalization` serves the greeting and starter cards from the agents
+repository branch this assistant booted with. Portal's init container copies the
+repo's optional `portal/` directory into the workspace alongside `AGENTS.md` and
+`instructions/`, so the runtime reads what is already on disk rather than having
+Portal clone the repo a second time.
+
+- `portal/welcome.md` -- greeting shown when a chat has no messages yet.
+- `portal/cards.yaml` -- starter prompts offered as clickable cards.
+
+Both files are optional. A branch without them returns
+`{"welcome": null, "cards": []}` and Portal falls back to its generic welcome.
+
+## Interactive input contract
+Portal drives its approval card off the session rather than the permission id:
+it polls `/api/sessions/{session_id}/pending-input` to rebuild a card after a
+refresh, and posts the answer to
+`/api/sessions/{session_id}/permission/respond` with
+`{"request_id": ..., "decision": "approve"|"deny", "always": bool}`.
+
+OpenCode keeps no record of an unanswered permission -- `GET /session/{id}`
+does not report one, and the only trace is the event that announced it. The
+adapter therefore reconstructs pending state from the event stream, and
+`permission.requested` events carry an assembled `data.permission_request`
+object for the live card.
+
+`/api/sessions/{session_id}/question/respond` answers `501
+question_response_unsupported`. OpenCode's server exposes
+`/session/{id}/permissions/{permissionID}` and no question route, so a typed
+answer cannot be delivered back to a `question` tool call on this runtime;
+`pending-input` accordingly always reports `question_request: null`. Assistants
+that depend on the question tool belong on the native runtime.
 
 ## Internal-only OpenCode server
 OpenCode is an implementation detail behind adapter APIs.

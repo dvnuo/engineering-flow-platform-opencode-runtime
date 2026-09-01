@@ -26,6 +26,7 @@ from .app_keys import (
     OPENCODE_PROCESS_MANAGER_KEY,
     OPENCODE_WATCHDOG_TASK_KEY,
     REQUEST_BINDING_STORE_KEY,
+    PENDING_INPUT_KEY,
     COPILOT_TOKEN_MANAGER_KEY,
     AI_PLATFORM_TOKEN_MANAGER_KEY,
     BOOT_PROJECTION_KEY,
@@ -49,7 +50,14 @@ from .event_bridge import OpenCodeEventBridge
 from .file_routes import register_file_routes
 from .logging_setup import configure_logging, request_logging_middleware
 from .opencode_client import OpenCodeClient, OpenCodeClientError
-from .permissions_api import permission_respond_handler
+from .pending_input import PendingInputStore
+from .permissions_api import (
+    permission_respond_handler,
+    session_pending_input_handler,
+    session_permission_respond_handler,
+    session_question_respond_handler,
+)
+from .personalization_api import personalization_handler
 from .portal_metadata_client import PortalMetadataClient
 from .recovery import RecoveryManager
 from .usage_api import usage_handler
@@ -463,6 +471,12 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app[USER_DISPLAY_STORE_KEY] = UserDisplayStore(state_paths.sessions_dir / "user_display_messages.json")
     app[USAGE_TRACKER_KEY] = UsageTracker(state_paths.usage_file)
     app[EVENT_BUS_KEY] = EventBus(settings.event_replay_limit, settings.event_replay_ttl_seconds)
+    app[PENDING_INPUT_KEY] = PendingInputStore()
+    # OpenCode keeps no record of an unanswered permission, so the adapter
+    # reconstructs it from the stream every event passes through. Without this
+    # a refresh loses the approval card and the run stays blocked with nothing
+    # on screen to unblock it.
+    app[EVENT_BUS_KEY].add_observer(app[PENDING_INPUT_KEY].observe_event)
     app[REQUEST_BINDING_STORE_KEY] = RequestBindingStore()
     app[TASK_BACKGROUND_TASKS_KEY] = set()
     app[COPILOT_TOKEN_MANAGER_KEY] = CopilotTokenManager(settings)
@@ -492,6 +506,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/api/internal/opencode/log-tail", internal_opencode_log_tail_handler)
     app.router.add_get("/api/internal/opencode-effective-config", effective_config_handler)
     app.router.add_get("/api/capabilities", capabilities_handler)
+    app.router.add_get("/api/personalization", personalization_handler)
     app.router.add_get("/api/queue/status", queue_status_handler)
     app.router.add_get("/api/skills", skills_handler)
     app.router.add_get("/api/git-info", git_info_handler)
@@ -514,6 +529,9 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/api/sessions", list_sessions_handler)
     app.router.add_post("/api/clear", clear_sessions_handler)
     app.router.add_get("/api/sessions/{session_id}/status", session_status_handler)
+    app.router.add_get("/api/sessions/{session_id}/pending-input", session_pending_input_handler)
+    app.router.add_post("/api/sessions/{session_id}/permission/respond", session_permission_respond_handler)
+    app.router.add_post("/api/sessions/{session_id}/question/respond", session_question_respond_handler)
     app.router.add_get("/api/sessions/{session_id}/chatlog", session_chatlog_handler)
     app.router.add_get("/api/sessions/{session_id}/context-usage", context_usage_handler)
     app.router.add_post("/api/sessions/{session_id}/compact", compact_session_handler)

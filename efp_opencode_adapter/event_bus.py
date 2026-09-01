@@ -7,7 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import count
-from typing import Any
+from typing import Any, Callable
 
 from aiohttp import WSMsgType, web
 from .app_keys import EVENT_BUS_KEY
@@ -36,6 +36,13 @@ class EventBus:
         self._recent_by_request: dict[str, deque[tuple[float, int, dict[str, Any]]]] = {}
         self._seq = count(1)
         self._last_sweep = 0.0
+        # Publish is the one funnel every event passes through, whichever
+        # subsystem produced it, so state that has to track the whole stream
+        # (see PendingInputStore) subscribes here rather than at each source.
+        self._observers: list[Callable[[dict[str, Any]], None]] = []
+
+    def add_observer(self, observer: Callable[[dict[str, Any]], None]) -> None:
+        self._observers.append(observer)
 
     def subscribe(self, filters: dict[str, str]) -> Subscriber:
         sub = Subscriber(filters={k: v for k, v in filters.items() if k in ALLOWED_FILTER_KEYS and v})
@@ -47,6 +54,13 @@ class EventBus:
 
     async def publish(self, event: dict[str, Any]) -> None:
         self._store_recent(event)
+        for observer in self._observers:
+            try:
+                observer(event)
+            except Exception:
+                # An observer is bookkeeping. Letting it raise would drop the
+                # event for every subscribed websocket.
+                pass
         for sub in list(self._subs):
             if not self._matches(sub.filters, event):
                 continue
