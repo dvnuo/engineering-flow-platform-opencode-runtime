@@ -15,7 +15,7 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from efp_opencode_adapter.compat_api import _repo_relative_skill_path
+from efp_opencode_adapter.compat_api import _repo_relative_skill_path, _resolved_skills_root
 from efp_opencode_adapter.server import create_app
 from efp_opencode_adapter.settings import Settings
 
@@ -28,32 +28,46 @@ class FakeClient:
         return {"success": True, "tools": []}
 
 
+def _relative(source, skills_dir) -> str:
+    """As the handler does it: resolve the root once, then place each skill."""
+    return _repo_relative_skill_path(str(source), _resolved_skills_root(skills_dir))
+
+
 def test_a_path_under_the_checkout_becomes_relative(tmp_path):
     skills = tmp_path / "skills"
     source = skills / "create-pull-request" / "skill.md"
 
-    assert _repo_relative_skill_path(str(source), skills) == "create-pull-request/skill.md"
+    assert _relative(source, skills) == "create-pull-request/skill.md"
+
+
+def test_a_skills_directory_that_is_not_there_yet_still_places_skills(tmp_path):
+    # On a pod whose init container has not finished, nothing exists on disk
+    # yet. Resolution has to stay non-strict, or listing skills becomes a 500
+    # exactly while the assistant is starting.
+    missing = tmp_path / "not-created-yet"
+
+    assert _relative(missing / "a-skill" / "skill.md", missing) == "a-skill/skill.md"
 
 
 def test_the_result_is_posix_so_a_windows_host_still_links_correctly(tmp_path):
     skills = tmp_path / "skills"
     source = skills / "nested" / "skill.md"
 
-    assert "\\" not in _repo_relative_skill_path(str(source), skills)
+    assert "\\" not in _relative(source, skills)
 
 
 def test_a_path_outside_the_checkout_gets_no_link(tmp_path):
     # Better no link than one pointing at a file the repository does not have.
     outside = tmp_path / "elsewhere" / "skill.md"
 
-    assert _repo_relative_skill_path(str(outside), tmp_path / "skills") == ""
+    assert _relative(outside, tmp_path / "skills") == ""
 
 
 @pytest.mark.parametrize("value", [None, "", "   ", 17, [], {}])
 def test_an_index_without_a_usable_source_path_is_survivable(tmp_path, value):
     # An index written by an older sync has no source_path at all; the skills
     # list must still render rather than 500.
-    assert _repo_relative_skill_path(value, tmp_path) == ""
+    assert _repo_relative_skill_path(value, _resolved_skills_root(tmp_path)) == ""
 
 
 def _index_entry(**overrides):
