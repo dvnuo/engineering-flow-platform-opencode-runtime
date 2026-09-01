@@ -21,6 +21,14 @@ Runtime events expose stable cross-layer fields: `type/event_type`, `engine`, `r
 ## Permission events
 `permission_request` and `permission_resolved` include trace context and request/session propagation.
 
+`permission.requested` additionally carries `data.permission_request`: one
+object gathering `request_id`/`id`/`permission_id`, `tool`/`tool_id`/`tool_name`,
+`title`, `args`, and `risk_level`. Portal builds its approval card from that
+object alone, so the fields are assembled once here rather than left scattered
+across sibling keys that differ between the passthrough and projected paths.
+`args` falls back to the permission title when the tool input is absent, so the
+card's preview block is never empty.
+
 ## Tool events
 `tool.started`, `tool.completed`, `tool.failed` include `tool_name` and `tool_source` (`tools_repo`, `opencode_builtin`, `unknown`).
 

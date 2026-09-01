@@ -15,7 +15,7 @@ def test_docs_contract_sections_and_keywords():
         '## Failure modes and expected status',
     ]:
         assert section in runtime
-    for token in [':8000', ':4096', 'Portal only calls adapter', 'must not be exposed', '/root/.local/share/opencode', '/root/.local/share/efp-compat', 'runtime-only', '/api/tasks/execute', '/api/capabilities', '/api/skills', '/workspace/.opencode/skills', 'Portal provides skills only', 'External tools subsystem removed / not supported']:
+    for token in [':8000', ':4096', 'Portal only calls adapter', 'must not be exposed', '/root/.local/share/opencode', '/root/.local/share/efp-compat', 'runtime-only', '/api/tasks/execute', '/api/capabilities', '/api/skills', '/api/personalization', '/api/sessions/{session_id}/pending-input', '/api/sessions/{session_id}/permission/respond', 'question_response_unsupported', '/workspace/.opencode/skills', 'Portal provides skills only', 'External tools subsystem removed / not supported']:
         assert token in runtime
     for forbidden in ['## Tools asset mapping', 'tools-index', 'tools_index', '/app/tools', 'EFP_TOOLS_DIR', 'OPENCODE_TOOLS_DIR', 'tool_mapping', 'opencode_tools', 'RUNTIME_CONTRACT_EXPECT_LEGACY_TOOL', 'RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL', 'RUNTIME_CONTRACT_EXPECT_TOOL_MAPPING', 'RUNTIME_CONTRACT_EXPECT_EFP_TOOL']:
         assert forbidden not in runtime
@@ -23,7 +23,7 @@ def test_docs_contract_sections_and_keywords():
     obs = _t('docs/OBSERVABILITY.md')
     for section in ['## RuntimeEvent schema', '## trace_context schema', '## trace_id precedence', '## EventBus filter keys', '## Chat events', '## Task events', '## Permission events', '## Tool events', '## OpenCode raw event normalization', '## Secret redaction rules', '## Portal subscription guidance', '## Limitations', '## JSON example']:
         assert section in obs
-    for token in ['trace_id', 'agent_id', 'request_id', 'task_id', 'tool_source', 'data.trace_context']:
+    for token in ['trace_id', 'agent_id', 'request_id', 'task_id', 'tool_source', 'data.trace_context', 'data.permission_request']:
         assert token in obs
 
     testing = _t('docs/TESTING.md')

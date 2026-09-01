@@ -24,3 +24,4 @@ AI_PLATFORM_TOKEN_MANAGER_KEY = web.AppKey('ai_platform_token_manager', object)
 BOOT_PROJECTION_KEY = web.AppKey('boot_projection', object)
 
 REQUEST_BINDING_STORE_KEY = web.AppKey('request_binding_store', object)
+PENDING_INPUT_KEY = web.AppKey('pending_input_store', object)

@@ -461,6 +461,73 @@ def _standard_passthrough_event(
     return evt
 
 
+def _permission_request_payload(
+    event: dict[str, Any],
+    *,
+    values: dict[str, str],
+    max_chars: int,
+) -> dict[str, Any] | None:
+    """Assemble the one object Portal builds its approval card from.
+
+    Every field the permission needs is already on the event, but scattered
+    across sibling keys that differ between the passthrough and projected
+    paths. Portal looks for a single `permission_request` object and renders
+    nothing without it, so the scatter is gathered here once.
+    """
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    permission_id = _sanitize_event_text(
+        event.get("permission_id")
+        or data.get("permission_id")
+        or data.get("id")
+        or _first_string(values, "permissionID", "permission_id", "requestID", "request_id", "id"),
+        300,
+    )
+    # Without an id there is nothing to respond to, so a card would be a dead
+    # end -- better no card than one whose buttons cannot work.
+    if not permission_id:
+        return None
+
+    tool = _sanitize_event_text(event.get("tool") or data.get("tool") or _tool_name(values), 300)
+    title = _sanitize_event_value(_first_string(values, "title"), max_chars)
+    preview = _sanitize_event_value(
+        event.get("input_preview")
+        or data.get("input_preview")
+        or _first_string(values, "input", "arguments", "args", "params", "command"),
+        max_chars,
+    )
+    return {
+        "request_id": permission_id,
+        "id": permission_id,
+        "permission_id": permission_id,
+        # Portal reads whichever of these three it finds first; opencode names
+        # the tool in one place, so they all carry the same value.
+        "tool": tool,
+        "tool_id": tool,
+        "tool_name": tool,
+        "title": title,
+        # Shown in the card's preview block. OpenCode's permission title is
+        # often the only human-readable summary when the tool input is absent,
+        # so it stands in rather than leaving the block empty.
+        "args": preview or title,
+        "risk_level": _sanitize_event_text(event.get("risk_level") or data.get("risk_level") or "medium", 100),
+        "session_id": _sanitize_event_text(event.get("session_id"), 300),
+        "opencode_session_id": _sanitize_event_text(event.get("opencode_session_id"), 300),
+        "created_at": _sanitize_event_text(event.get("created_at"), 100),
+    }
+
+
+def _attach_permission_request(event: dict[str, Any] | None, *, values: dict[str, str], settings) -> dict[str, Any] | None:
+    if not isinstance(event, dict) or str(event.get("type") or "") != "permission.requested":
+        return event
+    request = _permission_request_payload(event, values=values, max_chars=settings.event_bridge_event_preview_chars)
+    if request is None:
+        return event
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    data["permission_request"] = request
+    event["data"] = data
+    return event
+
+
 def _apply_projected_protocol(
     event: dict[str, Any],
     *,
@@ -520,7 +587,11 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     _collect_strings(raw_event, values)
     _collect_strings(canonical, values)
     if _is_standard_event_type(raw_type):
-        return _standard_passthrough_event(raw_event, canonical, raw_type, values, session_store=session_store, settings=settings)
+        return _attach_permission_request(
+            _standard_passthrough_event(raw_event, canonical, raw_type, values, session_store=session_store, settings=settings),
+            values=values,
+            settings=settings,
+        )
 
     opencode_session_id = _opencode_session_id_from_values(values)
     permission_id = _first_string(values, "permissionID", "permission_id", "requestID", "request_id", "id")
@@ -785,15 +856,19 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
     trace_context = build_trace_context(settings, request_id=s_request_id, session_id=s_session_id, task_id=task_id or "", opencode_session_id=s_opencode_session_id, tool_name=s_tool if (normalized_type.startswith("tool.") or normalized_type.startswith("permission_")) else "", tool_source=tool_source)
     add_trace_context(evt, trace_context)
     evt["tool_source"] = _sanitize_event_text(tool_source, 200)
-    return _apply_projected_protocol(
-        evt,
-        raw_event=raw_event,
-        canonical=canonical,
-        raw_type=raw_type,
-        legacy_type=normalized_type,
+    return _attach_permission_request(
+        _apply_projected_protocol(
+            evt,
+            raw_event=raw_event,
+            canonical=canonical,
+            raw_type=raw_type,
+            legacy_type=normalized_type,
+            values=values,
+            status=status,
+            max_chars=max_chars,
+        ),
         values=values,
-        status=status,
-        max_chars=max_chars,
+        settings=settings,
     )
 
 
