@@ -28,14 +28,13 @@ DEFAULT_MAX_SESSIONS = 512
 
 RECORD_EVENT_TYPES = {"permission.requested", "permission_request"}
 
+RESOLVED_EVENT_TYPES = {"permission.resolved", "permission_resolved"}
+
 # Once the run that raised it is over, a pending permission can no longer be
 # answered -- OpenCode has already dropped the waiter.
-CLEAR_EVENT_TYPES = {
-    "permission.resolved",
-    "permission_resolved",
-    "chat.completed",
-    "chat.failed",
-}
+RUN_ENDED_EVENT_TYPES = {"chat.completed", "chat.failed"}
+
+CLEAR_EVENT_TYPES = RESOLVED_EVENT_TYPES | RUN_ENDED_EVENT_TYPES
 
 
 @dataclass
@@ -112,7 +111,10 @@ class PendingInputStore:
             return
 
         if types & CLEAR_EVENT_TYPES:
-            self.clear(session_id, permission_id=_event_permission_id(event) if types & {"permission.resolved", "permission_resolved"} else None)
+            # A resolution names the permission it resolved, so it can only
+            # clear that one. The run simply ending clears whatever is pending.
+            resolved_id = _event_permission_id(event) if types & RESOLVED_EVENT_TYPES else None
+            self.clear(session_id, permission_id=resolved_id)
             return
 
         if not (types & RECORD_EVENT_TYPES):
@@ -126,11 +128,17 @@ class PendingInputStore:
         if not permission_id:
             return
 
+        existing = self._pending.get(session_id)
         self._pending[session_id] = PendingPermission(
             request=dict(request),
             permission_id=permission_id,
             opencode_session_id=str(event.get("opencode_session_id") or request.get("opencode_session_id") or ""),
             request_id=str(event.get("request_id") or ""),
+            # OpenCode's event is `permission.updated`, and nothing stops it
+            # arriving twice for one permission. Re-recording with a fresh
+            # claim would release a response already in flight and let the
+            # same tool call be approved twice.
+            claimed=bool(existing is not None and existing.permission_id == permission_id and existing.claimed),
         )
         self._pending.move_to_end(session_id)
         while len(self._pending) > self.max_sessions:

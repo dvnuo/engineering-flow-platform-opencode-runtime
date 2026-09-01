@@ -12,7 +12,7 @@ import asyncio
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from efp_opencode_adapter.app_keys import EVENT_BUS_KEY, PENDING_INPUT_KEY, SESSION_STORE_KEY
+from efp_opencode_adapter.app_keys import EVENT_BUS_KEY, SESSION_STORE_KEY
 from efp_opencode_adapter.event_bridge import OpenCodeEventBridge
 from efp_opencode_adapter.event_bus import EventBus
 from efp_opencode_adapter.opencode_client import OpenCodeClientError
@@ -34,7 +34,7 @@ class _BridgeClient:
             yield {}
 
 
-def _bridge(tmp_path):
+def _bridge():
     settings = Settings.from_env()
     paths = ensure_state_dirs(settings)
     session_store = SessionStore(paths.sessions_dir)
@@ -243,12 +243,37 @@ def test_claiming_the_wrong_id_fails():
     assert store.claim("portal-1", "other") is False
 
 
+def test_a_repeated_event_for_the_same_permission_keeps_the_claim():
+    # OpenCode's event is `permission.updated`, and nothing stops it arriving
+    # twice for one permission. Re-recording with a fresh claim would release a
+    # response already in flight and let the same tool call be approved twice.
+    store = PendingInputStore()
+    store.observe_event(_permission_event())
+    store.claim("portal-1", "perm-1")
+
+    store.observe_event(_permission_event())
+
+    assert store.claim("portal-1", "perm-1") is False
+
+
+def test_a_different_permission_starts_unclaimed():
+    # The claim belongs to the request, not the session: a genuinely new block
+    # must be answerable.
+    store = PendingInputStore()
+    store.observe_event(_permission_event())
+    store.claim("portal-1", "perm-1")
+
+    store.observe_event(_permission_event(permission_id="perm-2"))
+
+    assert store.claim("portal-1", "perm-2") is True
+
+
 # ------------------------------------------------------- the bridge feeds it
 
 
 @pytest.mark.asyncio
-async def test_a_real_opencode_permission_event_becomes_pending(tmp_path):
-    bridge, store = _bridge(tmp_path)
+async def test_a_real_opencode_permission_event_becomes_pending():
+    bridge, store = _bridge()
 
     await bridge.publish_raw_event(
         {
@@ -273,10 +298,10 @@ async def test_a_real_opencode_permission_event_becomes_pending(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_the_event_carries_the_card_payload_portal_reads(tmp_path):
+async def test_the_event_carries_the_card_payload_portal_reads():
     # Portal's live card is built from data["permission_request"]; without it
     # the event arrives with the permission scattered and no card renders.
-    bridge, _store = _bridge(tmp_path)
+    bridge, _store = _bridge()
 
     event = await bridge.publish_raw_event(
         {"payload": {"type": "permission.asked", "properties": {"sessionID": "oc-1", "requestID": "perm-1", "tool": "bash"}}}
@@ -286,8 +311,8 @@ async def test_the_event_carries_the_card_payload_portal_reads(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_resolved_event_carries_no_card_payload(tmp_path):
-    bridge, _store = _bridge(tmp_path)
+async def test_a_resolved_event_carries_no_card_payload():
+    bridge, _store = _bridge()
 
     event = await bridge.publish_raw_event(
         {
@@ -303,10 +328,10 @@ async def test_a_resolved_event_carries_no_card_payload(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_the_permission_title_stands_in_when_there_is_no_tool_input(tmp_path):
+async def test_the_permission_title_stands_in_when_there_is_no_tool_input():
     # Portal shows args in the card's preview block; an empty block tells the
     # member nothing about what they are approving.
-    bridge, store = _bridge(tmp_path)
+    bridge, store = _bridge()
 
     await bridge.publish_raw_event(
         {"payload": {"type": "permission.asked", "properties": {"sessionID": "oc-1", "id": "perm-1", "title": "Edit README.md"}}}
@@ -393,6 +418,51 @@ async def test_a_decision_maps_onto_opencodes_vocabulary(decision, always, expec
 
     assert resp.status == 202
     assert fake.permission_calls == [("oc-1", "perm-1", {"response": expected})]
+
+
+@pytest.mark.parametrize(
+    ("always", "expected"),
+    [
+        (True, "always"),
+        ("true", "always"),
+        ("1", "always"),
+        (1, "always"),
+        # `bool("false")` is True. Reading these as a yes would persist a
+        # standing approval for the tool that nobody asked for -- so anything
+        # not recognisably true falls back to a single-use approval.
+        ("false", "once"),
+        ("0", "once"),
+        (0, "once"),
+        ("", "once"),
+        (None, "once"),
+        ("maybe", "once"),
+        ({"nested": True}, "once"),
+    ],
+)
+async def test_a_standing_approval_needs_an_unambiguous_yes(always, expected):
+    app, client, fake = await _serve()
+    await _block(app)
+
+    resp = await client.post(
+        "/api/sessions/portal-1/permission/respond",
+        json={"request_id": "perm-1", "decision": "approve", "always": always},
+    )
+    await client.close()
+
+    assert resp.status == 202
+    assert fake.permission_calls == [("oc-1", "perm-1", {"response": expected})]
+
+
+async def test_an_omitted_always_is_a_single_use_approval():
+    app, client, fake = await _serve()
+    await _block(app)
+
+    await client.post(
+        "/api/sessions/portal-1/permission/respond", json={"request_id": "perm-1", "decision": "approve"}
+    )
+    await client.close()
+
+    assert fake.permission_calls == [("oc-1", "perm-1", {"response": "once"})]
 
 
 async def test_answering_clears_the_pending_request():
@@ -548,6 +618,24 @@ async def test_answering_announces_the_resolution():
 
     assert event["type"] == "permission_resolved"
     assert event["data"]["permission_id"] == "perm-1"
+
+
+async def test_the_permission_id_endpoint_also_clears_the_pending_request():
+    # The older `/api/permissions/{id}/respond` route is still there. It has to
+    # leave the same state behind, or a card answered through it would come
+    # back on the next poll.
+    app, client, fake = await _serve()
+    await _block(app)
+
+    resp = await client.post(
+        "/api/permissions/perm-1/respond",
+        json={"decision": "allow", "session_id": "portal-1", "opencode_session_id": "oc-1"},
+    )
+    body = await (await client.get("/api/sessions/portal-1/pending-input")).json()
+    await client.close()
+
+    assert resp.status == 200
+    assert body["permission_request"] is None
 
 
 async def test_a_question_response_says_the_runtime_cannot_take_one():

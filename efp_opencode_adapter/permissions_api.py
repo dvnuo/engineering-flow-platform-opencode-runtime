@@ -121,6 +121,26 @@ def _normalized_decision(value) -> str:
     raise ValueError("decision must be approve or deny")
 
 
+# Only these mean "yes". `bool(value)` would read the *string* "false" -- and
+# "0", and any other stray text -- as true, and the true direction is the
+# dangerous one: it persists a standing approval for that tool in the session
+# rather than approving this one call. Anything unrecognised falls back to a
+# single-use approval.
+_TRUE_WORDS = {"true", "yes", "on", "1"}
+
+
+def _wants_standing_approval(body: dict) -> bool:
+    for key in ("always", "remember"):
+        value = body.get(key)
+        if value is True:
+            return True
+        if isinstance(value, str) and value.strip().lower() in _TRUE_WORDS:
+            return True
+        if isinstance(value, int) and not isinstance(value, bool) and value == 1:
+            return True
+    return False
+
+
 def _opencode_response_for(decision: str, *, always: bool) -> str:
     if decision == "deny":
         return "reject"
@@ -190,7 +210,7 @@ async def session_permission_respond_handler(request: web.Request) -> web.Respon
         decision = _normalized_decision(body.get("decision") or body.get("action") or body.get("reply"))
     except ValueError as exc:
         return _json_error(str(exc), 400)
-    response = _opencode_response_for(decision, always=bool(body.get("always") or body.get("remember")))
+    response = _opencode_response_for(decision, always=_wants_standing_approval(body))
 
     # Claimed before the call, not after: two clicks landing together would
     # otherwise both pass the checks above and approve the same tool twice.
