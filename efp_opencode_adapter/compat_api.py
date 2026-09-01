@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import web
@@ -92,6 +93,26 @@ def _git_info_for_dir(path: Path) -> dict[str, str | None]:
     return {"commit_id": commit_id, "repo_url": _clean_repo_url(repo_url)}
 
 
+def _repo_relative_skill_path(source_path: Any, skills_dir: Path) -> str:
+    """Where a skill's source file sits inside the skills checkout.
+
+    The index records an absolute container path. Portal turns this into a link
+    to the branch the assistant booted with, so it needs the path relative to
+    the checkout root -- a skill's folder and its declared name are allowed to
+    differ, which is why Portal cannot work it out from the name it already has.
+
+    The native runtime carries a sibling of this function and derives the same
+    field. Anything the index cannot place under the skills directory reports
+    empty rather than a link that would 404.
+    """
+    if not isinstance(source_path, str) or not source_path.strip():
+        return ""
+    try:
+        return Path(source_path).resolve().relative_to(Path(skills_dir).resolve()).as_posix()
+    except (ValueError, OSError):
+        return ""
+
+
 async def skills_handler(request: web.Request) -> web.Response:
     settings = request.app[SETTINGS_KEY]
     data = load_skills_index(settings)
@@ -106,7 +127,7 @@ async def skills_handler(request: web.Request) -> web.Response:
         supported = bool(item.get("opencode_supported", True))
         callable_flag = state in {"allowed", "ask"} and supported
         blocked_reason = "skill is not supported for OpenCode runtime" if not supported else ("skill denied by current OpenCode permission profile" if state == "denied" else None)
-        skills.append({"name": item["opencode_name"], "opencode_name": item["opencode_name"], "efp_name": item.get("efp_name"), "description": item.get("description", ""), "tools": item.get("tools", []), "task_tools": item.get("task_tools", []), "risk_level": item.get("risk_level"), "source_path": item.get("source_path"), "runtime_type": "opencode", "engine": "opencode", "permission_state": state, "callable": callable_flag, "blocked_reason": blocked_reason, "opencode_compatibility": item.get("opencode_compatibility", "prompt_only"), "runtime_equivalence": bool(item.get("runtime_equivalence", True)), "programmatic": bool(item.get("programmatic", False)), "opencode_supported": supported, "compatibility_warnings": item.get("compatibility_warnings", [])})
+        skills.append({"name": item["opencode_name"], "opencode_name": item["opencode_name"], "efp_name": item.get("efp_name"), "description": item.get("description", ""), "tools": item.get("tools", []), "task_tools": item.get("task_tools", []), "risk_level": item.get("risk_level"), "source_path": item.get("source_path"), "repo_path": _repo_relative_skill_path(item.get("source_path"), settings.skills_dir), "runtime_type": "opencode", "engine": "opencode", "permission_state": state, "callable": callable_flag, "blocked_reason": blocked_reason, "opencode_compatibility": item.get("opencode_compatibility", "prompt_only"), "runtime_equivalence": bool(item.get("runtime_equivalence", True)), "programmatic": bool(item.get("programmatic", False)), "opencode_supported": supported, "compatibility_warnings": item.get("compatibility_warnings", [])})
     return web.json_response({"skills": skills, "engine": "opencode", "count": len(skills), "warnings": data.get("warnings", []) if isinstance(data, dict) else []})
 
 
