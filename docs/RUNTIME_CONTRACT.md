@@ -104,6 +104,7 @@ OpenCode is an implementation detail behind adapter APIs.
 - Skills are synced during asset initialization and before managed OpenCode startup or restart.
 - `tools` / `task_tools` in source skill frontmatter are informational metadata only.
 - Source metadata is not interpreted as runtime executable wrapper mappings.
+- `/api/skills` reports `repo_path`: the skill's source file relative to the skills checkout root, so Portal can link a slash command to the branch the assistant booted with. It is empty when the source cannot be placed under `EFP_SKILLS_DIR`. The native runtime answers with the same field; a skill's folder and its declared name may differ, so this cannot be derived from the name.
 
 ## State persistence contract
 Persisted state directories:
