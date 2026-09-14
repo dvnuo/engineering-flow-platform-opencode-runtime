@@ -22,7 +22,7 @@ def build_tools_config_json(effective_config: dict[str, Any]) -> dict[str, Any]:
 
     The shape matches ``RootConfig`` in engineering-flow-platform-tools
     (internal/config/config.go): top-level keys version/jira/confluence/
-    jenkins/aws/visual/mobile-auto. Jira/Confluence/Jenkins sections are
+    jenkins/aws/mobile-auto. Jira/Confluence/Jenkins sections are
     transformed from the profile shape into the tools instances shape (Jenkins
     goes through the same multi-instance projection as Jira/Confluence, with
     the legacy flat Jenkins profile normalised into a one-element list); the
@@ -50,7 +50,7 @@ def build_tools_config_json(effective_config: dict[str, Any]) -> dict[str, Any]:
             "instances": [_tools_instance_config(instance, product=product) for instance in instances],
         }
 
-    for section_name in ("aws", "visual", "mobile-auto"):
+    for section_name in ("aws", "mobile-auto"):
         section = effective_config.get(section_name)
         if isinstance(section, dict) and section:
             root[section_name] = json.loads(json.dumps(section))
@@ -272,7 +272,7 @@ def build_cli_env(runtime_config: dict[str, Any] | None) -> dict[str, str]:
 
     Ports the native tools-config projection: build the RootConfig-shaped dict,
     keep ONLY the jira/confluence/jenkins sections (aws stays file-based via
-    EFP_CONFIG; mobile-auto keeps its own browserstack env; visual is absent),
+    EFP_CONFIG; mobile-auto keeps its own browserstack env),
     and flatten to the EFP_<PATH> indexed env-var convention the CLIs decode.
     """
     cfg = runtime_config if isinstance(runtime_config, dict) else {}
