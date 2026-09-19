@@ -5,18 +5,18 @@ import json
 import os
 import re
 import shlex
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
+import yaml
+
+from .mobile_cli_config import _read_yaml_mapping
 from .path_utils import path_exists
 from .settings import Settings
 from .tools_config_env import build_cli_env
 
 SECRET_MARKERS = ("TOKEN", "PASSWORD", "SECRET", "API_KEY", "ACCESS", "REFRESH", "AUTHORIZATION")
-AWS_AUTH_DEFAULT_COMMAND = "aws-auth"
-RUNTIME_VENV_BIN_DIRS = ("/opt/venv/bin",)
 MANAGED_EXTERNAL_ENV_KEYS = {
     # Full profile Secret blob: scrubbed from the adapter process after boot
     # projection and never allowed to reach the opencode child env.
@@ -34,6 +34,8 @@ MANAGED_EXTERNAL_ENV_KEYS = {
     "EFP_JENKINS_USERNAME", "EFP_JENKINS_PASSWORD", "JENKINS_USERNAME", "JENKINS_PASSWORD",
     "EFP_CONFIG", "MOBILE_AUTO_STATE_DIR", "MOBILE_AUTO_ARTIFACTS_DIR", "BROWSERSTACK_LOCAL_BINARY",
     "BROWSERSTACK_USERNAME", "BROWSERSTACK_ACCESS_KEY",
+    # kubectl reads the managed kubeconfig that `aws-auth eks kubeconfig` writes.
+    "KUBECONFIG",
 }
 _VERSIONED_JAVA_HOME_RE = re.compile(r"^(JAVA|JDK)\d+_HOME$")
 _REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
@@ -118,127 +120,134 @@ def _is_github_dotcom_like(host: str) -> bool:
     return value == "github.com" or value.endswith(".ghe.com")
 
 
-def _read_bytes_if_exists(path: Path) -> bytes | None:
-    if not path.exists():
-        return None
-    return path.read_bytes()
+AWS_PROVIDERS = ("adfs-assume", "saml2aws", "assume-role")
+AWS_SCALAR_KEYS = (
+    "provider",
+    "domain",
+    "username",
+    "password",
+    "idp_url",
+    "source_profile",
+    "default_account",
+    "default_region",
+    "session_duration_seconds",
+    "kubeconfig_path",
+)
+AWS_ACCOUNT_KEYS = ("name", "account_id", "role", "role_arn", "regions", "profile", "enabled")
 
 
-def _restore_bytes_or_remove(path: Path, previous: bytes | None) -> None:
-    if previous is None:
+def _aws_provider(aws: dict) -> str:
+    provider = str(aws.get("provider") or "").strip().lower()
+    return provider or "adfs-assume"
+
+
+def _aws_enabled_accounts(aws: dict) -> list[dict]:
+    accounts = aws.get("accounts")
+    if not isinstance(accounts, list):
+        return []
+    out: list[dict] = []
+    for item in accounts:
+        if not isinstance(item, dict) or item.get("enabled") is False:
+            continue
+        if not str(item.get("account_id") or item.get("role_arn") or "").strip():
+            continue
+        out.append(item)
+    return out
+
+
+def _sanitize_aws_node(aws: dict) -> dict:
+    """Keep only the keys the aws-auth CLI understands (RootConfig.AWS shape)."""
+    node: dict = {"enabled": True}
+    for key in AWS_SCALAR_KEYS:
+        value = aws.get(key)
+        if value is None:
+            continue
+        if key == "session_duration_seconds":
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                node[key] = number
+            continue
+        text = str(value).strip()
+        if text:
+            node[key] = text
+    accounts = aws.get("accounts")
+    if isinstance(accounts, list):
+        cleaned: list[dict] = []
+        for item in accounts:
+            if not isinstance(item, dict):
+                continue
+            entry: dict = {}
+            for key in AWS_ACCOUNT_KEYS:
+                value = item.get(key)
+                if value is None:
+                    continue
+                if key == "enabled":
+                    entry[key] = bool(value)
+                elif key == "regions":
+                    raw_regions = value if isinstance(value, list) else str(value).split(",")
+                    regions = [str(region).strip() for region in raw_regions if str(region).strip()]
+                    if regions:
+                        entry[key] = regions
+                else:
+                    text = str(value).strip()
+                    if text:
+                        entry[key] = text
+            if entry.get("name") or entry.get("account_id"):
+                cleaned.append(entry)
+        node["accounts"] = cleaned
+    return node
+
+
+def _chmod_quietly(path: Path, mode: int) -> None:
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
+
+
+def _write_aws_cli_config(settings: Settings, aws: dict) -> dict[str, str]:
+    """Project the aws node into EFP_CONFIG and pin the AWS/kube file locations.
+
+    aws-auth reads the shared EFP config file for the directory credentials,
+    provider, and account matrix, so the node is written there verbatim (only
+    known keys). The credentials and role-chaining profiles aws-auth writes,
+    and the kubeconfig `aws-auth eks kubeconfig` produces, live under the
+    adapter state dir so nothing lands in the browsable workspace. Stale
+    artefacts from earlier images and previous sessions are removed at boot.
+    """
+    aws_dir = settings.adapter_state_dir / "aws"
+    aws_dir.mkdir(parents=True, exist_ok=True)
+    _chmod_quietly(aws_dir, 0o700)
+    config_path = settings.efp_config_path
+    existing = _read_yaml_mapping(config_path)
+    existing.setdefault("version", 1)
+    existing["aws"] = _sanitize_aws_node(aws)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    _chmod_quietly(config_path.parent, 0o700)
+    tmp_path = config_path.with_name(f".{config_path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(yaml.safe_dump(existing, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    _chmod_quietly(tmp_path, 0o600)
+    tmp_path.replace(config_path)
+    _chmod_quietly(config_path, 0o600)
+    stale = [aws_dir / "credentials", aws_dir / "config", aws_dir / "config.tmp", aws_dir / "aws-adfs-credential-process.py"]
+    stale.extend(aws_dir.glob("adfs-auth*.json"))
+    for path in stale:
         try:
             if path.exists():
                 path.unlink()
         except OSError:
             pass
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(previous)
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-
-
-def _aws_auth_configure_command(*, domain: str, username: str) -> list[str]:
-    return [
-        AWS_AUTH_DEFAULT_COMMAND,
-        "auth",
-        "login",
-        "--domain",
-        domain,
-        "--username",
-        username,
-        "--password-stdin",
-        "--json",
-    ]
-
-
-def _path_with_runtime_venv_bins(path_value: str) -> str:
-    parts = [part for part in str(path_value or "").split(os.pathsep) if part]
-    prefix = [path for path in RUNTIME_VENV_BIN_DIRS if path not in parts]
-    return os.pathsep.join(prefix + parts)
-
-
-def _aws_auth_env(*, config_path: Path, credentials_path: Path) -> dict[str, str]:
-    env = os.environ.copy()
-    for key in ("AD_PASS", "password"):
-        env.pop(key, None)
-    env["EFP_CONFIG"] = str(config_path)
-    env["AWS_SHARED_CREDENTIALS_FILE"] = str(credentials_path)
-    env["PATH"] = _path_with_runtime_venv_bins(env.get("PATH", ""))
-    return env
-
-
-def _redact_text(value: str, secrets: tuple[str, ...]) -> str:
-    text = str(value or "")
-    for secret in sorted((str(secret) for secret in secrets if secret), key=len, reverse=True):
-        text = text.replace(secret, "[REDACTED_SECRET]")
-    return text
-
-
-def _format_command(args: list[str], secrets: tuple[str, ...]) -> str:
-    return " ".join(shlex.quote(_redact_text(str(arg), secrets)) for arg in args)
-
-
-AWS_AUTH_TIMEOUT_SECONDS = 120.0
-
-
-def _run_aws_auth(command: list[str], *, env: dict[str, str], password: str, input_text: str | None = None) -> None:
-    # Bounded so a hung aws-auth login surfaces as a boot projection failure
-    # (adapter unready) instead of stalling startup silently.
-    try:
-        result = subprocess.run(command, input=input_text, text=True, capture_output=True, check=False, env=env, timeout=AWS_AUTH_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            "AWS auth command timed out: "
-            f"{_format_command(command, (password,))} after {AWS_AUTH_TIMEOUT_SECONDS}s"
-        ) from exc
-    except OSError as exc:
-        raise RuntimeError(
-            "Failed to run AWS auth command: "
-            f"{_format_command(command, (password,))}: {_redact_text(str(exc), (password,))}"
-        ) from exc
-    if result.returncode != 0:
-        detail = _redact_text((result.stderr or result.stdout or "").strip(), (password,))
-        suffix = f": {detail}" if detail else ""
-        raise RuntimeError(
-            "AWS auth command failed: "
-            f"{_format_command(command, (password,))} exited with {result.returncode}{suffix}"
-        )
-
-
-def _write_aws_auth_cli_files(settings: Settings, *, domain: str, username: str, password: str) -> tuple[Path, Path]:
-    aws_dir = settings.adapter_state_dir / "aws"
-    aws_dir.mkdir(parents=True, exist_ok=True)
-    credentials_path = aws_dir / "credentials"
-    previous_credentials = _read_bytes_if_exists(credentials_path)
-    config_path = settings.efp_config_path
-    previous_config = _read_bytes_if_exists(config_path)
-    auth_env = _aws_auth_env(
-        config_path=config_path,
-        credentials_path=credentials_path,
-    )
-    try:
-        _run_aws_auth(
-            _aws_auth_configure_command(domain=domain, username=username),
-            env=auth_env,
-            password=password,
-            input_text=password + "\n",
-        )
-        if credentials_path.exists():
-            credentials_path.unlink()
-        for old_path in (aws_dir / "config", aws_dir / "config.tmp"):
-            if old_path.exists():
-                old_path.unlink()
-        for old_path in list(aws_dir.glob("adfs-auth*.json")) + [aws_dir / "aws-adfs-credential-process.py"]:
-            if old_path.exists():
-                old_path.unlink()
-    except Exception:
-        _restore_bytes_or_remove(credentials_path, previous_credentials)
-        _restore_bytes_or_remove(config_path, previous_config)
-        raise
-    return config_path, credentials_path
+    kubeconfig = str(aws.get("kubeconfig_path") or "").strip()
+    kubeconfig_path = Path(os.path.expanduser(kubeconfig)) if kubeconfig else settings.adapter_state_dir / "kube" / "config"
+    return {
+        "EFP_CONFIG": str(config_path),
+        "AWS_SHARED_CREDENTIALS_FILE": str(aws_dir / "credentials"),
+        "AWS_CONFIG_FILE": str(aws_dir / "config"),
+        "KUBECONFIG": str(kubeconfig_path),
+    }
 
 
 def aws_status_from_env(env: dict[str, str]) -> dict[str, object]:
@@ -246,12 +255,15 @@ def aws_status_from_env(env: dict[str, str]) -> dict[str, object]:
     credentials_path = env.get("AWS_SHARED_CREDENTIALS_FILE")
     config_present = bool(config_path and path_exists(Path(config_path)))
     credentials_present = bool(credentials_path and path_exists(Path(credentials_path)))
+    kubeconfig_path = env.get("KUBECONFIG")
     return {
         "configured": config_present or credentials_present,
         "config_file_present": config_present,
         "credentials_file_present": credentials_present,
         "config_path": config_path,
         "credentials_path": credentials_path,
+        "kubeconfig_path": kubeconfig_path,
+        "kubeconfig_present": bool(kubeconfig_path and path_exists(Path(kubeconfig_path))),
     }
 
 
@@ -416,21 +428,22 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
     aws_section_present = isinstance(cfg.get("aws"), dict)
     aws_enabled = aws_section_present and _section_enabled(aws)
     if aws_enabled:
+        provider = _aws_provider(aws)
         aws_domain = _first_text(aws.get("domain"))
         aws_username = _first_text(aws.get("username"))
         aws_password = _first_clean_secret(aws.get("password"))
-        if aws_domain and aws_username and aws_password:
-            aws_config_path, aws_credentials_path = _write_aws_auth_cli_files(
-                settings,
-                domain=aws_domain,
-                username=aws_username,
-                password=aws_password,
-            )
-            env["EFP_CONFIG"] = str(aws_config_path)
-            env["AWS_SHARED_CREDENTIALS_FILE"] = str(aws_credentials_path)
-            updated.append("aws")
-        else:
+        if provider not in AWS_PROVIDERS:
+            warnings.append(f"aws provider {provider!r} is not supported; use adfs-assume, saml2aws, or assume-role")
+        elif provider != "assume-role" and not (aws_domain and aws_username and aws_password):
             warnings.append("aws enabled but domain, username, and password are required")
+        elif provider == "assume-role" and not _aws_enabled_accounts(aws):
+            warnings.append("aws enabled with provider assume-role but no accounts are configured")
+        else:
+            # The node (credentials, provider, account matrix) is written to the
+            # shared EFP config file that aws-auth reads; credentials, role
+            # profiles and kubeconfig stay under the adapter state dir.
+            env.update(_write_aws_cli_config(settings, aws))
+            updated.append("aws")
 
     mobile = cfg.get("mobile-auto") if isinstance(cfg.get("mobile-auto"), dict) else {}
     mobile_section_present = isinstance(cfg.get("mobile-auto"), dict)

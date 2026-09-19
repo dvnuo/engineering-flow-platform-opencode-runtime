@@ -144,7 +144,9 @@ there is no apply endpoint and no hot-apply path.
   `opencode.json`), `EFP_PROFILE_REVISION`, and `EFP_PROFILE_ID`.
 - Boot projection: the adapter parses `EFP_PROFILE_CONFIG` once at startup and
   projects it into runtime assets (opencode.json, auth.json, opencode.env,
-  git/gh auth assets, atlassian/mobile CLI config, AWS auth), then removes the
+  git/gh auth assets, atlassian/mobile CLI config, the aws node with its
+  account matrix for aws-auth plus AWS_SHARED_CREDENTIALS_FILE / AWS_CONFIG_FILE /
+  KUBECONFIG under the adapter state dir), then removes the
   blob from its process env before the managed OpenCode child starts. The
   child env never contains `EFP_PROFILE_CONFIG`.
 - Failure semantics: a missing `EFP_PROFILE_CONFIG` env var is a fatal pod

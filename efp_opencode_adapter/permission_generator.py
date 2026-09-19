@@ -144,10 +144,52 @@ def profile_policy_permission_baseline() -> dict[str, Any]:
         "sh ./mvnw *": "allow",
         "chmod +x ./mvnw": "allow",
     }
+    # AWS and EKS troubleshooting stay read-only: aws-auth only writes local
+    # credential profiles and kubeconfig contexts, the aws CLI is allowed for
+    # describe/list/get style calls, kubectl for inspection verbs. Secrets are
+    # asked for explicitly even though the read-only RBAC role never grants
+    # them; every other verb (apply, delete, exec, ...) falls through to ask.
+    aws_bash = {
+        "aws-auth *": "allow",
+        "aws sts get-caller-identity*": "allow",
+        "aws eks list-clusters*": "allow",
+        "aws eks describe-cluster*": "allow",
+        "aws eks list-nodegroups*": "allow",
+        "aws eks describe-nodegroup*": "allow",
+        "aws ecr describe-*": "allow",
+        "aws ecr list-images*": "allow",
+        "aws ecr get-login-password*": "allow",
+        "aws ecr batch-get-image*": "allow",
+        "aws logs describe-*": "allow",
+        "aws logs filter-log-events*": "allow",
+        "aws logs get-log-events*": "allow",
+        "aws ec2 describe-*": "allow",
+        "aws autoscaling describe-*": "allow",
+        "aws cloudwatch get-metric-*": "allow",
+        "aws cloudwatch describe-*": "allow",
+        "aws *": "ask",
+        "kubectl get secret*": "ask",
+        "kubectl get *": "allow",
+        "kubectl describe secret*": "ask",
+        "kubectl describe *": "allow",
+        "kubectl logs *": "allow",
+        "kubectl top *": "allow",
+        "kubectl explain *": "allow",
+        "kubectl api-resources*": "allow",
+        "kubectl api-versions*": "allow",
+        "kubectl version*": "allow",
+        "kubectl auth can-i *": "allow",
+        "kubectl config get-contexts*": "allow",
+        "kubectl config current-context*": "allow",
+        "kubectl config view*": "allow",
+        "kubectl cluster-info*": "allow",
+        "kubectl *": "ask",
+    }
     bash = {"git *": "allow", "gh *": "allow", "git status*": "allow", "git diff*": "allow", "git log*": "allow"}
     bash.update(java_maven_bash)
     bash.update(atlassian_bash)
     bash.update(mobile_bash)
+    bash.update(aws_bash)
     bash["*"] = "ask"
     return {
         "*": "ask", "read": "allow", "glob": "allow", "grep": "allow", "edit": "ask", "write": "ask",
