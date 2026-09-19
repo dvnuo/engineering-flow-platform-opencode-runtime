@@ -8,6 +8,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG CUSTOM_TOOLS_DIR=runtime-tools
 ARG MAVEN_VERSION=3.9.16
 ARG MAVEN_SETTINGS_DIR=runtime-maven
+# kubectl release line for read-only EKS inspection: pin KUBECTL_VERSION (e.g.
+# v1.32.13) for an exact build, or leave it empty to take the latest patch of
+# KUBECTL_STABLE_CHANNEL. kubectl must stay within one minor of the target
+# EKS control planes.
+ARG KUBECTL_STABLE_CHANNEL=stable-1.32
+ARG KUBECTL_VERSION=""
 
 ENV OPENCODE_VERSION=${OPENCODE_VERSION}
 ENV PYTHONUNBUFFERED=1
@@ -72,6 +78,14 @@ RUN set -eux; \
   /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli; \
   rm -rf /tmp/aws /tmp/awscliv2.zip; \
   aws --version; \
+  KUBECTL_ARCH="$(dpkg --print-architecture)"; \
+  KUBECTL_VERSION="${KUBECTL_VERSION:-$(curl -fsSL "https://dl.k8s.io/release/${KUBECTL_STABLE_CHANNEL}.txt")}"; \
+  curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBECTL_ARCH}/kubectl"; \
+  curl -fsSLo /tmp/kubectl.sha256 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBECTL_ARCH}/kubectl.sha256"; \
+  echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum --check; \
+  chmod 0755 /usr/local/bin/kubectl; \
+  rm -f /tmp/kubectl.sha256; \
+  kubectl version --client; \
   test "$(npm root -g)" = "/usr/local/lib/node_modules"; \
   rm -rf /var/lib/apt/lists/*
 
@@ -233,6 +247,17 @@ RUN set -eux; \
   jenkins schema build.test-report --json >/dev/null; \
   mobile-auto schema run.start --json >/dev/null; \
   test -x /usr/local/bin/BrowserStackLocal
+
+# Optional AWS login providers that `aws-auth login` shells out to (adfs-assume,
+# saml2aws). CI stages whichever the runtime profile's aws.provider needs under
+# runtime-tools/providers/ (see docs/CUSTOM_TOOLS_IMAGE.md); the directory only
+# holds .gitkeep otherwise, so the image builds either way.
+COPY ${CUSTOM_TOOLS_DIR}/providers/ /usr/local/bin/
+RUN set -eux; \
+  rm -f /usr/local/bin/.gitkeep; \
+  for tool in adfs-assume saml2aws; do \
+    if [[ -f "/usr/local/bin/$tool" ]]; then chmod 0755 "/usr/local/bin/$tool"; fi; \
+  done
 
 WORKDIR /app/runtime
 COPY pyproject.toml README.md package*.json ./

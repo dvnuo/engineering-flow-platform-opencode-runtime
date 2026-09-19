@@ -92,6 +92,29 @@ def test_dockerfile_installs_aws_cli_v2():
         assert token in text
 
 
+def test_dockerfile_installs_pinned_kubectl_with_checksum():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "Dockerfile").read_text(encoding="utf-8")
+    for token in [
+        "ARG KUBECTL_STABLE_CHANNEL=stable-1.",
+        'ARG KUBECTL_VERSION=""',
+        'https://dl.k8s.io/release/${KUBECTL_STABLE_CHANNEL}.txt',
+        'https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${KUBECTL_ARCH}/kubectl"',
+        "kubectl.sha256",
+        "sha256sum --check",
+        "kubectl version --client",
+    ]:
+        assert token in text
+
+
+def test_dockerfile_installs_optional_aws_login_providers():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY ${CUSTOM_TOOLS_DIR}/providers/ /usr/local/bin/" in text
+    assert "for tool in adfs-assume saml2aws" in text
+    assert (root / "runtime-tools" / "providers" / ".gitkeep").exists()
+
+
 def test_dockerfile_installs_only_opencode_runtime_package():
     root = Path(__file__).resolve().parents[1]
     text = (root / "Dockerfile").read_text(encoding="utf-8")

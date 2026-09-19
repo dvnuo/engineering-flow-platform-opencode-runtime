@@ -1,6 +1,5 @@
 import json
 import os
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -24,41 +23,8 @@ def _settings(tmp_path, monkeypatch):
     return Settings.from_env()
 
 
-def _fake_aws_auth(monkeypatch):
-    calls = []
-
-    def fake_run(args, input=None, text=False, capture_output=False, check=False, env=None, timeout=None):
-        call = {
-            "args": list(args),
-            "input": input,
-            "text": text,
-            "capture_output": capture_output,
-            "check": check,
-            "env": dict(env or {}),
-            "timeout": timeout,
-        }
-        calls.append(call)
-        if call["args"][:3] == ["aws-auth", "auth", "login"]:
-            config_path = Path(call["env"]["EFP_CONFIG"])
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(
-                "version: 1\n"
-                "aws:\n"
-                "  enabled: true\n"
-                "  domain: HBEU\n"
-                "  username: aws-user\n"
-                "  password: aws-password\n",
-                encoding="utf-8",
-            )
-        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
-
-    monkeypatch.setattr("efp_opencode_adapter.runtime_env.subprocess.run", fake_run)
-    return calls
-
-
 def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
-    aws_auth_calls = _fake_aws_auth(monkeypatch)
     cfg = {
         "github": {"api_token": "t", "api_base_url": "https://api.github.com"},
         "jira": {"instances": [{"enabled": True, "url": "https://j/", "username": "u", "token": "x", "project": "P"}]},
@@ -97,32 +63,16 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     assert "JIRA_EMAIL" not in r.env and "JIRA_API_TOKEN" not in r.env
     aws_credentials = Path(r.env["AWS_SHARED_CREDENTIALS_FILE"])
     efp_config = Path(r.env["EFP_CONFIG"])
-    assert "AWS_CONFIG_FILE" not in r.env
+    assert aws_credentials == s.adapter_state_dir / "aws" / "credentials"
+    assert r.env["AWS_CONFIG_FILE"] == str(s.adapter_state_dir / "aws" / "config")
+    assert r.env["KUBECONFIG"] == str(s.adapter_state_dir / "kube" / "config")
     assert aws_credentials.parent.exists()
     assert not aws_credentials.exists()
     assert not list(aws_credentials.parent.glob("adfs-auth-*.json"))
     assert not (aws_credentials.parent / "aws-adfs-credential-process.py").exists()
     assert efp_config.exists()
-    configure_args = aws_auth_calls[0]["args"]
-    assert configure_args == [
-        "aws-auth",
-        "auth",
-        "login",
-        "--domain",
-        "HBEU",
-        "--username",
-        "aws-user",
-        "--password-stdin",
-        "--json",
-    ]
-    assert aws_auth_calls[0]["input"] == "aws-password\n"
-    assert aws_auth_calls[0]["timeout"]
-    assert "aws-password" not in " ".join(configure_args)
-    assert len(aws_auth_calls) == 1
-    configure_env = aws_auth_calls[0]["env"]
-    assert "AD_PASS" not in configure_env
-    assert configure_env["AWS_SHARED_CREDENTIALS_FILE"] == str(aws_credentials)
-    assert configure_env["EFP_CONFIG"] == str(efp_config)
+    if os.name != "nt":
+        assert oct(os.stat(efp_config).st_mode & 0o777) == "0o600"
     efp_config_text = efp_config.read_text(encoding="utf-8")
     assert "HBEU" in efp_config_text
     assert "aws-user" in efp_config_text
@@ -137,8 +87,6 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     assert r.env["MOBILE_AUTO_STATE_DIR"] == str(s.mobile_state_dir)
     assert r.env["MOBILE_AUTO_ARTIFACTS_DIR"] == str(s.mobile_artifacts_dir)
     assert r.env["BROWSERSTACK_LOCAL_BINARY"] == s.browserstack_local_binary_path.as_posix()
-    assert "/opt/venv/bin" in configure_env["PATH"]
-    assert ("/" + "app" + "/venv/bin") not in configure_env["PATH"]
     p = write_runtime_env_file(s, r.env)
     if os.name != "nt":
         assert oct(os.stat(p).st_mode & 0o777) == "0o600"
@@ -257,37 +205,97 @@ def test_runtime_env_jenkins_without_base_url_is_dropped(tmp_path, monkeypatch):
     assert not any(key.startswith("EFP_JENKINS_") for key in result.env)
 
 
-def test_runtime_env_aws_auth_failure_redacts_password(tmp_path, monkeypatch):
+def _load_aws_node(settings):
+    import yaml
+
+    loaded = yaml.safe_load(settings.efp_config_path.read_text(encoding="utf-8"))
+    return loaded["aws"]
+
+
+def test_runtime_env_writes_account_matrix_for_aws_auth(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
-    captured = {}
+    result = build_runtime_env_from_config(
+        s,
+        {
+            "aws": {
+                "enabled": True,
+                "provider": "saml2aws",
+                "domain": "HBEU",
+                "username": "aws-user",
+                "password": "aws-password",
+                "idp_url": "https://adfs.example.test/adfs/ls/IdpInitiatedSignOn.aspx?loginToRp=urn:amazon:webservices",
+                "default_account": "cps-dev",
+                "default_region": "ap-east-1",
+                "session_duration_seconds": "7200",
+                "accounts": [
+                    {"name": "cps-dev", "account_id": "111111111111", "role": "ADFS-ReadOnly", "regions": "ap-east-1, eu-west-1"},
+                    {"name": "dcc-dev", "account_id": "222222222222", "role": "ADFS-ReadOnly", "regions": ["ap-east-1"], "enabled": False},
+                    {"name": "", "account_id": ""},
+                ],
+                "unexpected": "dropped",
+            }
+        },
+    )
+    assert "aws" in result.updated_sections and not result.warnings
+    node = _load_aws_node(s)
+    assert node["provider"] == "saml2aws"
+    assert node["password"] == "aws-password"
+    assert node["idp_url"].startswith("https://adfs.example.test/")
+    assert node["default_account"] == "cps-dev"
+    assert node["session_duration_seconds"] == 7200
+    assert "unexpected" not in node
+    assert node["accounts"] == [
+        {"name": "cps-dev", "account_id": "111111111111", "role": "ADFS-ReadOnly", "regions": ["ap-east-1", "eu-west-1"]},
+        {"name": "dcc-dev", "account_id": "222222222222", "role": "ADFS-ReadOnly", "regions": ["ap-east-1"], "enabled": False},
+    ]
 
-    def fake_run(args, input=None, text=False, capture_output=False, check=False, env=None, timeout=None):
-        captured["args"] = list(args)
-        captured["env"] = dict(env or {})
-        return subprocess.CompletedProcess(args, 1, stdout="", stderr="login failed for aws-password")
 
-    monkeypatch.setattr("efp_opencode_adapter.runtime_env.subprocess.run", fake_run)
+def test_runtime_env_assume_role_provider_needs_accounts_not_password(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    with_accounts = build_runtime_env_from_config(
+        s,
+        {"aws": {"enabled": True, "provider": "assume-role", "source_profile": "base", "accounts": [{"name": "cps-dev", "account_id": "111111111111", "role": "ADFS-ReadOnly"}]}},
+    )
+    assert "aws" in with_accounts.updated_sections and not with_accounts.warnings
+    assert with_accounts.env["AWS_CONFIG_FILE"] == str(s.adapter_state_dir / "aws" / "config")
+    node = _load_aws_node(s)
+    assert node["provider"] == "assume-role" and node["source_profile"] == "base" and "password" not in node
 
-    with pytest.raises(RuntimeError) as exc:
-        build_runtime_env_from_config(
-            s,
-            {
-                "aws": {
-                    "enabled": True,
-                    "domain": "HBEU",
-                    "username": "aws-user",
-                    "password": "aws-password",
-                }
-            },
-        )
+    without_accounts = build_runtime_env_from_config(s, {"aws": {"enabled": True, "provider": "assume-role"}})
+    assert "aws" not in without_accounts.updated_sections
+    assert any("no accounts are configured" in warning for warning in without_accounts.warnings)
+    assert "AWS_SHARED_CREDENTIALS_FILE" not in without_accounts.env
 
-    assert captured["args"][:3] == ["aws-auth", "auth", "login"]
-    assert "AD_PASS" not in captured["env"]
-    assert "aws-password" not in str(exc.value)
-    assert "[REDACTED_SECRET]" in str(exc.value)
-    assert not (s.adapter_state_dir / "aws" / "config").exists()
-    assert not (s.adapter_state_dir / "aws" / "credentials").exists()
-    assert not (s.adapter_state_dir / "efp" / "config.yaml").exists()
+
+def test_runtime_env_rejects_unknown_aws_provider(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    result = build_runtime_env_from_config(
+        s,
+        {"aws": {"enabled": True, "provider": "magic", "domain": "HBEU", "username": "u", "password": "p"}},
+    )
+    assert "aws" not in result.updated_sections
+    assert any("not supported" in warning for warning in result.warnings)
+    assert "KUBECONFIG" not in result.env
+
+
+def test_runtime_env_aws_honours_kubeconfig_path_and_clears_stale_credentials(tmp_path, monkeypatch):
+    s = _settings(tmp_path, monkeypatch)
+    aws_dir = s.adapter_state_dir / "aws"
+    aws_dir.mkdir(parents=True)
+    (aws_dir / "credentials").write_text("[old]\naws_access_key_id = AKIAOLD\n", encoding="utf-8")
+    (aws_dir / "adfs-auth-1.json").write_text("{}", encoding="utf-8")
+    result = build_runtime_env_from_config(
+        s,
+        {"aws": {"enabled": True, "domain": "HBEU", "username": "u", "password": "p", "kubeconfig_path": str(tmp_path / "custom" / "kubeconfig")}},
+    )
+    assert result.env["KUBECONFIG"] == str(tmp_path / "custom" / "kubeconfig")
+    assert not (aws_dir / "credentials").exists()
+    assert not (aws_dir / "adfs-auth-1.json").exists()
+
+
+def test_strip_managed_external_env_drops_kube_and_aws_files():
+    stripped = strip_managed_external_env({"KUBECONFIG": "/x", "AWS_CONFIG_FILE": "/y", "AWS_SHARED_CREDENTIALS_FILE": "/z", "KEEP": "1"})
+    assert stripped == {"KEEP": "1"}
 
 
 def test_runtime_env_sets_java_maven_defaults(tmp_path, monkeypatch):
