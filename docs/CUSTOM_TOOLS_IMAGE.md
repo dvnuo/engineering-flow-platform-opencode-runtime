@@ -15,6 +15,17 @@ Required files before `docker build`:
 - `runtime-tools/BrowserStackLocal`
 - `runtime-maven/settings.xml`
 
+Optional, staged only when the runtime profile's `aws.provider` needs one:
+
+- `runtime-tools/providers/adfs-assume` (enterprise ADFS binary)
+- `runtime-tools/providers/saml2aws` (a `saml2aws` Linux release binary from https://github.com/Versent/saml2aws/releases)
+
+The Dockerfile installs whatever is present under `runtime-tools/providers/`
+into `/usr/local/bin`; the tracked `.gitkeep` keeps the directory present so
+the image builds without either. Without a provider, `aws-auth login` reports
+`provider_missing` in the running image (the `assume-role` provider needs
+neither).
+
 The pipeline must generate `runtime-maven/settings.xml` in the runtime build
 context before Docker build. Do not commit the real settings file. It is ignored
 by git; commit only `runtime-maven/settings.xml.example`.
@@ -39,6 +50,8 @@ cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/jenkins runtime-too
 cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/aws-auth runtime-tools/aws-auth
 cp /path/to/engineering-flow-platform-tools/dist/linux-amd64/mobile-auto runtime-tools/mobile-auto
 cp /secure/pipeline/browserstack/linux-amd64/BrowserStackLocal runtime-tools/BrowserStackLocal
+# optional: the ADFS login provider aws-auth shells out to
+cp /secure/pipeline/aws/linux-amd64/adfs-assume runtime-tools/providers/adfs-assume
 mkdir -p runtime-maven
 cp /secure/pipeline/generated/settings.xml runtime-maven/settings.xml
 

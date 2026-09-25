@@ -1,0 +1,2 @@
+# AWS login providers (adfs-assume, saml2aws) staged here by CI are installed
+# into /usr/local/bin by the Dockerfile; see docs/CUSTOM_TOOLS_IMAGE.md.

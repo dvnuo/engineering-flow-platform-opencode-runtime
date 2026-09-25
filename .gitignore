@@ -12,3 +12,6 @@ runtime-tools/*
 !runtime-tools/.gitkeep
 /runtime-maven/settings.xml
 !/runtime-maven/.gitkeep
+!runtime-tools/providers/
+runtime-tools/providers/*
+!runtime-tools/providers/.gitkeep
