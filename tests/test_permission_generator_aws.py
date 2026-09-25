@@ -19,6 +19,8 @@ def test_profile_policy_allows_aws_auth_and_read_only_aws_calls():
     assert _policy_for("aws sts get-caller-identity --profile cps-dev --output json") == "allow"
     assert _policy_for("aws eks list-clusters --profile cps-dev --region ap-east-1 --output json") == "allow"
     assert _policy_for("aws ecr describe-images --repository-name app --output json") == "allow"
+    # Prints a registry credential into the transcript: asked, never automatic.
+    assert _policy_for("aws ecr get-login-password --region eu-west-1") == "ask"
     assert _policy_for("aws logs filter-log-events --log-group-name /app --output json") == "allow"
     assert _policy_for("aws ec2 terminate-instances --instance-ids i-1") == "ask"
     assert _policy_for("aws ecr batch-delete-image --repository-name app") == "ask"

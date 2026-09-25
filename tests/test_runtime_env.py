@@ -250,6 +250,33 @@ def test_runtime_env_writes_account_matrix_for_aws_auth(tmp_path, monkeypatch):
     ]
 
 
+def test_runtime_env_passes_eks_private_endpoints_through_for_aws_auth(tmp_path, monkeypatch):
+    # An enterprise EKS cluster keeps its endpoint private; aws-auth reaches it
+    # through the PrivateLink address in aws.eks_clusters. Dropping the rows
+    # here would leave kubectl pointed at an endpoint that does not resolve.
+    s = _settings(tmp_path, monkeypatch)
+    build_runtime_env_from_config(
+        s,
+        {
+            "aws": {
+                "enabled": True,
+                "provider": "assume-role",
+                "accounts": [{"name": "cps-dev", "account_id": "111111111111", "role": "ADFS-ReadOnly"}],
+                "eks_clusters": [
+                    {"account": "cps-dev", "cluster": "cps-dev-eks", "private_endpoint": "https://vpce.example.test", "server_ca": "system", "unexpected": "dropped"},
+                    {"account": "111111111111", "cluster": "batch", "region": "eu-west-1", "private_endpoint": "https://vpce-batch.example.test", "tls_server_name": "batch.internal", "enabled": False},
+                    {"account": "cps-dev", "cluster": "no-endpoint"},
+                    "not a row",
+                ],
+            }
+        },
+    )
+    assert _load_aws_node(s)["eks_clusters"] == [
+        {"account": "cps-dev", "cluster": "cps-dev-eks", "private_endpoint": "https://vpce.example.test", "server_ca": "system"},
+        {"account": "111111111111", "cluster": "batch", "region": "eu-west-1", "private_endpoint": "https://vpce-batch.example.test", "tls_server_name": "batch.internal", "enabled": False},
+    ]
+
+
 def test_runtime_env_assume_role_provider_needs_accounts_not_password(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     with_accounts = build_runtime_env_from_config(

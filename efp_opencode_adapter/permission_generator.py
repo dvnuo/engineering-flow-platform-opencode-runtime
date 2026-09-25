@@ -158,7 +158,8 @@ def profile_policy_permission_baseline() -> dict[str, Any]:
         "aws eks describe-nodegroup*": "allow",
         "aws ecr describe-*": "allow",
         "aws ecr list-images*": "allow",
-        "aws ecr get-login-password*": "allow",
+        # Not get-login-password: it prints a registry credential into the
+        # transcript, and provenance needs digests, not a docker login.
         "aws ecr batch-get-image*": "allow",
         "aws logs describe-*": "allow",
         "aws logs filter-log-events*": "allow",

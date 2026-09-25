@@ -134,6 +134,10 @@ AWS_SCALAR_KEYS = (
     "kubeconfig_path",
 )
 AWS_ACCOUNT_KEYS = ("name", "account_id", "role", "role_arn", "regions", "profile", "enabled")
+# EKS clusters reached through a private endpoint (AWS PrivateLink) rather than
+# the address describe-cluster reports; `aws-auth eks kubeconfig` points the
+# context at private_endpoint and verifies the certificate per server_ca.
+AWS_EKS_CLUSTER_KEYS = ("account", "cluster", "region", "private_endpoint", "tls_server_name", "server_ca", "enabled")
 
 
 def _aws_provider(aws: dict) -> str:
@@ -198,6 +202,27 @@ def _sanitize_aws_node(aws: dict) -> dict:
             if entry.get("name") or entry.get("account_id"):
                 cleaned.append(entry)
         node["accounts"] = cleaned
+    clusters = aws.get("eks_clusters")
+    if isinstance(clusters, list):
+        rows: list[dict] = []
+        for item in clusters:
+            if not isinstance(item, dict):
+                continue
+            row: dict = {}
+            for key in AWS_EKS_CLUSTER_KEYS:
+                value = item.get(key)
+                if value is None:
+                    continue
+                if key == "enabled":
+                    row[key] = bool(value)
+                    continue
+                text = str(value).strip()
+                if text:
+                    row[key] = text
+            # A row the CLI cannot match to a cluster is dropped, not stored half-formed.
+            if row.get("account") and row.get("cluster") and row.get("private_endpoint"):
+                rows.append(row)
+        node["eks_clusters"] = rows
     return node
 
 
