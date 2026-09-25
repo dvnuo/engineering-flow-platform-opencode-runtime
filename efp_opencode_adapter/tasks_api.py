@@ -541,7 +541,7 @@ def _blocked_skill_payload(skill_name: str, reason: str, permission_state: str =
         "final_response": summary,
         "needs_user_input": True,
         "blockers": [summary],
-        "next_recommendation": "Verify the skills repository was synced and the runtime profile permits this skill, then re-dispatch the task.",
+        "next_recommendation": "Verify the skills repository was synced and the assistant's settings permit this skill, then re-dispatch the task.",
         "artifacts": [],
         "audit_trace": [
             {

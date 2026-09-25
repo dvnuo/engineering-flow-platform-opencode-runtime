@@ -800,7 +800,7 @@ def normalize_opencode_event(raw_event: dict[str, Any], *, session_store, task_s
         evt["data"]["attempt"] = retry_data.get("attempt")
         evt["data"]["next"] = retry_data.get("next")
         evt["data"]["raw_type"] = s_raw_type
-        evt["data"]["diagnostic_hint"] = "OpenCode provider API retrying. Check runtime profile LLM provider/model/api_key/base_url/proxy."
+        evt["data"]["diagnostic_hint"] = "OpenCode provider API retrying. Check the Model provider and Proxy connectors in Portal."
     if task_id:
         evt["task_id"] = task_id
     if normalized_type.startswith("permission_"):

@@ -320,7 +320,7 @@ def _render_skill_markdown(
         f"{GENERATED_MARKER}\n\n"
         "This generated skill is a prompt asset.\n\n"
         "Source skill tools/task_tools metadata is informational only. Runtime tool access is controlled by "
-        "OpenCode built-in tools, OpenCode MCP tools when enabled by OpenCode itself, skills, runtime profile, "
+        "OpenCode built-in tools, OpenCode MCP tools when enabled by OpenCode itself, skills, Portal connector settings, "
         "and permission policy.\n\n"
         f"{warn}{resource_instructions}\n\n{body.rstrip()}\n"
     )
