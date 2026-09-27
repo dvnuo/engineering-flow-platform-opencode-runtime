@@ -80,7 +80,7 @@ def test_generated_skill_prompt_does_not_mention_removed_external_tool_contract(
     md=(out/'demo'/'SKILL.md').read_text(encoding='utf-8')
     for forbidden in ('external-tools', 'tools-index', 'tool_mapping', 'opencode_tools', 'wrapper mapping', 'missing_tools', 'missing_opencode_tools'):
         assert forbidden not in md
-    for required in ('informational only', 'OpenCode built-in', 'runtime profile', 'permission policy'):
+    for required in ('informational only', 'OpenCode built-in', 'Portal connector settings', 'permission policy'):
         assert required in md
 
 

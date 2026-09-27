@@ -1,7 +1,7 @@
 """Adapter-side logging: stdout handler, profile-driven level, request lines.
 
 Everything here writes to STDOUT because that is what ``kubectl logs`` reads.
-The level honours the runtime profile's debug settings (projected as
+The level honours the debug settings Portal projects (projected as
 EFP_DEBUG / LOG_LEVEL for the managed child) so turning debug on in a profile
 also turns it on for the adapter itself.
 """
