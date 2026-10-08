@@ -78,8 +78,12 @@ async def test_effective_config_does_not_expose_external_tools_key(tmp_path, mon
     body = await (await c.get("/api/internal/opencode-effective-config")).json()
     assert "external_tools" not in body
     assert "runtime_integrations" in body
-    assert set(body["runtime_integrations"].keys()) == {"github", "copilot", "proxy", "aws", "mobile-auto", "env_file"}
+    assert set(body["runtime_integrations"].keys()) == {"github", "copilot", "proxy", "aws", "image-analysis", "mobile-auto", "env_file"}
     assert body["runtime_integrations"]["github"]["enabled"] is True
+    # An overlay written before image analysis existed reports it as not configured.
+    assert body["runtime_integrations"]["image-analysis"]["configured"] is False
+    assert body["runtime_integrations"]["image-analysis"]["vision_via_chat"] is True
+    assert body["runtime_integrations"]["image-analysis"]["config_env_present"] is False
     assert set(body["runtime_integrations"]["copilot"].keys()) == {"enabled", "credential_present", "token_cached", "base_url_present", "expires_at_present"}
     assert all(isinstance(value, bool) for value in body["runtime_integrations"]["copilot"].values())
     assert body["runtime_integrations"]["proxy"]["enabled"] is True

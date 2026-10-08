@@ -15,6 +15,7 @@ from aiohttp import web
 
 from .app_keys import (
     ATTACHMENT_SERVICE_KEY,
+    BOOT_PROJECTION_KEY,
     CHATLOG_STORE_KEY,
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
@@ -632,6 +633,14 @@ async def _build_chat_parts(app: web.Application, *, portal_session_id: str, mes
     attachment_debug: list[dict[str, Any]] = []
     if not attachments:
         return parts, attachment_debug
+    # The boot projection recorded whether the chat provider can see images
+    # (AI Platform can; Copilot cannot since vision was disabled) and whether
+    # inspect-image is configured. Without a projection (dev, tests) images
+    # are inlined as before.
+    boot_snapshot = app.get(BOOT_PROJECTION_KEY)
+    boot_snapshot = boot_snapshot if isinstance(boot_snapshot, dict) else {}
+    inline_images = bool(boot_snapshot.get("vision_via_chat", True))
+    image_analysis = boot_snapshot.get("image_analysis") if isinstance(boot_snapshot.get("image_analysis"), dict) else None
     try:
         attachment_parts, attachment_debug = build_opencode_attachment_parts(
             app.get(ATTACHMENT_SERVICE_KEY),
@@ -639,6 +648,8 @@ async def _build_chat_parts(app: web.Application, *, portal_session_id: str, mes
             attachments,
             max_text_chars=30000,
             max_inline_bytes=10 * 1024 * 1024,
+            inline_images=inline_images,
+            image_analysis=image_analysis,
         )
         parts.extend(attachment_parts)
     except Exception as exc:

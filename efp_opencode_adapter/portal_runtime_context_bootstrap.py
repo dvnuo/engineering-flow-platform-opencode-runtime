@@ -24,6 +24,7 @@ from .runtime_env import aws_status_from_env, build_runtime_env_from_config, wri
 from .runtime_profile_encryption import decrypt_sensitive_fields
 from .runtime_profile_projection import project_canonical_for_runtime
 from .git_cli_auth import write_git_gh_auth_assets
+from .inspect_image_config import chat_provider_accepts_images, write_inspect_image_config
 from .mobile_cli_config import write_mobile_cli_config
 from .settings import Settings, load_profile_env_payload
 
@@ -51,6 +52,10 @@ class BootProjectionResult:
     atlassian_cli_configured: bool = False
     mobile_cli_configured: bool = False
     aws_configured: bool = False
+    # Image analysis (inspect-image on AI Platform) and whether the chat
+    # provider itself can see images; chat_api reads both from the app.
+    image_analysis: dict[str, Any] = field(default_factory=dict)
+    vision_via_chat: bool = True
 
     def public_summary(self) -> dict[str, Any]:
         return {
@@ -68,6 +73,8 @@ class BootProjectionResult:
             "atlassian_cli_configured": self.atlassian_cli_configured,
             "mobile_cli_configured": self.mobile_cli_configured,
             "aws_configured": self.aws_configured,
+            "image_analysis": dict(self.image_analysis),
+            "vision_via_chat": self.vision_via_chat,
         }
 
 
@@ -141,6 +148,18 @@ def apply_boot_projection(settings: Settings, payload: dict[str, Any]) -> BootPr
     warnings.extend([item for item in mobile_result.warnings if item not in warnings])
     if mobile_result.configured and "mobile-auto" not in updated_sections:
         updated_sections.append("mobile-auto")
+    # Image analysis: inspect-image gets a config of its own and the AI
+    # Platform account through the child's environment; the chat provider
+    # decides whether attachments are still inlined as image parts.
+    inspect_image_result = write_inspect_image_config(settings, runtime_config)
+    env_result.env.update(inspect_image_result.env)
+    warnings.extend([item for item in inspect_image_result.warnings if item not in warnings])
+    if inspect_image_result.configured and "image-analysis" not in updated_sections:
+        updated_sections.append("image-analysis")
+    image_analysis_status = inspect_image_result.status()
+    vision_via_chat = chat_provider_accepts_images(
+        runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
+    )
     # opencode.env stays as a write-only boot artifact for interactive shells.
     env_path = write_runtime_env_file(settings, env_result.env)
     git_auth_result = write_git_gh_auth_assets(settings, env_result.env)
@@ -171,6 +190,8 @@ def apply_boot_projection(settings: Settings, payload: dict[str, Any]) -> BootPr
         mobile_config_path=mobile_result.path,
         mobile_status=mobile_result.redacted_status,
         aws_configured=aws_configured,
+        image_analysis=image_analysis_status,
+        vision_via_chat=vision_via_chat,
     ))
     return BootProjectionResult(
         runtime_profile_id=runtime_profile_id,
@@ -188,6 +209,8 @@ def apply_boot_projection(settings: Settings, payload: dict[str, Any]) -> BootPr
         atlassian_cli_configured=atlassian_result.configured,
         mobile_cli_configured=mobile_result.configured,
         aws_configured=aws_configured,
+        image_analysis=image_analysis_status,
+        vision_via_chat=vision_via_chat,
     )
 
 
