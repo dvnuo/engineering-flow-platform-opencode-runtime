@@ -39,9 +39,11 @@ COPILOT_VISION_VIA_CHAT_ENV = "EFP_COPILOT_VISION_VIA_CHAT"
 # AI_PLATFORM_MODELS) and the native runtime (efp_runtime/llm/models.py).
 AI_PLATFORM_MODEL_IDS = ("gpt-5.4", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra")
 DEFAULT_AI_PLATFORM_MODEL = "gpt-5.4"
-# Phone screenshots often exceed inspect-image's 3 MiB default; the gateway's
-# own limit decides beyond this.
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
+# The user-facing per-file upload cap, shared with the Portal and the native
+# runtime (server.resolve_upload_client_max_size adds transport headroom on
+# top of the same value).
+MAX_UPLOAD_MB_ENV = "EFP_MAX_UPLOAD_MB"
+DEFAULT_MAX_UPLOAD_MB = 25
 DEFAULT_CHAT_URI = "/v1/api/v1/chat/completions"
 DEFAULT_IB2B_URI = "/dsp/rest-sts/DSP_iB2B/iB2B_tokenTranslator_v2?_action=translate"
 DEFAULT_TRUST_TOKEN_HEADER = "X-XXXX-E2E-Trust-Token"
@@ -117,6 +119,24 @@ def chat_provider_accepts_images(
     return _clean_text(env.get(COPILOT_VISION_VIA_CHAT_ENV, "")).lower() in _TRUE_VALUES
 
 
+def max_image_bytes() -> int:
+    """inspect-image's size limit: whatever the upload API accepts.
+
+    Every image the handoff names came through the attachment API, which
+    caps a file at EFP_MAX_UPLOAD_MB (25 MiB by default), so inspect-image
+    must take the same size or an upload that succeeded is handed to a
+    command that then refuses it. inspect-image's own default is 3 MiB.
+    """
+    raw = os.getenv(MAX_UPLOAD_MB_ENV, str(DEFAULT_MAX_UPLOAD_MB))
+    try:
+        mb = int(str(raw).strip())
+    except (TypeError, ValueError):
+        mb = DEFAULT_MAX_UPLOAD_MB
+    if mb <= 0:
+        mb = DEFAULT_MAX_UPLOAD_MB
+    return mb * 1024 * 1024
+
+
 def coerce_vision_model(model: Any) -> str:
     """A model AI Platform serves; anything else lands on the AI Platform default."""
     text = _clean_text(model)
@@ -181,7 +201,7 @@ def build_inspect_image_config(settings: ImageAnalysisSettings, *, token_file: P
         "inspect_image": {
             "provider": "ai_platform",
             "defaults": {"model": settings.model},
-            "limits": {"max_image_bytes": MAX_IMAGE_BYTES},
+            "limits": {"max_image_bytes": max_image_bytes()},
         },
         "ai_platform": {
             "chat": {"host": settings.chat_host, "uri": settings.chat_uri},
