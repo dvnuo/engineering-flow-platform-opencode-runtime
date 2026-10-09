@@ -80,7 +80,8 @@ def test_resolve_image_analysis_settings_in_the_opencode_form():
     assert iic.coerce_vision_model("github-copilot/gpt-5.5") == "gpt-5.4"
 
 
-def test_write_inspect_image_config_uses_environment_references():
+def test_write_inspect_image_config_uses_environment_references(monkeypatch):
+    monkeypatch.delenv("EFP_MAX_UPLOAD_MB", raising=False)
     settings = Settings.from_env()
     result = iic.write_inspect_image_config(settings, {"llm": _vision_llm()})
     assert result.configured is True
@@ -92,7 +93,8 @@ def test_write_inspect_image_config_uses_environment_references():
     assert loaded["inspect_image"] == {
         "provider": "ai_platform",
         "defaults": {"model": "gpt-5.6-sol"},
-        "limits": {"max_image_bytes": 10 * 1024 * 1024},
+        # Whatever the upload API accepts (25 MiB by default) inspect-image must take too.
+        "limits": {"max_image_bytes": 25 * 1024 * 1024},
     }
     assert loaded["ai_platform"]["chat"]["host"] == "https://chat.int"
     assert loaded["ai_platform"]["auth"]["password"] == "${EFP_INSPECT_IMAGE_AI_PLATFORM_PASSWORD}"
@@ -111,6 +113,18 @@ def test_write_inspect_image_config_uses_environment_references():
     assert off.configured is False and off.env == {}
     assert off.status()["reason"] == "image analysis is off for this profile"
     assert not path.exists() and not token_path.exists()
+
+
+def test_inspect_image_size_limit_follows_the_upload_cap(monkeypatch):
+    monkeypatch.setenv("EFP_MAX_UPLOAD_MB", "40")
+    assert iic.max_image_bytes() == 40 * 1024 * 1024
+    settings = Settings.from_env()
+    iic.write_inspect_image_config(settings, {"llm": _vision_llm()})
+    loaded = yaml.safe_load((settings.adapter_state_dir / "inspect-image" / "config.yaml").read_text(encoding="utf-8"))
+    assert loaded["inspect_image"]["limits"]["max_image_bytes"] == 40 * 1024 * 1024
+    # A broken value falls back to the upload API's own default, as the server does.
+    monkeypatch.setenv("EFP_MAX_UPLOAD_MB", "lots")
+    assert iic.max_image_bytes() == 25 * 1024 * 1024
 
 
 # --- attachment parts -------------------------------------------------------------
