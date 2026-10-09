@@ -284,6 +284,11 @@ async def effective_config_handler(request: web.Request) -> web.Response:
                 "copilot": {"enabled": bool(provider == "github-copilot" or copilot_credential_present or copilot_base_url_present), "credential_present": copilot_credential_present, "token_cached": bool(copilot_snapshot.get("token_cached")), "base_url_present": copilot_base_url_present, "expires_at_present": bool(copilot_snapshot.get("expires_at_present"))},
                 "proxy": {"enabled": bool(proxy_cfg.get("enabled")), "url_present": bool(proxy_cfg.get("url")), "password_present": bool(proxy_cfg.get("password"))},
                 "aws": {"enabled": bool(aws_status.get("configured"))},
+                "image-analysis": {
+                    **(overlay.image_analysis if overlay and overlay.image_analysis else {"configured": False, "reason": "boot projection not recorded", "model": None, "config_path": None}),
+                    "vision_via_chat": overlay.vision_via_chat if overlay else True,
+                    "config_env_present": bool(runtime_env.get("INSPECT_IMAGE_CONFIG")),
+                },
                 "mobile-auto": {
                     "enabled": bool((mobile_cfg and mobile_cfg.get("enabled") is not False) or (overlay and overlay.mobile_cli_configured)),
                     "config_path": str(settings.efp_config_path),
@@ -579,6 +584,10 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             "warnings": list(projection.warnings),
             "env_hash": projection.env_hash,
             "env": dict(projection.env),
+            # chat_api: inline images only when the chat provider can see
+            # them, and tell the agent whether inspect-image is configured.
+            "image_analysis": dict(projection.image_analysis),
+            "vision_via_chat": projection.vision_via_chat,
         }
         # The profile's debug settings are projected for the child; apply them
         # to the adapter's own logger too before the child starts.

@@ -74,6 +74,9 @@ class ProfileOverlay:
     mobile_config_path: str | None = None
     mobile_status: dict[str, Any] = field(default_factory=dict)
     aws_configured: bool = False
+    # inspect-image on AI Platform: {configured, reason, model, config_path}.
+    image_analysis: dict[str, Any] = field(default_factory=dict)
+    vision_via_chat: bool = True
 
 
 def redact_secrets(value: Any) -> Any:
@@ -139,6 +142,8 @@ class ProfileOverlayStore:
             mobile_config_path=(str(payload.get("mobile_config_path")) if payload.get("mobile_config_path") is not None else None),
             mobile_status=payload.get("mobile_status") if isinstance(payload.get("mobile_status"), dict) else {},
             aws_configured=bool(payload.get("aws_configured", False)),
+            image_analysis=payload.get("image_analysis") if isinstance(payload.get("image_analysis"), dict) else {},
+            vision_via_chat=bool(payload.get("vision_via_chat", True)),
         )
 
     def save(self, overlay: ProfileOverlay) -> None:
@@ -178,4 +183,6 @@ def build_profile_status_payload(settings: Settings) -> dict[str, Any]:
         "mobile_config_path": overlay.mobile_config_path,
         "mobile_status": overlay.mobile_status,
         "aws_configured": overlay.aws_configured,
+        "image_analysis": overlay.image_analysis,
+        "vision_via_chat": overlay.vision_via_chat,
     }

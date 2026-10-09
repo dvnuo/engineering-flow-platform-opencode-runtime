@@ -134,6 +134,17 @@ RUNTIME_PROFILE_CLI_TOOL_INSTRUCTIONS = (
     "connector to fix in Portal > Connectors instead of guessing or inventing tokens."
 )
 
+RUNTIME_PROFILE_IMAGE_ANALYSIS_INSTRUCTIONS = (
+    "Image analysis runs through the inspect-image CLI on AI Platform; the chat model cannot see an image unless the prompt "
+    "says it was attached as image content. For a screenshot, photo, diagram, or any image file in the workspace or listed in "
+    "an attachment handoff, run `inspect-image inspect --image <path> --prompt \"<what to read or explain>\" --json` from bash "
+    "and answer from data.result.answer and data.result.visible_text; add --preset ocr, ui, diagram, chart, or error when it "
+    "fits, and ask a follow-up question with another call. Never pass --model (the model comes from the connector), never "
+    "guess what an image shows, and never fall back to OCR or image-parsing scripts. If inspect-image returns auth_required "
+    "or config_error, image analysis is not configured for this profile: tell the user to turn on Image analysis and enter "
+    "AI Platform credentials under Portal > Connectors, then stop."
+)
+
 OPENCODE_RUNTIME_RESTRICTION_FIELDS = frozenset(
     {
         "enabled_tools",
@@ -284,18 +295,54 @@ def _has_enabled_external_cli_config(config: dict[str, Any]) -> bool:
     )
 
 
+def _flag_true(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _has_image_analysis_config(config: dict[str, Any]) -> bool:
+    """Whether inspect-image can run on AI Platform for this profile.
+
+    Image analysis is on when the member turned it on (llm.vision.enabled) or
+    the chat provider itself is AI Platform, and it works only with the AI
+    Platform account plus the deployment-managed chat and iB2B endpoints,
+    which Portal materializes into llm.ai_platform before the runtime sees it.
+    """
+    llm = config.get("llm") if isinstance(config.get("llm"), dict) else {}
+    vision = llm.get("vision") if isinstance(llm.get("vision"), dict) else {}
+    provider = str(llm.get("provider") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not (_flag_true(vision.get("enabled")) or provider == "ai_platform"):
+        return False
+    ai_platform = llm.get("ai_platform") if isinstance(llm.get("ai_platform"), dict) else {}
+    auth = ai_platform.get("auth") if isinstance(ai_platform.get("auth"), dict) else {}
+    chat = ai_platform.get("chat") if isinstance(ai_platform.get("chat"), dict) else {}
+    ib2b = ai_platform.get("ib2b") if isinstance(ai_platform.get("ib2b"), dict) else {}
+    if not all(str(auth.get(key) or "").strip() for key in ("username", "password", "usercase")):
+        return False
+    return bool(str(chat.get("host") or "").strip()) and bool(str(ib2b.get("host") or "").strip())
+
+
 def _with_native_cli_tool_instructions(
     config: dict[str, Any],
     runtime_type: str | None,
 ) -> dict[str, Any]:
-    if is_opencode_runtime_type(runtime_type) or not _has_enabled_external_cli_config(config):
+    if is_opencode_runtime_type(runtime_type):
+        return config
+    texts: list[str] = []
+    if _has_enabled_external_cli_config(config):
+        texts.append(RUNTIME_PROFILE_CLI_TOOL_INSTRUCTIONS)
+    if _has_image_analysis_config(config):
+        texts.append(RUNTIME_PROFILE_IMAGE_ANALYSIS_INSTRUCTIONS)
+    if not texts:
         return config
     projected = deepcopy(config)
     instruction_texts = projected.get("instruction_texts")
     if not isinstance(instruction_texts, list):
         instruction_texts = []
-    if RUNTIME_PROFILE_CLI_TOOL_INSTRUCTIONS not in instruction_texts:
-        instruction_texts.append(RUNTIME_PROFILE_CLI_TOOL_INSTRUCTIONS)
+    for text in texts:
+        if text not in instruction_texts:
+            instruction_texts.append(text)
     projected["instruction_texts"] = instruction_texts
     return projected
 

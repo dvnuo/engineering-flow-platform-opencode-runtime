@@ -7,7 +7,9 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Mapping
 
+from .image_handoff import build_image_handoff
 from .settings import Settings
 from .state import ensure_state_dirs
 
@@ -291,9 +293,20 @@ def build_opencode_attachment_parts(
     *,
     max_text_chars: int = 30000,
     max_inline_bytes: int = 10 * 1024 * 1024,
+    inline_images: bool = True,
+    image_analysis: Mapping[str, Any] | None = None,
 ) -> tuple[list[dict], list[dict]]:
+    """Message parts for the attachments.
+
+    ``inline_images`` is False when the chat provider cannot see images
+    (GitHub Copilot since vision was disabled): images are then not sent as
+    file parts but described in a handoff block that points the agent at the
+    workspace copy and the inspect-image CLI; ``image_analysis`` says whether
+    inspect-image is configured for this profile.
+    """
     parts: list[dict] = []
     debug: list[dict] = []
+    handoff_files: list[dict[str, Any]] = []
     has_attachments = bool(attachments)
     if not service and has_attachments:
         return [_attachment_context_part("Attachments were provided, but the attachment service is unavailable.")], [{"status": "error", "error": "attachment_service_unavailable"}]
@@ -350,6 +363,13 @@ def build_opencode_attachment_parts(
                         text_budget_exhausted = True
                     continue
 
+            if content_type.startswith("image/") and not inline_images:
+                handoff_path = str(meta.get("workspace_path") or original_path)
+                handoff_files.append({"path": handoff_path, "name": name, "content_type": content_type, "size_bytes": size})
+                item.update({"action": "inspect_image_handoff", "inlined": False, "path": handoff_path})
+                debug.append(item)
+                continue
+
             if content_type.startswith("image/") or content_type == "application/pdf":
                 if size <= max_inline_bytes:
                     if content_type.startswith("image/"):
@@ -375,6 +395,8 @@ def build_opencode_attachment_parts(
 
     if text_added and len(text_blocks) > 1:
         parts.insert(0, _attachment_context_part("".join(text_blocks)))
+    if handoff_files:
+        parts.append(_attachment_context_part(build_image_handoff(handoff_files, image_analysis=image_analysis)))
 
     return parts, debug
 def build_attachment_context(session_id: str, attachments: list[dict], *, settings: Settings | None = None, max_chars: int = 30000) -> str:
