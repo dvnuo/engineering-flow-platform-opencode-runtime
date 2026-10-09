@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
 from .path_utils import path_exists
+from .proxy_plan import KIND_ENVIRONMENT, KIND_NONE, ProxyPlan, build_proxy_plan, hostname_of
 from .settings import Settings
 
 _REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
@@ -62,6 +65,63 @@ def _chmod_best_effort(path: Path, mode: int, warnings: list[str], warning: str)
         warnings.append(warning)
 
 
+def apply_browserstack_proxy(browserstack: dict[str, Any], plan: ProxyPlan) -> None:
+    """Map the BrowserStack connector's proxy onto mobile-auto's own proxy blocks.
+
+    mobile-auto's REST/Appium clients and the BrowserStackLocal tunnel read
+    ``browserstack.http_proxy`` and ``browserstack.local`` (host, port, and the
+    names of the environment variables holding the credentials). The
+    environment choice leaves whatever the member configured there; ``none``
+    switches discovery off and clears an explicit proxy; a proxy fills both
+    blocks and points the credentials at EFP_PROXY_<NAME>_USERNAME/_PASSWORD,
+    which runtime_env exports.
+    """
+    api_host = hostname_of(_clean_text(browserstack.get("api_base_url"))) or "api-cloud.browserstack.com"
+    choice = plan.choice("browserstack", host=api_host)
+    if choice.kind == KIND_ENVIRONMENT:
+        return
+    http_proxy = dict(browserstack.get("http_proxy")) if isinstance(browserstack.get("http_proxy"), dict) else {}
+    local = dict(browserstack.get("local")) if isinstance(browserstack.get("local"), dict) else {}
+    for block in (http_proxy, local):
+        for key in ("proxy_host", "proxy_port", "proxy_user_env", "proxy_pass_env"):
+            block.pop(key, None)
+    if choice.kind == KIND_NONE:
+        # Nothing that would make the Go side insist on a proxy may survive:
+        # force_proxy without a host is a config error there.
+        for block in (http_proxy, local):
+            block.pop("force_proxy", None)
+            block.pop("no_proxy_hosts", None)
+            block["disable_proxy_discovery"] = True
+    else:
+        parsed = urlparse(choice.setting)
+        scheme = parsed.scheme or "http"
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        port = port or (443 if scheme == "https" else 80)
+        # The REST/Appium clients take a host with its scheme (parseProxyHost);
+        # BrowserStackLocal takes --proxy-host as a bare host name.
+        http_proxy["proxy_host"] = f"{scheme}://{parsed.hostname}"
+        local["proxy_host"] = parsed.hostname
+        for block in (http_proxy, local):
+            block["proxy_port"] = port
+            block.pop("disable_proxy_discovery", None)
+        if choice.entry is not None:
+            # Only the credential halves that exist: mobile-auto refuses a
+            # named variable that is set but empty.
+            user_env, pass_env = choice.entry.credential_env_names()
+            for block in (http_proxy, local):
+                if choice.entry.username:
+                    block["proxy_user_env"] = user_env
+                if choice.entry.password:
+                    block["proxy_pass_env"] = pass_env
+        if choice.entry is not None and choice.entry.no_proxy.strip():
+            http_proxy["no_proxy_hosts"] = [item for item in re.split(r"[,\s]+", choice.entry.no_proxy) if item]
+    browserstack["http_proxy"] = http_proxy
+    browserstack["local"] = local
+
+
 def _build_mobile_config(settings: Settings, runtime_config: dict, warnings: list[str]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     source = runtime_config.get("mobile-auto") if isinstance(runtime_config.get("mobile-auto"), dict) else {}
     status: dict[str, Any] = {"configured": False}
@@ -90,6 +150,7 @@ def _build_mobile_config(settings: Settings, runtime_config: dict, warnings: lis
         if local is not None:
             local.setdefault("binary", _path_text(settings.browserstack_local_binary_path))
             browserstack["local"] = local
+        apply_browserstack_proxy(browserstack, build_proxy_plan(runtime_config.get("proxy")))
         mobile["browserstack"] = browserstack
 
     status = {

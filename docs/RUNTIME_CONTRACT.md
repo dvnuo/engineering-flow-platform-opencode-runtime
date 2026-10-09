@@ -149,6 +149,20 @@ there is no apply endpoint and no hot-apply path.
   KUBECONFIG under the adapter state dir), then removes the
   blob from its process env before the managed OpenCode child starts. The
   child env never contains `EFP_PROFILE_CONFIG`.
+- Proxy: the profile's `proxy` section is the Portal's Proxy connector, a
+  list of named proxies (`proxies`), the `default` one, and `assignments`
+  (connector type -> proxy name, `none`, or empty for the default). The
+  default proxy goes to the child env as `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`
+  and `NO_PROXY` (which always exempts loopback, so opencode reaches the
+  adapter's own proxies); the proxy assigned to the model provider reaches the
+  adapter's copilot and AI Platform loopback proxies through `EFP_LLM_PROXY`
+  (`none`, or a URL) and `EFP_LLM_NO_PROXY`; the other connectors' proxies
+  travel in their own tool config (`EFP_<PRODUCT>_INSTANCES_<i>_PROXY`,
+  mobile-auto's `browserstack.http_proxy`/`local`, inspect-image's
+  `api.proxy`). Every proxy's credentials are exported as
+  `EFP_PROXY_<NAME>_USERNAME`/`_PASSWORD` for mobile-auto. The flat
+  `proxy.url` shape of older profiles reads as one proxy named `default`.
+  See `efp_opencode_adapter/proxy_plan.py`.
 - Failure semantics: a missing `EFP_PROFILE_CONFIG` env var is a fatal pod
   misconfiguration (the adapter stays alive but unready); an empty
   `"config": {}` payload is a valid empty profile (base config).

@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .proxy_plan import build_proxy_plan, hostname_of
+
 
 def build_tools_config_json(effective_config: dict[str, Any]) -> dict[str, Any]:
     """Build the tools config payload (RootConfig-shaped dict) for the Go CLIs.
@@ -40,14 +42,27 @@ def build_tools_config_json(effective_config: dict[str, Any]) -> dict[str, Any]:
     if isinstance(version, int) and not isinstance(version, bool):
         root["version"] = version
 
+    # The proxy each connector was assigned lands in its instances' own
+    # `proxy` field (proxy_plan.py); the environment carries only the default.
+    plan = build_proxy_plan(effective_config.get("proxy"))
+
     for product in ("jira", "confluence", "jenkins"):
         section = _normalized_product_config(effective_config.get(product), product=product)
         instances = _build_product_instances(section, product=product)
         if not instances:
             continue
+        projected = []
+        for instance in instances:
+            out = _tools_instance_config(instance, product=product)
+            choice = plan.choice(product, host=hostname_of(out.get("base_url", "")), instance_setting=_string_or_empty(out.get("proxy")))
+            if choice.setting:
+                out["proxy"] = choice.setting
+            else:
+                out.pop("proxy", None)
+            projected.append(out)
         root[product] = {
             "default_instance": _default_instance_name(section, instances),
-            "instances": [_tools_instance_config(instance, product=product) for instance in instances],
+            "instances": projected,
         }
 
     for section_name in ("aws", "mobile-auto"):
@@ -111,6 +126,8 @@ def _tools_instance_config(instance: dict[str, Any], *, product: str) -> dict[st
     }
     if product == "jira":
         out["api_version"] = instance["api_version"]
+    if _string_or_empty(instance.get("proxy")):
+        out["proxy"] = _string_or_empty(instance.get("proxy"))
 
     auth = instance.get("auth") if isinstance(instance.get("auth"), dict) else {}
     auth_type = str(auth.get("type") or "")
@@ -166,6 +183,11 @@ def _build_product_instances(product_config: Any, *, product: str) -> list[dict[
                 "rest_path": str(raw.get("rest_path") or _default_rest_path(product)),
                 "auth": auth,
             }
+        # A row's own proxy field (a name, none, or a URL) is resolved against
+        # the Proxy connector by build_tools_config_json.
+        own_proxy = _string_or_empty(raw.get("proxy"))
+        if own_proxy:
+            instance["proxy"] = own_proxy
         instances.append(instance)
     return instances
 
