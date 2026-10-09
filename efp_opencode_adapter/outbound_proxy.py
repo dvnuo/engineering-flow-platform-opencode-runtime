@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import urlsplit
 
+from .proxy_plan import LLM_NO_PROXY_ENV, LLM_PROXY_ENV
 from .runtime_env import read_runtime_env_file
 from .settings import Settings
+
+_DIRECT_WORDS = frozenset({"none", "direct", "off"})
 
 
 @dataclass(frozen=True)
@@ -89,7 +92,25 @@ def _no_proxy_matches(no_proxy: str | None, target_url: str) -> bool:
 
 
 def outbound_proxy_config_for_url(settings: Settings, target_url: str) -> OutboundProxyConfig:
+    """How the adapter's loopback proxies reach the model provider.
+
+    The proxy the Portal's Proxy connector assigned to the Model provider
+    (EFP_LLM_PROXY in opencode.env, written by runtime_env) decides first:
+    ``none`` is a direct connection, a URL is used for every target unless
+    that proxy's own NO_PROXY list (EFP_LLM_NO_PROXY) exempts the host. Without
+    it the environment rules apply as before: HTTPS_PROXY/HTTP_PROXY/ALL_PROXY
+    by scheme unless NO_PROXY exempts the host.
+    """
     runtime_env = _runtime_env(settings)
+    llm_proxy = _first_proxy_value(runtime_env, os.environ, (LLM_PROXY_ENV,))
+    if llm_proxy:
+        if llm_proxy.lower() in _DIRECT_WORDS:
+            return OutboundProxyConfig(proxy_url=None, trust_env=False)
+        llm_no_proxy = _first_proxy_value(runtime_env, os.environ, (LLM_NO_PROXY_ENV,))
+        if _no_proxy_matches(llm_no_proxy, target_url):
+            return OutboundProxyConfig(proxy_url=None, trust_env=False)
+        return OutboundProxyConfig(proxy_url=llm_proxy, trust_env=False)
+
     no_proxy = _first_proxy_value(runtime_env, os.environ, ("NO_PROXY", "no_proxy"))
     if _no_proxy_matches(no_proxy, target_url):
         return OutboundProxyConfig(proxy_url=None, trust_env=False)

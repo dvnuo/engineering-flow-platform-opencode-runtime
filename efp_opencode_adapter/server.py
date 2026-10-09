@@ -70,6 +70,7 @@ from .context_api import compact_session_handler, context_usage_handler
 from .path_utils import path_exists
 from .portal_runtime_context_bootstrap import run_boot_projection_from_env
 from .profile_store import ProfileOverlayStore, build_profile_status_payload, sanitize_public_secrets
+from .proxy_plan import build_proxy_plan
 from .runtime_env import aws_status_from_env, build_runtime_env_from_config, read_runtime_env_file
 from .thinking_events import safe_preview
 from .opencode_process import LOG_TAIL_PREVIEW_CHARS, OpenCodeProcessManager
@@ -282,7 +283,15 @@ async def effective_config_handler(request: web.Request) -> web.Response:
             "runtime_integrations": {
                 "github": {"enabled": bool(github_cfg) or env_token_present, "base_url": github_cfg.get("api_base_url") or runtime_env.get("GITHUB_API_BASE_URL") or "https://api.github.com", "host": gh_host, "token_present": config_token_present or env_token_present, "git_auth_configured": git_auth_configured, "gh_config_dir": runtime_env.get("GH_CONFIG_DIR"), "git_askpass_present": git_askpass_present, "gitconfig_present": gitconfig_present},
                 "copilot": {"enabled": bool(provider == "github-copilot" or copilot_credential_present or copilot_base_url_present), "credential_present": copilot_credential_present, "token_cached": bool(copilot_snapshot.get("token_cached")), "base_url_present": copilot_base_url_present, "expires_at_present": bool(copilot_snapshot.get("expires_at_present"))},
-                "proxy": {"enabled": bool(proxy_cfg.get("enabled")), "url_present": bool(proxy_cfg.get("url")), "password_present": bool(proxy_cfg.get("password"))},
+                "proxy": {
+                    "enabled": bool(proxy_cfg.get("enabled")),
+                    "url_present": bool(proxy_cfg.get("url")),
+                    "password_present": bool(proxy_cfg.get("password")),
+                    # The Proxy connector as resolved for this profile: names,
+                    # addresses and assignments, never credentials.
+                    **{key: value for key, value in build_proxy_plan(proxy_cfg).summary().items() if key != "enabled"},
+                    "llm_proxy_present": bool(runtime_env.get("EFP_LLM_PROXY")),
+                },
                 "aws": {"enabled": bool(aws_status.get("configured"))},
                 "image-analysis": {
                     **(overlay.image_analysis if overlay and overlay.image_analysis else {"configured": False, "reason": "boot projection not recorded", "model": None, "config_path": None}),

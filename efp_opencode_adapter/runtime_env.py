@@ -7,12 +7,13 @@ import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import yaml
 
 from .mobile_cli_config import _read_yaml_mapping
 from .path_utils import path_exists
+from .proxy_plan import LLM_NO_PROXY_ENV, LLM_PROXY_ENV, build_proxy_plan
 from .settings import Settings
 from .tools_config_env import build_cli_env
 
@@ -26,6 +27,9 @@ MANAGED_EXTERNAL_ENV_KEYS = {
     "JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_PASSWORD", "JIRA_TOKEN", "JIRA_PROJECT_KEY", "EFP_JIRA_INSTANCES_JSON",
     "CONFLUENCE_BASE_URL", "CONFLUENCE_USERNAME", "CONFLUENCE_EMAIL", "CONFLUENCE_API_TOKEN", "CONFLUENCE_PASSWORD", "CONFLUENCE_TOKEN", "CONFLUENCE_SPACE_KEY", "EFP_CONFLUENCE_INSTANCES_JSON",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    # The Model provider connector's own proxy (proxy_plan.LLM_PROXY_ENV) and
+    # its NO_PROXY, read by the adapter's loopback proxies.
+    "EFP_LLM_PROXY", "EFP_LLM_NO_PROXY",
     "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
     "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "GH_PROMPT_DISABLED", "GH_REPO",
     "GIT_USERNAME", "GIT_PASSWORD", "GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_EDITOR",
@@ -42,7 +46,7 @@ _REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
 # EFP_-prefixed indexed convention families now feed the shared Go CLIs
 # (tools_config_env.build_cli_env). Strip any ambient/stale ones by prefix so a
 # previous image's values can't leak past the freshly-built managed env.
-MANAGED_EXTERNAL_ENV_PREFIXES = ("EFP_JIRA_", "EFP_CONFLUENCE_", "EFP_JENKINS_")
+MANAGED_EXTERNAL_ENV_PREFIXES = ("EFP_JIRA_", "EFP_CONFLUENCE_", "EFP_JENKINS_", "EFP_PROXY_")
 
 
 def _is_managed_external_env_key(key: str) -> bool:
@@ -332,19 +336,6 @@ def ensure_opencode_xdg_data_home(settings: Settings) -> Path:
     return xdg_home
 
 
-def _inject_proxy_auth(url: str, username: str | None, password: str | None) -> str:
-    if not username and not password:
-        return url
-    parts = urlsplit(url)
-    auth = quote(username or "", safe="")
-    if password is not None:
-        auth = f"{auth}:{quote(password, safe='')}"
-    netloc = f"{auth}@{parts.hostname or ''}"
-    if parts.port:
-        netloc = f"{netloc}:{parts.port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-
-
 def build_runtime_env_from_config(settings: Settings, runtime_config: dict | None) -> RuntimeEnvBuildResult:
     cfg = runtime_config if isinstance(runtime_config, dict) else {}
     xdg_data_home = ensure_opencode_xdg_data_home(settings)
@@ -376,15 +367,24 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
     updated: list[str] = ["java_maven"]
     warnings: list[str] = []
 
-    proxy = cfg.get("proxy") if isinstance(cfg.get("proxy"), dict) else {}
-    if proxy.get("enabled") and proxy.get("url"):
-        proxy_url = _inject_proxy_auth(str(proxy["url"]), _clean_secret(proxy.get("username")), _clean_secret(proxy.get("password")))
-        for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-            env[key] = proxy_url
-        no_proxy = str(proxy.get("no_proxy") or "127.0.0.1,localhost")
-        env["NO_PROXY"] = no_proxy
-        env["no_proxy"] = no_proxy
+    # The Proxy connector (proxy_plan.py): the default proxy goes to the
+    # environment, which opencode, gh, git, aws and kubectl follow; the proxy
+    # the Model provider connector was assigned goes to the adapter's own
+    # loopback proxies through EFP_LLM_PROXY (outbound_proxy.py); the other
+    # connectors' proxies travel in their tools config. Every proxy's
+    # credentials are exported by name for mobile-auto.
+    proxy_plan = build_proxy_plan(cfg.get("proxy"))
+    proxy_env = proxy_plan.environment()
+    if proxy_env:
+        env.update(proxy_env)
+        env.update(proxy_plan.credential_environment())
         updated.append("proxy")
+    llm_choice = proxy_plan.choice("llm")
+    if llm_choice.setting:
+        env[LLM_PROXY_ENV] = llm_choice.setting
+        if llm_choice.entry is not None and llm_choice.entry.no_proxy.strip():
+            env[LLM_NO_PROXY_ENV] = llm_choice.entry.no_proxy_text()
+    warnings.extend(proxy_plan.warnings)
 
     github = cfg.get("github") if isinstance(cfg.get("github"), dict) else {}
     github_section_present = isinstance(cfg.get("github"), dict)
