@@ -234,17 +234,20 @@ class ProxyPlan:
         which already is that proxy and lets the tool apply NO_PROXY per host
         the way it always did.
         """
-        if not self.enabled:
-            return ProxyChoice(KIND_ENVIRONMENT, SOURCE_DISABLED)
+        # The row's own setting is explicit and stands on its own: none and a
+        # URL apply whatever the connector's switch says; a name needs the
+        # connector's list, so it only resolves while the connector is on.
         own = _text(instance_setting)
         if own:
             if own.lower() in _NONE_WORDS:
                 return ProxyChoice(KIND_NONE, SOURCE_INSTANCE)
-            entry = self.entry(own)
+            entry = self.entry(own) if self.enabled else None
             if entry is not None:
                 return self._entry_choice(entry, host, SOURCE_INSTANCE)
             if _looks_like_url(own):
                 return ProxyChoice(KIND_PROXY, SOURCE_INSTANCE, url=own)
+        if not self.enabled:
+            return ProxyChoice(KIND_ENVIRONMENT, SOURCE_DISABLED)
         assigned = _text(self.assignments.get(connector))
         if assigned.lower() in _ENVIRONMENT_WORDS:
             return ProxyChoice(KIND_ENVIRONMENT, SOURCE_ENVIRONMENT)

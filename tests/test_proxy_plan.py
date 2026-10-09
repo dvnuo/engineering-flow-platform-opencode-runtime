@@ -104,6 +104,12 @@ def test_choice_per_connector():
     assert plan.choice("pgsql", instance_setting="corp-b").setting == "https://proxy-b.example.test"
     disabled = build_proxy_plan(list_section(enabled=False)).choice("llm")
     assert (disabled.kind, disabled.source) == (KIND_ENVIRONMENT, SOURCE_DISABLED)
+    # A row's own none or URL stands on its own, connector switched off or
+    # not; a name needs the connector's list.
+    off = build_proxy_plan(list_section(enabled=False))
+    assert off.choice("pgsql", instance_setting="none").setting == "none"
+    assert off.choice("pgsql", instance_setting="http://own.proxy.test:9").setting == "http://own.proxy.test:9"
+    assert off.choice("pgsql", instance_setting="corp-b").kind == KIND_ENVIRONMENT
 
 
 def test_credential_environment_and_summary_keep_secrets_apart():
