@@ -86,21 +86,36 @@ def apply_browserstack_proxy(browserstack: dict[str, Any], plan: ProxyPlan) -> N
         for key in ("proxy_host", "proxy_port", "proxy_user_env", "proxy_pass_env"):
             block.pop(key, None)
     if choice.kind == KIND_NONE:
-        http_proxy["disable_proxy_discovery"] = True
-        local["disable_proxy_discovery"] = True
+        # Nothing that would make the Go side insist on a proxy may survive:
+        # force_proxy without a host is a config error there.
+        for block in (http_proxy, local):
+            block.pop("force_proxy", None)
+            block.pop("no_proxy_hosts", None)
+            block["disable_proxy_discovery"] = True
     else:
         parsed = urlparse(choice.setting)
         scheme = parsed.scheme or "http"
-        port = parsed.port or (443 if scheme == "https" else 80)
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        port = port or (443 if scheme == "https" else 80)
+        # The REST/Appium clients take a host with its scheme (parseProxyHost);
+        # BrowserStackLocal takes --proxy-host as a bare host name.
+        http_proxy["proxy_host"] = f"{scheme}://{parsed.hostname}"
+        local["proxy_host"] = parsed.hostname
         for block in (http_proxy, local):
-            block["proxy_host"] = f"{scheme}://{parsed.hostname}"
             block["proxy_port"] = port
             block.pop("disable_proxy_discovery", None)
-        if choice.entry is not None and (choice.entry.username or choice.entry.password):
+        if choice.entry is not None:
+            # Only the credential halves that exist: mobile-auto refuses a
+            # named variable that is set but empty.
             user_env, pass_env = choice.entry.credential_env_names()
             for block in (http_proxy, local):
-                block["proxy_user_env"] = user_env
-                block["proxy_pass_env"] = pass_env
+                if choice.entry.username:
+                    block["proxy_user_env"] = user_env
+                if choice.entry.password:
+                    block["proxy_pass_env"] = pass_env
         if choice.entry is not None and choice.entry.no_proxy.strip():
             http_proxy["no_proxy_hosts"] = [item for item in re.split(r"[,\s]+", choice.entry.no_proxy) if item]
     browserstack["http_proxy"] = http_proxy

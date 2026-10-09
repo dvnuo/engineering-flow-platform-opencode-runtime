@@ -8,7 +8,7 @@ from pathlib import Path
 from efp_opencode_adapter import inspect_image_config as iic
 from efp_opencode_adapter.mobile_cli_config import _build_mobile_config
 from efp_opencode_adapter.outbound_proxy import outbound_proxy_config_for_url
-from efp_opencode_adapter.runtime_env import build_runtime_env_from_config, strip_managed_external_env, write_runtime_env_file
+from efp_opencode_adapter.runtime_env import build_runtime_env_from_config, redact_env_for_status, strip_managed_external_env, write_runtime_env_file
 from efp_opencode_adapter.settings import Settings
 from efp_opencode_adapter.tools_config_env import build_cli_env, build_tools_config_json
 
@@ -62,6 +62,16 @@ def test_runtime_env_exports_the_default_proxy_and_the_model_provider_proxy(tmp_
     env = build_runtime_env_from_config(settings, {"proxy": proxy_section(llm="none")}).env
     assert env["EFP_LLM_PROXY"] == "none" and "EFP_LLM_NO_PROXY" not in env
 
+    # A proxy without a no_proxy of its own still exempts loopback: a model
+    # served from this pod is never sent through it.
+    bare = proxy_section(llm="corp-b")
+    bare["proxies"][1] = {"name": "corp-b", "url": "https://proxy-b.example.test"}
+    env = build_runtime_env_from_config(settings, {"proxy": bare}).env
+    assert env["EFP_LLM_PROXY"] == "https://proxy-b.example.test"
+    assert env["EFP_LLM_NO_PROXY"] == "127.0.0.1,localhost"
+    # A lone username is exported for mobile-auto but is not half a login in a URL.
+    assert "EFP_PROXY_CORP_B_USERNAME" not in env and "EFP_PROXY_CORP_B_PASSWORD" not in env
+
     # An assignment to an unknown proxy is reported, not applied.
     result = build_runtime_env_from_config(settings, {"proxy": proxy_section(llm="ghost")})
     assert "EFP_LLM_PROXY" not in result.env
@@ -89,8 +99,33 @@ def test_outbound_proxy_honours_the_model_provider_proxy(tmp_path, monkeypatch):
     direct = outbound_proxy_config_for_url(settings, "https://api.github.com/copilot_internal/v2/token")
     assert direct.proxy_url is None and direct.trust_env is False
 
+    # A loopback target never goes through the proxy, even without a no_proxy list.
+    write_runtime_env_file(settings, {"EFP_LLM_PROXY": "https://ub:pb@proxy-b.example.test"})
+    assert outbound_proxy_config_for_url(settings, "http://127.0.0.1:9000/v1").proxy_url is None
+    assert outbound_proxy_config_for_url(settings, "http://localhost:9000/v1").proxy_url is None
+    assert outbound_proxy_config_for_url(settings, "https://chat.example.test/v1").proxy_url == "https://ub:pb@proxy-b.example.test"
+
     write_runtime_env_file(settings, {"HTTPS_PROXY": "http://default.proxy:8080"})
     assert outbound_proxy_config_for_url(settings, "https://api.github.com/x").proxy_url == "http://default.proxy:8080"
+
+
+def test_status_redaction_hides_the_model_provider_proxy_credentials():
+    redacted = redact_env_for_status(
+        {
+            "EFP_LLM_PROXY": "https://ub:p%3Ab@proxy-b.example.test",
+            "EFP_LLM_NO_PROXY": "chat.internal",
+            "EFP_PROXY_CORP_B_USERNAME": "ub",
+            "EFP_PROXY_CORP_B_PASSWORD": "pb",
+            "HTTPS_PROXY": "http://ua:pa@proxy-a.example.test:3128",
+        }
+    )
+    assert redacted == {
+        "EFP_LLM_PROXY": "https://[redacted]@proxy-b.example.test",
+        "EFP_LLM_NO_PROXY": "chat.internal",
+        "EFP_PROXY_CORP_B_USERNAME": True,
+        "EFP_PROXY_CORP_B_PASSWORD": True,
+        "HTTPS_PROXY": "http://[redacted]@proxy-a.example.test:3128",
+    }
 
 
 def test_tools_config_materializes_the_assigned_proxies():
@@ -133,17 +168,39 @@ def test_mobile_config_maps_the_browserstack_proxy(tmp_path, monkeypatch):
         "proxy_pass_env": "EFP_PROXY_CORP_B_PASSWORD",
         "no_proxy_hosts": ["chat.internal"],
     }
-    assert browserstack["local"]["proxy_host"] == "https://proxy-b.example.test"
+    # BrowserStackLocal takes --proxy-host as a bare host name.
+    assert browserstack["local"]["proxy_host"] == "proxy-b.example.test"
+    assert browserstack["local"]["proxy_port"] == 443
     assert browserstack["local"]["proxy_pass_env"] == "EFP_PROXY_CORP_B_PASSWORD"
     assert browserstack["local"]["binary"]
 
+    # none: force_proxy without a host is a config error in mobile-auto, so it goes too.
     mobile, _ = _build_mobile_config(
         settings,
-        {"proxy": proxy_section(browserstack="none"), "mobile-auto": {"enabled": True, "browserstack": {"username": "bs", "http_proxy": {"proxy_host": "old.proxy.test", "proxy_port": 1}}}},
+        {
+            "proxy": proxy_section(browserstack="none"),
+            "mobile-auto": {
+                "enabled": True,
+                "browserstack": {
+                    "username": "bs",
+                    "http_proxy": {"proxy_host": "old.proxy.test", "proxy_port": 1, "force_proxy": True, "no_proxy_hosts": ["old.internal"]},
+                    "local": {"force_proxy": True},
+                },
+            },
+        },
         warnings,
     )
     assert mobile["browserstack"]["http_proxy"] == {"disable_proxy_discovery": True}
     assert mobile["browserstack"]["local"]["disable_proxy_discovery"] is True
+    assert "force_proxy" not in mobile["browserstack"]["local"]
+
+    # Only the credential halves that exist are named: mobile-auto refuses an empty one.
+    half = proxy_section(browserstack="corp-b")
+    half["proxies"][1] = {"name": "corp-b", "url": "https://proxy-b.example.test", "username": "ub"}
+    mobile, _ = _build_mobile_config(settings, {"proxy": half, "mobile-auto": {"enabled": True, "browserstack": {"username": "bs"}}}, warnings)
+    for block in (mobile["browserstack"]["http_proxy"], mobile["browserstack"]["local"]):
+        assert block["proxy_user_env"] == "EFP_PROXY_CORP_B_USERNAME"
+        assert "proxy_pass_env" not in block
 
     mobile, _ = _build_mobile_config(
         settings,

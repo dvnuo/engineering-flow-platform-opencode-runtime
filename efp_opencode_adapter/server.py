@@ -290,7 +290,7 @@ async def effective_config_handler(request: web.Request) -> web.Response:
                     # The Proxy connector as resolved for this profile: names,
                     # addresses and assignments, never credentials.
                     **{key: value for key, value in build_proxy_plan(proxy_cfg).summary().items() if key != "enabled"},
-                    "llm_proxy_present": bool(runtime_env.get("EFP_LLM_PROXY")),
+                    "llm_proxy_present": str(runtime_env.get("EFP_LLM_PROXY") or "").strip().lower() not in {"", "none", "direct", "off"},
                 },
                 "aws": {"enabled": bool(aws_status.get("configured"))},
                 "image-analysis": {

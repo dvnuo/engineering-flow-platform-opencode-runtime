@@ -28,6 +28,7 @@ Pure functions over the config dict; nothing here touches ``os.environ``.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -67,10 +68,40 @@ _NONE_WORDS = frozenset({"none", "direct", "off"})
 _ENVIRONMENT_WORDS = frozenset({"", "env", "environment"})
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _REDACTED_VALUES = frozenset({"***redacted***", "[redacted]", "redacted"})
+# What a proxy name (or a none word) looks like, as opposed to a URL that
+# could carry credentials: the only assignment values a log line repeats.
+_NAME_LIKE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def _mentionable(value: str) -> str:
+    """A value for a warning: a proxy name as it is, anything else (a URL
+    with credentials, say) only described."""
+    text = _text(value)
+    return repr(text) if _NAME_LIKE.match(text) else "an unlisted value"
+
+
+def _env_token(name: str) -> str:
+    """The name as an environment-variable segment (letters, digits, _)."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper() or "DEFAULT"
+
+
+def _port_of(parsed) -> int | None:
+    """urlparse's port, or None for one the URL cannot express (out of range)."""
+    try:
+        return parsed.port
+    except ValueError:
+        return None
+
+
+def _ip_address(text: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(text)
+    except ValueError:
+        return None
 
 
 def _secret(value: Any) -> str:
@@ -85,20 +116,23 @@ def _flag(value: Any) -> bool:
 
 
 def proxy_url_with_credentials(url: str, username: str | None, password: str | None) -> str:
-    """The proxy URL with the configured credentials as its user info."""
-    if not username and not password:
+    """The proxy URL with the configured credentials as its user info.
+
+    Both halves are needed, the way the native runtime (src/utils/proxy.py)
+    and the Portal build the same URL; a lone username or password is left
+    out rather than sent as half a login.
+    """
+    if not (username and password):
         return url
     parts = urlsplit(url if "://" in url else "http://" + url)
     if not parts.hostname:
         return url
-    auth = quote(username or "", safe="")
-    if password is not None:
-        auth = f"{auth}:{quote(password, safe='')}"
+    auth = f"{quote(username, safe='')}:{quote(password, safe='')}"
     host = parts.hostname
     if ":" in host:
         host = "[" + host + "]"
     netloc = f"{auth}@{host}"
-    if parts.port:
+    if _port_of(parts):
         netloc = f"{netloc}:{parts.port}"
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
@@ -112,6 +146,10 @@ class ProxyEntry:
     username: str = ""
     password: str = ""
     no_proxy: str = ""
+    # The segment of this entry's EFP_PROXY_<TOKEN>_* variables, made unique
+    # across the plan by build_proxy_plan (corp-a and corp_a both read as
+    # CORP_A on their own).
+    env_token: str = ""
 
     def url_with_credentials(self) -> str:
         return proxy_url_with_credentials(self.url, self.username or None, self.password or None)
@@ -132,14 +170,14 @@ class ProxyEntry:
         host = parsed.hostname or ""
         if ":" in host:
             host = "[" + host + "]"
-        port = parsed.port
+        port = _port_of(parsed)
         if port is None:
             port = 443 if parsed.scheme == "https" else 80
         return f"{host}:{port}" if host else ""
 
     def credential_env_names(self) -> tuple[str, str]:
         """The EFP_PROXY_<NAME>_USERNAME / _PASSWORD variable names."""
-        token = re.sub(r"[^A-Za-z0-9]+", "_", self.name).strip("_").upper() or "DEFAULT"
+        token = self.env_token or _env_token(self.name)
         return (f"{CREDENTIAL_ENV_PREFIX}{token}_USERNAME", f"{CREDENTIAL_ENV_PREFIX}{token}_PASSWORD")
 
 
@@ -215,11 +253,13 @@ class ProxyPlan:
             return {}
         env: dict[str, str] = {}
         for item in self.entries:
-            if not (item.username or item.password):
-                continue
+            # Only the halves that exist: mobile-auto refuses a named variable
+            # that is set but empty.
             user_key, pass_key = item.credential_env_names()
-            env[user_key] = item.username
-            env[pass_key] = item.password
+            if item.username:
+                env[user_key] = item.username
+            if item.password:
+                env[pass_key] = item.password
         return env
 
     def choice(self, connector: str, *, host: str | None = None, instance_setting: str | None = None) -> ProxyChoice:
@@ -271,17 +311,30 @@ class ProxyPlan:
             "enabled": self.enabled,
             "default": self.default.name if self.default is not None else None,
             "proxies": [{"name": item.name, "address": item.address()} for item in self.entries],
-            "assignments": {key: value for key, value in self.assignments.items()},
+            # A name, none or empty; anything else (a hand-edited seed could
+            # hold a URL with credentials) is only described.
+            "assignments": {key: value if _NAME_LIKE.match(value) or not value else "unlisted" for key, value in self.assignments.items()},
             "warnings": list(self.warnings),
         }
 
 
 def _looks_like_url(value: str) -> bool:
+    """Whether a row's own proxy value names a proxy by address rather than
+    by name: a URL, a host:port, an IP address, or a bare host with a dot in
+    it (a Portal proxy name never has one)."""
     text = _text(value)
     if "://" in text:
         return True
+    if " " in text:
+        return False
+    if text.startswith("["):
+        return "]" in text
+    if _ip_address(text) is not None:
+        return True
     host, sep, port = text.rpartition(":")
-    return bool(sep) and host != "" and port.isdigit()
+    if sep and host != "" and port.isdigit() and host.count(":") == 0:
+        return True
+    return ":" not in text and "." in text
 
 
 def normalize_proxy_section(raw: Any) -> dict[str, Any]:
@@ -354,7 +407,17 @@ def _no_proxy_text(item: Mapping[str, Any]) -> str:
 def build_proxy_plan(raw: Any) -> ProxyPlan:
     """The plan for a profile's ``proxy`` section (any shape, or missing)."""
     section = normalize_proxy_section(raw)
-    entries = tuple(ProxyEntry(**item) for item in section["proxies"])
+    entries: list[ProxyEntry] = []
+    tokens: set[str] = set()
+    for item in section["proxies"]:
+        token = _env_token(item["name"])
+        unique = token
+        suffix = 2
+        while unique in tokens:
+            unique = f"{token}_{suffix}"
+            suffix += 1
+        tokens.add(unique)
+        entries.append(ProxyEntry(**item, env_token=unique))
     default = None
     for item in entries:
         if item.name == section["default"]:
@@ -367,13 +430,15 @@ def build_proxy_plan(raw: Any) -> ProxyPlan:
     names = {item.name for item in entries}
     for connector, value in sorted(assignments.items()):
         if value and value.lower() not in _NONE_WORDS and value not in names:
-            warnings.append(f"{connector} is assigned the proxy {value!r}, which the Proxy connector does not define; it follows the environment")
+            warnings.append(
+                f"{connector} is assigned the proxy {_mentionable(value)}, which the Proxy connector does not define; it follows the environment"
+            )
     raw_default = _text(raw.get("default")) if isinstance(raw, Mapping) else ""
     if raw_default and raw_default not in names and entries:
-        warnings.append(f"the default proxy {raw_default!r} is not defined; {entries[0].name!r} is the default")
+        warnings.append(f"the default proxy {_mentionable(raw_default)} is not defined; {entries[0].name!r} is the default")
     return ProxyPlan(
         enabled=section["enabled"],
-        entries=entries,
+        entries=tuple(entries),
         default=default,
         assignments=assignments,
         warnings=tuple(warnings),
@@ -381,13 +446,22 @@ def build_proxy_plan(raw: Any) -> ProxyPlan:
 
 
 def no_proxy_exempts(host: str, no_proxy: str) -> bool:
-    """Whether a NO_PROXY list keeps ``host`` off the proxy, the way the Go CLIs decide it."""
+    """Whether a NO_PROXY list keeps ``host`` off the proxy.
+
+    Read the way Go's ProxyFromEnvironment (golang.org/x/net/http/httpproxy)
+    reads it, which is what the CLIs follow on the environment path: a
+    loopback host always; ``*`` every host; a domain name that name and its
+    subdomains; a name with a leading ``.`` (or ``*.``) its subdomains only;
+    an IP address that address, a CIDR block the addresses in it. A scheme
+    or a port on an entry is ignored.
+    """
     target = _text(host).lower().rstrip(".")
     if target.startswith("[") and target.endswith("]"):
         target = target[1:-1]
     if not target:
         return False
-    if target in _LOOPBACK_HOSTS:
+    target_ip = _ip_address(target)
+    if target in _LOOPBACK_HOSTS or (target_ip is not None and target_ip.is_loopback):
         return True
     for raw_entry in re.split(r"[,\s]+", no_proxy or ""):
         entry = raw_entry.strip().lower()
@@ -402,11 +476,19 @@ def no_proxy_exempts(host: str, no_proxy: str) -> bool:
             entry = entry[1 : entry.index("]")]
         elif entry.count(":") == 1:
             entry = entry.split(":", 1)[0]
+        if "/" in entry:
+            try:
+                network = ipaddress.ip_network(entry, strict=False)
+            except ValueError:
+                continue
+            if target_ip is not None and target_ip in network:
+                return True
+            continue
+        entry = entry.rstrip(".")
         if entry.startswith("*."):
             entry = entry[1:]
         if entry.startswith("."):
-            suffix = entry[1:]
-            if target == suffix or target.endswith(entry):
+            if target.endswith(entry):
                 return True
             continue
         if target == entry or target.endswith("." + entry):

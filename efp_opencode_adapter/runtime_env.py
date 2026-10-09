@@ -13,7 +13,7 @@ import yaml
 
 from .mobile_cli_config import _read_yaml_mapping
 from .path_utils import path_exists
-from .proxy_plan import LLM_NO_PROXY_ENV, LLM_PROXY_ENV, build_proxy_plan
+from .proxy_plan import CREDENTIAL_ENV_PREFIX, LLM_NO_PROXY_ENV, LLM_PROXY_ENV, build_proxy_plan
 from .settings import Settings
 from .tools_config_env import build_cli_env
 
@@ -382,7 +382,10 @@ def build_runtime_env_from_config(settings: Settings, runtime_config: dict | Non
     llm_choice = proxy_plan.choice("llm")
     if llm_choice.setting:
         env[LLM_PROXY_ENV] = llm_choice.setting
-        if llm_choice.entry is not None and llm_choice.entry.no_proxy.strip():
+        if llm_choice.entry is not None:
+            # Always written next to a proxy URL: the list carries loopback
+            # even when the entry's own no_proxy is empty, so a model served
+            # from this pod (a dev profile) is never sent through the proxy.
             env[LLM_NO_PROXY_ENV] = llm_choice.entry.no_proxy_text()
     warnings.extend(proxy_plan.warnings)
 
@@ -547,9 +550,9 @@ def _redact_url_userinfo(value: str) -> str:
 def redact_env_for_status(env: dict[str, str]) -> dict[str, object]:
     out: dict[str, object] = {}
     for key, value in env.items():
-        if any(marker in key.upper() for marker in SECRET_MARKERS):
+        if any(marker in key.upper() for marker in SECRET_MARKERS) or key.startswith(CREDENTIAL_ENV_PREFIX):
             out[key] = bool(value)
-        elif key in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"}:
+        elif key in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", LLM_PROXY_ENV}:
             out[key] = _redact_url_userinfo(value)
         else:
             out[key] = value

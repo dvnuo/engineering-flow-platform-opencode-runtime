@@ -106,8 +106,10 @@ def outbound_proxy_config_for_url(settings: Settings, target_url: str) -> Outbou
     if llm_proxy:
         if llm_proxy.lower() in _DIRECT_WORDS:
             return OutboundProxyConfig(proxy_url=None, trust_env=False)
+        # A loopback target (a model served from this pod) is never sent
+        # through the proxy, whatever the list says.
         llm_no_proxy = _first_proxy_value(runtime_env, os.environ, (LLM_NO_PROXY_ENV,))
-        if _no_proxy_matches(llm_no_proxy, target_url):
+        if _no_proxy_matches(llm_no_proxy, target_url) or _no_proxy_matches("127.0.0.1,localhost,::1", target_url):
             return OutboundProxyConfig(proxy_url=None, trust_env=False)
         return OutboundProxyConfig(proxy_url=llm_proxy, trust_env=False)
 
