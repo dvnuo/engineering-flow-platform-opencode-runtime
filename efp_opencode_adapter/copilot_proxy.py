@@ -149,7 +149,7 @@ async def copilot_proxy_handler(request: web.Request) -> web.StreamResponse:
     body = await request.read()
     if request.method == "POST" and body:
         # Copilot "auto" is routed here the way VS Code does it: the body's
-        # model becomes a concrete GPT-6 id from the auto session's pool and
+        # model becomes the model Copilot picked for the turn (POST /auto) and
         # the session token rides along (see copilot_auto_session). Other
         # bodies pass through byte for byte.
         routed = await route_auto_request_body(

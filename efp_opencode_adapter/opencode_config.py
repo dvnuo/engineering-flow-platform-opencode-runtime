@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .copilot_auto_catalog import AUTO_MODEL_ID, COPILOT_AUTO_MODEL_CONFIG
+from .copilot_auto_catalog import COPILOT_AUTO_MODEL_CONFIGS, COPILOT_MODEL_LIMITS
 from .index_loader import load_skills_index
 from .permission_generator import build_permission
 from .settings import Settings
@@ -120,15 +120,19 @@ def provider_config_from_runtime_profile(runtime_config: dict, settings: Setting
         # selects /responses for these models. The local proxy strips inbound
         # Authorization and replaces it with the internal Copilot token.
         options.setdefault("apiKey", COPILOT_PROXY_API_KEY_PLACEHOLDER)
-        # "auto" is not in models.dev: declare it so OpenCode accepts the id. The
-        # local proxy turns it into a concrete GPT-6 model per request
-        # (copilot_auto_session), so the declared limit is the GPT-6 window.
+        # The auto ids are not in models.dev: declare them so OpenCode accepts
+        # them. The local proxy sends the model Copilot picks per turn
+        # (copilot_auto_session). The GPT-6 rows pin Copilot's own limits
+        # (400k / 128k) over models.dev's 1.05M so OpenCode compacts before
+        # Copilot refuses a prompt.
+        models = {auto_id: dict(config) for auto_id, config in COPILOT_AUTO_MODEL_CONFIGS.items()}
+        models.update({model: {"limit": dict(limit)} for model, limit in COPILOT_MODEL_LIMITS.items()})
         return {
             "provider": {
                 provider: {
                     "npm": COPILOT_RESPONSES_PROVIDER_NPM,
                     "options": options,
-                    "models": {AUTO_MODEL_ID: dict(COPILOT_AUTO_MODEL_CONFIG)},
+                    "models": models,
                 }
             }
         }

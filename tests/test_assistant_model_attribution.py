@@ -4,7 +4,7 @@ import pytest
 from efp_opencode_adapter import copilot_auto_session as mod
 from efp_opencode_adapter.app_keys import COPILOT_AUTO_SESSION_MANAGER_KEY
 from efp_opencode_adapter.chat_api import _model_attribution
-from efp_opencode_adapter.copilot_auto_session import AutoRouting, CopilotAutoSession, CopilotAutoSessionManager
+from efp_opencode_adapter.copilot_auto_session import AutoRouting, AutoTurn, CopilotAutoDecision, CopilotAutoSessionManager
 from efp_opencode_adapter.copilot_plugin_auth import CopilotInternalToken
 from efp_opencode_adapter.outbound_proxy import OutboundProxyConfig
 from efp_opencode_adapter.sessions_api import _to_efp_messages, attach_canonical_assistant_attribution, normalize_canonical_messages
@@ -25,33 +25,45 @@ def test_chat_model_attribution_follows_the_last_auto_routing():
     assert _model_attribution(app, None) == {}
     assert _model_attribution(app, "github-copilot/auto") == {
         "requested_model": "auto",
+        "auto_tier": "balance",
         "model": "gpt-6-sol",
         "model_fallback_reason": "no auto routing recorded for this request",
     }
 
-    manager.last_routing = AutoRouting(model="gpt-6.1-sol", session_token="sess")
-    assert _model_attribution(app, "auto") == {"requested_model": "auto", "model": "gpt-6.1-sol"}
+    manager.last_routing = AutoRouting(model="gpt-6.1-sol", session_token="sess", tier="intelligence")
+    assert _model_attribution(app, "auto-intelligence") == {
+        "requested_model": "auto-intelligence",
+        "auto_tier": "intelligence",
+        "model": "gpt-6.1-sol",
+    }
 
-    manager.last_routing = AutoRouting(model="gpt-6-sol", session_token=None, fallback_reason="auto session unavailable: HTTP 404")
+    manager.last_routing = AutoRouting(model="gpt-6-sol", session_token=None, fallback_reason="auto route unavailable: HTTP 404")
     routed = _model_attribution(app, "auto")
     assert routed["model"] == "gpt-6-sol"
-    assert routed["model_fallback_reason"].startswith("auto session unavailable")
+    assert routed["auto_tier"] == "balance"
+    assert routed["model_fallback_reason"].startswith("auto route unavailable")
 
 
 @pytest.mark.asyncio
 async def test_manager_remembers_its_last_routing(monkeypatch):
     manager = CopilotAutoSessionManager()
 
-    async def fake_open(internal_token, proxy_config):
-        return CopilotAutoSession("sess", 4102444800, ("gpt-6-luna",), {})
+    async def fake_route(internal_token, proxy_config, *, prompt, tier, has_image):
+        return CopilotAutoDecision("gpt-6-luna", "sess", 4102444800, tier, {"id": "gpt-6-luna"}, {})
 
-    monkeypatch.setattr(manager, "_open", fake_open)
+    async def no_catalog(internal_token, proxy_config):
+        return {}
+
+    monkeypatch.setattr(manager, "_route", fake_route)
+    monkeypatch.setattr(manager, "_catalog", no_catalog)
     token = CopilotInternalToken(token="tid=A", expires_at=4102444800, api_base_url="https://api.example")
     assert manager.last_routing is None
 
-    routing = await manager.route(token, proxy_config=OutboundProxyConfig(proxy_url=None))
+    turn = AutoTurn(prompt="hey", conversation_key="c1", turn_index=1, history_chars=10)
+    routing = await manager.route(token, proxy_config=OutboundProxyConfig(proxy_url=None), turn=turn, tier="balance")
 
     assert routing.model == "gpt-6-luna"
+    assert routing.tier == "balance"
     assert manager.last_routing is routing
 
 
