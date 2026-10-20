@@ -17,6 +17,7 @@ from .app_keys import (
     ATTACHMENT_SERVICE_KEY,
     BOOT_PROJECTION_KEY,
     CHATLOG_STORE_KEY,
+    COPILOT_AUTO_SESSION_MANAGER_KEY,
     EVENT_BUS_KEY,
     OPENCODE_CLIENT_KEY,
     PORTAL_METADATA_CLIENT_KEY,
@@ -27,6 +28,7 @@ from .app_keys import (
     USER_DISPLAY_STORE_KEY,
 )
 from .attachment_service import build_opencode_attachment_parts
+from .copilot_auto_catalog import DEFAULT_AUTO_FALLBACK_MODEL, is_auto_model
 from .inference_settings import normalize_reasoning_effort, reasoning_effort_from_metadata
 from .chat_run_registry import chat_run_registry
 from .opencode_client import OpenCodeClientError
@@ -128,6 +130,31 @@ def _optional_str(value: Any) -> str | None:
 
 def _normalize_title(raw: Any) -> str:
     return re.sub(r"\s+", " ", raw if isinstance(raw, str) else "").strip() or "Chat"
+
+
+def _model_attribution(app, model: str | None) -> dict[str, str]:
+    """Which model answered: ``model`` (bare id), plus ``requested_model`` and
+    ``model_fallback_reason`` for a Copilot auto request, read from the proxy's
+    last auto routing (copilot_auto_session). Mirrors the native runner's
+    attribution so the Portal renders both the same way.
+    """
+
+    requested = str(model or "").strip()
+    bare = requested.split("/", 1)[1] if "/" in requested else requested
+    if not is_auto_model(requested):
+        return {"model": bare} if bare else {}
+    attribution = {"requested_model": "auto"}
+    manager = app.get(COPILOT_AUTO_SESSION_MANAGER_KEY) if app is not None else None
+    routing = getattr(manager, "last_routing", None)
+    if routing is None:
+        attribution["model"] = DEFAULT_AUTO_FALLBACK_MODEL
+        attribution["model_fallback_reason"] = "no auto routing recorded for this request"
+        return attribution
+    attribution["model"] = str(getattr(routing, "model", "") or DEFAULT_AUTO_FALLBACK_MODEL)
+    reason = getattr(routing, "fallback_reason", None)
+    if isinstance(reason, str) and reason:
+        attribution["model_fallback_reason"] = reason
+    return attribution
 
 
 def _model_from_chat_payload(payload: dict[str, Any], metadata: dict[str, Any], runtime_profile: dict[str, Any]) -> str | None:
@@ -1061,10 +1088,23 @@ async def handle_chat_payload_for_app(
         if bindings is not None and hasattr(bindings, "bind_message"):
             for assistant_id in assistant_message_ids:
                 bindings.bind_message(record.opencode_session_id, assistant_id, portal_session_id, request_id, kind="chat")
+        model_attribution = _model_attribution(app, model)
+        attribution_store = app.get(USER_DISPLAY_STORE_KEY)
+        if attribution_store is not None and model_attribution.get("model"):
+            for assistant_id in assistant_message_ids:
+                try:
+                    attribution_store.put_assistant_attribution(
+                        portal_session_id=portal_session_id,
+                        opencode_session_id=record.opencode_session_id,
+                        opencode_message_id=assistant_id,
+                        attribution=model_attribution,
+                    )
+                except Exception:
+                    logger.warning("failed to save assistant model attribution", exc_info=True)
 
         terminal_type = "chat.completed" if completion_state == "completed" else "chat.failed"
         terminal_state = "success" if completion_state == "completed" else completion_state
-        terminal_data = {"message": assistant_text, "completion_state": completion_state}
+        terminal_data = {"message": assistant_text, "completion_state": completion_state, **model_attribution}
         if incomplete_reason:
             terminal_data["incomplete_reason"] = incomplete_reason
         if completion_state == "completed":
@@ -1117,7 +1157,7 @@ async def handle_chat_payload_for_app(
         usage_record = usage_tracker.record_chat(
             session_id=portal_session_id,
             request_id=request_id,
-            model=model,
+            model=model_attribution.get("model") or model,
             provider=provider_for_trace,
             response_payload=response_payload,
             input_text=message,
@@ -1185,6 +1225,7 @@ async def handle_chat_payload_for_app(
             "events": runtime_events,
             "runtime_events": runtime_events,
             "usage": usage_record,
+            **model_attribution,
             "metadata": {},
             "context_state": final_context,
             "_llm_debug": llm_debug,

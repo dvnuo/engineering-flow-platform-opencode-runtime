@@ -164,6 +164,54 @@ class UserDisplayStore:
         self._write()
         return record
 
+    def put_assistant_attribution(
+        self,
+        *,
+        portal_session_id: str,
+        opencode_session_id: str,
+        opencode_message_id: str,
+        attribution: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Remember which model answered an assistant message (``model``,
+        ``requested_model``, ``model_fallback_reason``), so the transcript can
+        show it after a reload; OpenCode's own record only knows ``auto``.
+        """
+
+        portal_session_id = str(portal_session_id or "")
+        opencode_session_id = str(opencode_session_id or "")
+        opencode_message_id = str(opencode_message_id or "")
+        now = utc_now_iso()
+        key = self._key(opencode_session_id, opencode_message_id)
+        existing = self._payload.setdefault("messages", {}).get(key)
+        created_at = existing.get("created_at") if isinstance(existing, dict) and isinstance(existing.get("created_at"), str) else now
+        record = {
+            "portal_session_id": portal_session_id,
+            "opencode_session_id": opencode_session_id,
+            "opencode_message_id": opencode_message_id,
+            "role": "assistant",
+            "metadata": {
+                key_name: value
+                for key_name in ("model", "requested_model", "model_fallback_reason")
+                for value in [attribution.get(key_name)]
+                if isinstance(value, str) and value.strip()
+            },
+            "created_at": created_at,
+            "updated_at": now,
+        }
+        self._payload["messages"][key] = record
+        self._write()
+        return record
+
+    def get_message(
+        self,
+        opencode_session_id: str,
+        opencode_message_id: str,
+        portal_session_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Any stored record for a message, whatever its role (see ``role``)."""
+
+        return self.get_user_message(opencode_session_id, opencode_message_id, portal_session_id)
+
     def get_user_message(
         self,
         opencode_session_id: str,

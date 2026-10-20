@@ -161,6 +161,83 @@ def _is_internal_efp_message(message: Any) -> bool:
     return False
 
 
+ASSISTANT_ATTRIBUTION_KEYS = ("model", "requested_model", "model_fallback_reason")
+
+
+def _assistant_attribution_record(
+    display_store,
+    *,
+    portal_session_id: str,
+    opencode_session_id: str,
+    opencode_message_id: str,
+) -> dict[str, str]:
+    """The model attribution chat_api stored for an assistant message, if any."""
+
+    if display_store is None or not opencode_message_id:
+        return {}
+    getter = getattr(display_store, "get_message", None) or getattr(display_store, "get_user_message", None)
+    if getter is None:
+        return {}
+    record = getter(opencode_session_id, opencode_message_id, portal_session_id)
+    if not isinstance(record, dict) or record.get("role") != "assistant":
+        return {}
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    out: dict[str, str] = {}
+    for key in ASSISTANT_ATTRIBUTION_KEYS:
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip()
+    return out
+
+
+def _attach_assistant_attribution(
+    efp: dict[str, Any],
+    *,
+    display_store,
+    portal_session_id: str,
+    opencode_session_id: str,
+) -> None:
+    metadata = efp.get("metadata") if isinstance(efp.get("metadata"), dict) else {}
+    message_id = str(efp.get("id") or metadata.get("opencode_message_id") or "")
+    attribution = _assistant_attribution_record(
+        display_store,
+        portal_session_id=portal_session_id,
+        opencode_session_id=opencode_session_id or str(metadata.get("opencode_session_id") or ""),
+        opencode_message_id=message_id,
+    )
+    if not attribution:
+        return
+    efp.setdefault("metadata", {}).update(attribution)
+    efp.update(attribution)
+
+
+def attach_canonical_assistant_attribution(
+    canonical_messages: list[dict[str, Any]],
+    *,
+    display_store,
+    portal_session_id: str,
+    opencode_session_id: str,
+) -> list[dict[str, Any]]:
+    """Top-level ``model`` fields on canonical assistant messages (the Portal
+    renders history from these, not from the efp messages, when present).
+    """
+
+    if display_store is None:
+        return canonical_messages
+    for message in canonical_messages:
+        if str(message.get("role") or "").lower() != "assistant":
+            continue
+        attribution = _assistant_attribution_record(
+            display_store,
+            portal_session_id=portal_session_id,
+            opencode_session_id=opencode_session_id,
+            opencode_message_id=str(message.get("message_id") or ""),
+        )
+        if attribution:
+            message.update(attribution)
+    return canonical_messages
+
+
 def _to_efp_messages(
     messages: list[dict[str, Any]],
     *,
@@ -196,6 +273,13 @@ def _to_efp_messages(
                 metadata["display_content_source"] = "portal_original_user_message"
                 metadata["internal_model_content_hidden"] = True
                 metadata["original_user_message"] = visible
+        elif str(efp.get("role") or "").lower() == "assistant" and display_store is not None:
+            _attach_assistant_attribution(
+                efp,
+                display_store=display_store,
+                portal_session_id=portal_session_id,
+                opencode_session_id=opencode_session_id,
+            )
         out.append(efp)
     return out
 
@@ -599,7 +683,12 @@ async def get_session_handler(request: web.Request) -> web.Response:
         portal_session_id=sid,
         opencode_session_id=record.opencode_session_id,
     )
-    canonical_messages = normalize_canonical_messages(messages)
+    canonical_messages = attach_canonical_assistant_attribution(
+        normalize_canonical_messages(messages),
+        display_store=request.app.get(USER_DISPLAY_STORE_KEY),
+        portal_session_id=sid,
+        opencode_session_id=record.opencode_session_id,
+    )
     return web.json_response(
         {
             "success": True,

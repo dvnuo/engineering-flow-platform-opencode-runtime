@@ -112,6 +112,10 @@ class CopilotAutoSessionManager:
         self._sessions: dict[str, CopilotAutoSession] = {}
         self._lock = asyncio.Lock()
         self._last_fallback_reason: str | None = None
+        # The most recent routing decision; chat_api reports it as the model
+        # that answered an auto request (the pick is deterministic per session
+        # pool, so concurrent requests on one token share it).
+        self.last_routing: AutoRouting | None = None
 
     async def get_session(
         self,
@@ -154,13 +158,17 @@ class CopilotAutoSessionManager:
             pool = ", ".join(session.available_models) or "empty"
             return self._fallback(f"no supported GPT model in the auto pool ({pool})")
         self._last_fallback_reason = None
-        return AutoRouting(model=model, session_token=session.session_token)
+        routing = AutoRouting(model=model, session_token=session.session_token)
+        self.last_routing = routing
+        return routing
 
     def _fallback(self, reason: str) -> AutoRouting:
         if reason != self._last_fallback_reason:
             logger.warning("copilot auto: sending %s without a session (%s)", DEFAULT_AUTO_FALLBACK_MODEL, reason)
             self._last_fallback_reason = reason
-        return AutoRouting(model=DEFAULT_AUTO_FALLBACK_MODEL, session_token=None, fallback_reason=reason)
+        routing = AutoRouting(model=DEFAULT_AUTO_FALLBACK_MODEL, session_token=None, fallback_reason=reason)
+        self.last_routing = routing
+        return routing
 
     async def _open(self, internal_token: CopilotInternalToken, proxy_config: OutboundProxyConfig) -> CopilotAutoSession:
         url = f"{internal_token.api_base_url.rstrip('/')}{AUTO_SESSION_PATH}"
