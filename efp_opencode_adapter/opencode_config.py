@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .copilot_auto_catalog import AUTO_MODEL_ID, COPILOT_AUTO_MODEL_CONFIG
 from .index_loader import load_skills_index
 from .permission_generator import build_permission
 from .settings import Settings
@@ -119,7 +120,18 @@ def provider_config_from_runtime_profile(runtime_config: dict, settings: Setting
         # selects /responses for these models. The local proxy strips inbound
         # Authorization and replaces it with the internal Copilot token.
         options.setdefault("apiKey", COPILOT_PROXY_API_KEY_PLACEHOLDER)
-        return {"provider": {provider: {"npm": COPILOT_RESPONSES_PROVIDER_NPM, "options": options}}}
+        # "auto" is not in models.dev: declare it so OpenCode accepts the id. The
+        # local proxy turns it into a concrete GPT-6 model per request
+        # (copilot_auto_session), so the declared limit is the GPT-6 window.
+        return {
+            "provider": {
+                provider: {
+                    "npm": COPILOT_RESPONSES_PROVIDER_NPM,
+                    "options": options,
+                    "models": {AUTO_MODEL_ID: dict(COPILOT_AUTO_MODEL_CONFIG)},
+                }
+            }
+        }
     if provider == "ai-platform" and options.get("baseURL"):
         # AI Platform is an OpenAI-compatible /chat/completions endpoint behind a
         # local loopback proxy that injects a fresh short-lived trust token per

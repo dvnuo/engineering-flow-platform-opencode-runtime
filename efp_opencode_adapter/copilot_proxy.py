@@ -6,13 +6,14 @@ from typing import Mapping
 import aiohttp
 from aiohttp import web
 
-from .app_keys import COPILOT_TOKEN_MANAGER_KEY, SETTINGS_KEY
+from .app_keys import COPILOT_AUTO_SESSION_MANAGER_KEY, COPILOT_TOKEN_MANAGER_KEY, SETTINGS_KEY
 from .copilot_plugin_auth import (
     COPILOT_PLUGIN_HEADERS,
     CopilotCredentialMissing,
     CopilotTokenExchangeError,
     redact_copilot_secrets,
 )
+from .copilot_auto_session import CopilotAutoSessionManager, route_auto_request_body
 from .outbound_proxy import outbound_proxy_config_for_url
 
 
@@ -98,6 +99,19 @@ def _upstream_url(base_url: str, tail: str, query_string: str) -> str:
     return url
 
 
+_DEFAULT_AUTO_SESSION_MANAGER: CopilotAutoSessionManager | None = None
+
+
+def _auto_session_manager(app: web.Application) -> CopilotAutoSessionManager:
+    manager = app.get(COPILOT_AUTO_SESSION_MANAGER_KEY)
+    if isinstance(manager, CopilotAutoSessionManager):
+        return manager
+    global _DEFAULT_AUTO_SESSION_MANAGER
+    if _DEFAULT_AUTO_SESSION_MANAGER is None:
+        _DEFAULT_AUTO_SESSION_MANAGER = CopilotAutoSessionManager()
+    return _DEFAULT_AUTO_SESSION_MANAGER
+
+
 async def copilot_proxy_handler(request: web.Request) -> web.StreamResponse:
     if not _request_is_loopback(request):
         return _json_error(403, "forbidden")
@@ -133,6 +147,21 @@ async def copilot_proxy_handler(request: web.Request) -> web.StreamResponse:
         }
     )
     body = await request.read()
+    if request.method == "POST" and body:
+        # Copilot "auto" is routed here the way VS Code does it: the body's
+        # model becomes a concrete GPT-6 id from the auto session's pool and
+        # the session token rides along (see copilot_auto_session). Other
+        # bodies pass through byte for byte.
+        routed = await route_auto_request_body(
+            _auto_session_manager(request.app),
+            body,
+            internal_token,
+            proxy_config=proxy_config,
+        )
+        if routed is not None:
+            body, routing = routed
+            if routing.session_token:
+                outbound_headers["Copilot-Session-Token"] = routing.session_token
 
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), trust_env=proxy_config.trust_env) as session:

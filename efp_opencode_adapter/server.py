@@ -29,6 +29,7 @@ from .app_keys import (
     PENDING_INPUT_KEY,
     COPILOT_TOKEN_MANAGER_KEY,
     AI_PLATFORM_TOKEN_MANAGER_KEY,
+    COPILOT_AUTO_SESSION_MANAGER_KEY,
     BOOT_PROJECTION_KEY,
 )
 
@@ -66,6 +67,7 @@ from .opencode_config import normalize_opencode_provider_id
 from .copilot_plugin_auth import CopilotTokenManager, load_copilot_plugin_credential
 from .copilot_proxy import copilot_proxy_handler
 from .ai_platform_proxy import AIPlatformTokenManager, ai_platform_proxy_handler
+from .copilot_auto_session import CopilotAutoSessionManager
 from .context_api import compact_session_handler, context_usage_handler
 from .path_utils import path_exists
 from .portal_runtime_context_bootstrap import run_boot_projection_from_env
@@ -495,6 +497,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app[TASK_BACKGROUND_TASKS_KEY] = set()
     app[COPILOT_TOKEN_MANAGER_KEY] = CopilotTokenManager(settings)
     app[AI_PLATFORM_TOKEN_MANAGER_KEY] = AIPlatformTokenManager(settings)
+    app[COPILOT_AUTO_SESSION_MANAGER_KEY] = CopilotAutoSessionManager()
     injected_client = opencode_client is not None
     client = opencode_client or OpenCodeClient(settings)
     app[OPENCODE_CLIENT_KEY] = client
