@@ -21,6 +21,7 @@ OPENCODE_PROCESS_MANAGER_KEY = web.AppKey('opencode_process_manager', object)
 OPENCODE_WATCHDOG_TASK_KEY = web.AppKey('opencode_watchdog_task', object)
 COPILOT_TOKEN_MANAGER_KEY = web.AppKey('copilot_token_manager', object)
 AI_PLATFORM_TOKEN_MANAGER_KEY = web.AppKey('ai_platform_token_manager', object)
+COPILOT_AUTO_SESSION_MANAGER_KEY = web.AppKey('copilot_auto_session_manager', object)
 BOOT_PROJECTION_KEY = web.AppKey('boot_projection', object)
 
 REQUEST_BINDING_STORE_KEY = web.AppKey('request_binding_store', object)
