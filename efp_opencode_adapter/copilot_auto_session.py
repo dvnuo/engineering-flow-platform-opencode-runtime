@@ -49,7 +49,7 @@ from .copilot_auto_catalog import (
     clamp_reasoning_effort,
     copilot_model_limits,
     is_auto_model,
-    smallest_model_limits,
+    preferred_model_limits,
     static_model_limits,
 )
 from .copilot_plugin_auth import COPILOT_PLUGIN_HEADERS, CopilotInternalToken, redact_copilot_secrets
@@ -301,12 +301,10 @@ class CopilotAutoSessionManager:
             refusal = auto_pick_refusal(model, decision.metadata, catalog_entry)
             if refusal is not None:
                 return self._remember(key, self._fallback(refusal, tier=tier))
-            limits = smallest_model_limits(
-                (
-                    copilot_model_limits(decision.metadata),
-                    copilot_model_limits(catalog_entry),
-                    static_model_limits(model),
-                )
+            limits = preferred_model_limits(
+                copilot_model_limits(catalog_entry),
+                copilot_model_limits(decision.metadata),
+                static_model_limits(model),
             )
             if limits is None:
                 return self._remember(

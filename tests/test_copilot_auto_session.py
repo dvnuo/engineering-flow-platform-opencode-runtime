@@ -23,7 +23,7 @@ from efp_opencode_adapter.copilot_auto_catalog import (
     auto_tier_for,
     clamp_reasoning_effort,
     copilot_model_limits,
-    smallest_model_limits,
+    preferred_model_limits,
     static_model_limits,
 )
 from efp_opencode_adapter.copilot_auto_session import (
@@ -67,10 +67,13 @@ def _entry(model_id, *, window, prompt, output, efforts=None, endpoints=("/respo
     return entry
 
 
-# What the 2026-10-20 probe saw on a Business seat: /auto embeds OpenAI's
-# published windows, GET /models reports the gateway's smaller ones.
+# What the 2026-10-20 probes saw on a Business seat: /auto and GET /models
+# (with the API-version header) both describe Luna with OpenAI's 1M window;
+# the headerless catalog of the morning had reported 400k, which the
+# precedence test below feeds in as the catalog row.
 LUNA_AUTO = _entry("gpt-6-luna", window=1000000, prompt=872000, output=128000, efforts=("none", "low", "medium", "high", "xhigh", "max"))
-LUNA_CATALOG = _entry("gpt-6-luna", window=400000, prompt=272000, output=128000, efforts=("none", "low", "medium", "high", "xhigh", "max"))
+LUNA_CATALOG = _entry("gpt-6-luna", window=1000000, prompt=872000, output=128000, efforts=("none", "low", "medium", "high", "xhigh", "max"))
+LUNA_OLD_SCHEMA = _entry("gpt-6-luna", window=400000, prompt=272000, output=128000, efforts=("none", "low", "medium", "high", "xhigh", "max"))
 MAI = _entry("mai-code-1.1-flash", window=256000, prompt=128000, output=128000, efforts=("low", "medium", "high"))
 CLAUDE = _entry("claude-sonnet-5.5", window=200000, prompt=150000, output=50000, endpoints=("/chat/completions", "/messages"))
 
@@ -181,8 +184,8 @@ async def test_auto_turn_is_routed_once_and_sent_as_the_picked_model_with_the_se
     assert routing.tier == "balance"
     assert routing.discount == 0.1
     assert routing.session_active is True
-    # The gateway's catalog row says less than the /auto metadata: it wins.
-    assert routing.limits == {"context": 400000, "prompt": 272000, "output": 128000}
+    # The gateway's catalog row is the budget.
+    assert routing.limits == {"context": 1000000, "prompt": 872000, "output": 128000}
     await client.close()
     await upstream.close()
 
@@ -207,6 +210,21 @@ async def test_a_new_user_message_routes_again_with_the_tier_the_id_names(tmp_pa
     assert [json.loads(call["body"])["reasoning"] for call in calls["chat"]] == [{"effort": "high"}, {"effort": "high"}]
     assert [call["headers"]["Copilot-Session-Token"] for call in calls["chat"]] == ["sess-1", "sess-2"]
     assert client.app[COPILOT_AUTO_SESSION_MANAGER_KEY].last_routing.tier == "intelligence"
+    await client.close()
+    await upstream.close()
+
+
+@pytest.mark.asyncio
+async def test_the_catalog_row_is_the_budget_whatever_the_auto_metadata_says(tmp_path, monkeypatch):
+    # The morning's headerless 400k row, fed in as the catalog, beats the 1M
+    # the /auto answer embeds and the pinned 1M row: the gateway's catalog is
+    # the budget in both directions.
+    upstream, calls = await _upstream(selected=LUNA_AUTO, catalog=(LUNA_OLD_SCHEMA,))
+    client = await _client(tmp_path, monkeypatch, upstream)
+    response = await client.post("/api/internal/copilot/responses", json={"model": "auto", "input": "hi"})
+    assert response.status == 200
+    assert _sent_models(calls) == ["gpt-6-luna"]
+    assert client.app[COPILOT_AUTO_SESSION_MANAGER_KEY].last_routing.limits == {"context": 400000, "prompt": 272000, "output": 128000}
     await client.close()
     await upstream.close()
 
@@ -249,7 +267,7 @@ async def test_auto_falls_back_to_the_default_model_when_the_route_is_refused(tm
     routing = client.app[COPILOT_AUTO_SESSION_MANAGER_KEY].last_routing
     assert routing.fallback_reason.startswith("auto route unavailable")
     assert routing.tier == "balance"
-    assert routing.limits == {"context": 400000, "prompt": 272000, "output": 128000}
+    assert routing.limits == {"context": 1000000, "prompt": 872000, "output": 128000}
     await client.close()
     await upstream.close()
 
@@ -375,15 +393,19 @@ def test_parse_auto_decision_validates_the_answer():
 
 
 def test_model_limits_helpers_follow_the_native_runtime():
-    assert copilot_model_limits(LUNA_CATALOG) == {"context": 400000, "prompt": 272000, "output": 128000}
+    assert copilot_model_limits(LUNA_CATALOG) == {"context": 1000000, "prompt": 872000, "output": 128000}
+    assert copilot_model_limits(LUNA_OLD_SCHEMA) == {"context": 400000, "prompt": 272000, "output": 128000}
     assert copilot_model_limits({"id": "x", "capabilities": {"limits": {"max_context_window_tokens": 300000, "max_output_tokens": 50000}}}) == {"context": 300000, "prompt": 250000, "output": 50000}
     assert copilot_model_limits({"id": "x", "capabilities": {"limits": {"max_context_window_tokens": 100000}}}) == {"context": 100000, "prompt": 75000, "output": 25000}
     assert copilot_model_limits({"id": "x", "capabilities": {"limits": {"max_context_window_tokens": "big"}}}) is None
     assert copilot_model_limits({"id": "x"}) is None
-    assert static_model_limits("github-copilot/gpt-6-sol") == {"context": 400000, "prompt": 272000, "output": 128000}
+    assert static_model_limits("github-copilot/gpt-6-sol") == {"context": 1000000, "prompt": 872000, "output": 128000}
+    assert static_model_limits("gpt-6.1-sol") == {"context": 1050000, "prompt": 922000, "output": 128000}
     assert static_model_limits("mai-code-1.1-flash") is None
-    assert smallest_model_limits((copilot_model_limits(LUNA_AUTO), None, copilot_model_limits(LUNA_CATALOG))) == copilot_model_limits(LUNA_CATALOG)
-    assert smallest_model_limits(()) is None
+    # The first source given wins, smaller or larger than the others.
+    assert preferred_model_limits(copilot_model_limits(LUNA_OLD_SCHEMA), copilot_model_limits(LUNA_AUTO)) == copilot_model_limits(LUNA_OLD_SCHEMA)
+    assert preferred_model_limits(None, copilot_model_limits(LUNA_AUTO)) == copilot_model_limits(LUNA_AUTO)
+    assert preferred_model_limits() is None
     assert auto_pick_refusal("m", LUNA_AUTO, None) is None
     assert auto_pick_refusal("m", {"supported_endpoints": ["ws:/responses"]}) is None
     assert "not served on /responses" in auto_pick_refusal("m", CLAUDE)
@@ -417,7 +439,7 @@ async def test_manager_routes_again_inside_the_refresh_margin_and_per_token(monk
     turn = AutoTurn(prompt="hey", conversation_key="c1", turn_index=1, history_chars=10)
     first = await manager.route(token, proxy_config=proxy, turn=turn, tier="balance")
     assert first.model == "gpt-6-luna"
-    assert first.limits == {"context": 400000, "prompt": 272000, "output": 128000}
+    assert first.limits == {"context": 1000000, "prompt": 872000, "output": 128000}
     now[0] = first.expires_at - mod.AUTO_SESSION_REFRESH_MARGIN_SECONDS - 1
     assert await manager.route(token, proxy_config=proxy, turn=turn, tier="balance") is first
     now[0] = first.expires_at - mod.AUTO_SESSION_REFRESH_MARGIN_SECONDS + 1
@@ -446,6 +468,7 @@ def test_opencode_config_declares_the_auto_ids_and_pins_the_gpt_6_limits(tmp_pat
     models = provider_cfg["models"]
     assert set(models) == set(AUTO_MODEL_IDS) | set(COPILOT_MODEL_LIMITS)
     assert models["auto"] == COPILOT_AUTO_MODEL_CONFIGS["auto"]
-    assert models["auto"]["limit"] == {"context": 400000, "output": 128000}
+    assert models["auto"]["limit"] == {"context": 1000000, "output": 128000}
     assert models["auto-intelligence"]["name"] == "Auto (Intelligence)"
-    assert models["gpt-6.1-sol"] == {"limit": {"context": 400000, "output": 128000}}
+    assert models["gpt-6.1-sol"] == {"limit": {"context": 1050000, "output": 128000}}
+    assert models["gpt-6-luna"] == {"limit": {"context": 1000000, "output": 128000}}

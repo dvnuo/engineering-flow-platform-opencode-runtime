@@ -9,7 +9,7 @@ aligned.
 """
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 AUTO_MODEL_ID = "auto"
 # Copilot "auto" is VS Code's routing mode: the turn's prompt and a tier go to
@@ -31,22 +31,27 @@ DEFAULT_AUTO_FALLBACK_MODEL = "gpt-6-sol"
 # auto ids). Copilot's routing may answer with a model outside this list; that
 # pick is admitted on its own metadata (auto_pick_refusal).
 SUPPORTED_COPILOT_MODEL_IDS = ("gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol")
-# Copilot's own catalog (GET /models, Business plan, 2026-10-20) reports
-# 400,000 tokens with a 272,000-token prompt cap and the 128,000-token output
-# cap for the whole GPT-6 line, while models.dev carries OpenAI's 1,050,000.
-# The generated opencode.json pins the gateway's numbers so OpenCode compacts
-# before Copilot refuses a prompt.
+# Copilot's catalog (GET /models with the API-version header, Business plan,
+# 2026-10-20) carries OpenAI's windows for the GPT-6 line: 1,050,000 tokens
+# for Astra and 6.1 Sol, 1,000,000 for Sol and Luna, 128,000 of output held
+# back; its pricing has a 272,000-token base tier and a long-context tier
+# above it, the window being the full one either way. The generated
+# opencode.json carries these so OpenCode's accounting matches the gateway's
+# (models.dev rounds the whole line to 1,050,000).
 COPILOT_MODEL_LIMITS: dict[str, dict[str, int]] = {
-    model: {"context": 400000, "output": 128000} for model in SUPPORTED_COPILOT_MODEL_IDS
+    "gpt-6-astra": {"context": 1050000, "output": 128000},
+    "gpt-6-luna": {"context": 1000000, "output": 128000},
+    "gpt-6-sol": {"context": 1000000, "output": 128000},
+    "gpt-6.1-sol": {"context": 1050000, "output": 128000},
 }
 # What opencode.json declares for the auto ids so OpenCode accepts them. The
 # proxy sends the model Copilot picks per turn; the declared limit is the
 # fallback model's, and a pick whose prompt cap cannot hold the conversation
 # is not admitted (see copilot_auto_session).
 COPILOT_AUTO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
-    AUTO_MODEL_ID: {"name": "Auto (Balance)", "limit": {"context": 400000, "output": 128000}},
-    "auto-efficiency": {"name": "Auto (Efficiency)", "limit": {"context": 400000, "output": 128000}},
-    "auto-intelligence": {"name": "Auto (Intelligence)", "limit": {"context": 400000, "output": 128000}},
+    AUTO_MODEL_ID: {"name": "Auto (Balance)", "limit": {"context": 1000000, "output": 128000}},
+    "auto-efficiency": {"name": "Auto (Efficiency)", "limit": {"context": 1000000, "output": 128000}},
+    "auto-intelligence": {"name": "Auto (Intelligence)", "limit": {"context": 1000000, "output": 128000}},
 }
 COPILOT_AUTO_MODEL_CONFIG = COPILOT_AUTO_MODEL_CONFIGS[AUTO_MODEL_ID]
 
@@ -124,21 +129,20 @@ def static_model_limits(model: Any) -> dict[str, int] | None:
     return {"context": pinned["context"], "prompt": pinned["context"] - pinned["output"], "output": pinned["output"]}
 
 
-def smallest_model_limits(candidates: Iterable[Mapping[str, int] | None]) -> dict[str, int] | None:
-    """The limits with the smallest prompt cap among those given (None skipped).
+def preferred_model_limits(*candidates: Mapping[str, int] | None) -> dict[str, int] | None:
+    """The first limits given, skipping None: the caller lists its sources by trust.
 
-    Copilot describes a model in more than one place (the ``/auto`` answer,
-    ``GET /models``, the pinned rows) and they do not always agree; the
-    smallest cap is the one every description honours.
+    The ``GET /models`` row is the gateway's own statement and comes first,
+    the ``/auto`` answer embeds the same entry and comes next, the pinned rows
+    are the offline default. (Taking the smallest of them instead, as the
+    first cut did, kept the headerless catalog's 400k alive against the
+    gateway's 1M.)
     """
 
-    best: dict[str, int] | None = None
     for candidate in candidates:
-        if not isinstance(candidate, Mapping):
-            continue
-        if best is None or int(candidate["prompt"]) < int(best["prompt"]):
-            best = dict(candidate)
-    return best
+        if isinstance(candidate, Mapping):
+            return dict(candidate)
+    return None
 
 
 def auto_pick_refusal(model: str, *sources: Any) -> str | None:
@@ -225,6 +229,6 @@ __all__ = [
     "clamp_reasoning_effort",
     "copilot_model_limits",
     "is_auto_model",
-    "smallest_model_limits",
+    "preferred_model_limits",
     "static_model_limits",
 ]
