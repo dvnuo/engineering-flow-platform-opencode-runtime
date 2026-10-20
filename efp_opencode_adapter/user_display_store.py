@@ -173,8 +173,9 @@ class UserDisplayStore:
         attribution: dict[str, Any],
     ) -> dict[str, Any]:
         """Remember which model answered an assistant message (``model``,
-        ``requested_model``, ``model_fallback_reason``), so the transcript can
-        show it after a reload; OpenCode's own record only knows ``auto``.
+        ``requested_model``, ``auto_tier``, ``model_fallback_reason``), so the
+        transcript can show it after a reload; OpenCode's own record only
+        knows the auto id.
         """
 
         portal_session_id = str(portal_session_id or "")
@@ -191,7 +192,7 @@ class UserDisplayStore:
             "role": "assistant",
             "metadata": {
                 key_name: value
-                for key_name in ("model", "requested_model", "model_fallback_reason")
+                for key_name in ("model", "requested_model", "auto_tier", "model_fallback_reason")
                 for value in [attribution.get(key_name)]
                 if isinstance(value, str) and value.strip()
             },

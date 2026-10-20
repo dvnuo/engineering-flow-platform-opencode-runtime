@@ -28,7 +28,7 @@ from .app_keys import (
     USER_DISPLAY_STORE_KEY,
 )
 from .attachment_service import build_opencode_attachment_parts
-from .copilot_auto_catalog import DEFAULT_AUTO_FALLBACK_MODEL, is_auto_model
+from .copilot_auto_catalog import DEFAULT_AUTO_FALLBACK_MODEL, auto_tier_for, is_auto_model
 from .inference_settings import normalize_reasoning_effort, reasoning_effort_from_metadata
 from .chat_run_registry import chat_run_registry
 from .opencode_client import OpenCodeClientError
@@ -133,19 +133,23 @@ def _normalize_title(raw: Any) -> str:
 
 
 def _model_attribution(app, model: str | None) -> dict[str, str]:
-    """Which model answered: ``model`` (bare id), plus ``requested_model`` and
-    ``model_fallback_reason`` for a Copilot auto request, read from the proxy's
-    last auto routing (copilot_auto_session). Mirrors the native runner's
-    attribution so the Portal renders both the same way.
+    """Which model answered: ``model`` (bare id), plus ``requested_model`` (the
+    auto id asked for), ``auto_tier`` and ``model_fallback_reason`` for a
+    Copilot auto request, read from the proxy's last auto routing
+    (copilot_auto_session). Mirrors the native runner's attribution so the
+    Portal renders both the same way.
     """
 
     requested = str(model or "").strip()
     bare = requested.split("/", 1)[1] if "/" in requested else requested
     if not is_auto_model(requested):
         return {"model": bare} if bare else {}
-    attribution = {"requested_model": "auto"}
+    attribution = {"requested_model": bare.lower()}
     manager = app.get(COPILOT_AUTO_SESSION_MANAGER_KEY) if app is not None else None
     routing = getattr(manager, "last_routing", None)
+    tier = getattr(routing, "tier", None) or auto_tier_for(bare)
+    if isinstance(tier, str) and tier:
+        attribution["auto_tier"] = tier
     if routing is None:
         attribution["model"] = DEFAULT_AUTO_FALLBACK_MODEL
         attribution["model_fallback_reason"] = "no auto routing recorded for this request"

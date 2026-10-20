@@ -161,7 +161,7 @@ def _is_internal_efp_message(message: Any) -> bool:
     return False
 
 
-ASSISTANT_ATTRIBUTION_KEYS = ("model", "requested_model", "model_fallback_reason")
+ASSISTANT_ATTRIBUTION_KEYS = ("model", "requested_model", "auto_tier", "model_fallback_reason")
 
 
 def _assistant_attribution_record(
