@@ -97,6 +97,8 @@ async def test_auto_request_is_sent_as_the_preferred_pool_model_with_the_session
     assert calls["session"] == 1
     assert calls["session_headers"]["Authorization"] == "Bearer tid=INTERNAL_TOKEN"
     assert calls["session_headers"]["Copilot-Integration-Id"] == "vscode-chat"
+    assert calls["session_headers"]["X-GitHub-Api-Version"] == mod.AUTO_SESSION_API_VERSION
+    assert "Openai-Intent" not in calls["session_headers"]
     assert calls["session_body"] == {"auto_mode": {"model_hints": ["auto"]}}
     sent = [json.loads(call["body"]) for call in calls["chat"]]
     assert [body["model"] for body in sent] == ["gpt-6.1-sol", "gpt-6.1-sol"]

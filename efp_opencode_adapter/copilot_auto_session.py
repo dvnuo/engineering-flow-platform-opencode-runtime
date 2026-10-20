@@ -48,6 +48,10 @@ AUTO_SESSION_PATH = "/models/session"
 # Reopen the session this close to expires_at (VS Code uses the same margin).
 AUTO_SESSION_REFRESH_MARGIN_SECONDS = 300
 AUTO_SESSION_TIMEOUT_SECONDS = 30
+# VS Code's CAPI client (@vscode/copilot-api 0.5.2) stamps this API version on
+# every CAPI request, /models/session included; without it the route answered
+# 404 for a Portal-issued token on 2026-10-20.
+AUTO_SESSION_API_VERSION = "2026-08-01"
 
 
 class CopilotAutoSessionError(RuntimeError):
@@ -176,6 +180,7 @@ class CopilotAutoSessionManager:
             **COPILOT_PLUGIN_HEADERS,
             "Authorization": f"Bearer {internal_token.token}",
             "Accept": "application/json",
+            "X-GitHub-Api-Version": AUTO_SESSION_API_VERSION,
         }
         secrets = [internal_token.token]
         if proxy_config.proxy_url:
