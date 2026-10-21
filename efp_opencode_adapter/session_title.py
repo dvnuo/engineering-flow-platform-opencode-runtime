@@ -50,7 +50,7 @@ from .opencode_message_adapter import message_id as adapter_message_id
 from .opencode_message_adapter import message_role as adapter_message_role
 from .opencode_message_adapter import message_to_visible_text
 from .profile_store import ProfileOverlayStore
-from .session_store import SessionRecord
+from .session_store import SessionRecord, session_id_is_task_session
 from .settings import Settings
 from .thinking_events import safe_preview
 from .usage_tracker import TITLE_TASK_TYPE
@@ -64,9 +64,6 @@ TITLE_MAX_CHARS = 60
 TITLE_INPUT_MAX_CHARS = 1500
 # See the module docstring: the upstream call outlives a client timeout.
 TITLE_TIMEOUT_SECONDS = 30.0
-# Responses counts reasoning tokens against this budget; with effort "low"
-# that leaves room for the title itself.
-TITLE_MAX_OUTPUT_TOKENS = 200
 TITLE_REASONING_EFFORT = "low"
 
 # The cheap model per provider family, keyed by the normalized OpenCode
@@ -92,9 +89,9 @@ TITLE_INSTRUCTIONS = (
     "Reply with the title only."
 )
 
-_TITLE_PREFIX = re.compile(r"^(?:title|session title|session name|name|标题)\s*[:：]\s*", re.IGNORECASE)
-_QUOTES = "\"'`“”‘’「」『』《》"
-_TRAILING_PUNCTUATION = ".。!！"
+_TITLE_PREFIX = re.compile(r"^(?:title|session title|session name|name|\u6807\u9898)\s*[:\uff1a]\s*", re.IGNORECASE)
+_QUOTES = "\"'`\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b"
+_TRAILING_PUNCTUATION = ".\u3002!\uff01"
 _EMPHASIS = re.compile(r"^(\*{1,3}|_{1,3})(.+?)\1$")
 
 
@@ -154,7 +151,7 @@ def clean_title(raw: Any) -> str:
             break
         text = stripped
     if len(text) > TITLE_MAX_CHARS:
-        text = text[: TITLE_MAX_CHARS - 1].rstrip() + "…"
+        text = text[: TITLE_MAX_CHARS - 1].rstrip() + "\u2026"
     return text
 
 
@@ -162,7 +159,7 @@ def _excerpt(text: str) -> str:
     collapsed = re.sub(r"[ \t]+", " ", str(text or "")).strip()
     if len(collapsed) <= TITLE_INPUT_MAX_CHARS:
         return collapsed
-    return collapsed[:TITLE_INPUT_MAX_CHARS].rstrip() + "…"
+    return collapsed[:TITLE_INPUT_MAX_CHARS].rstrip() + "\u2026"
 
 
 def build_title_prompt(user_text: str, assistant_text: str) -> str:
@@ -185,7 +182,13 @@ def build_title_messages(user_text: str, assistant_text: str) -> list[dict[str, 
 
 
 def build_title_request_body(target: TitleTarget, *, user_text: str, assistant_text: str) -> dict[str, Any]:
-    """The one-shot, non-streaming request body in the shape the target's API expects."""
+    """The one-shot, non-streaming request body in the shape the target's API expects.
+
+    The Responses body carries only the fields the native runtime sends to
+    Copilot's ``/responses`` (its payload sanitizer keeps model, input, tools,
+    stream, instructions and reasoning): no output cap, which Copilot has not
+    been seen to accept and which a low-effort reasoning pass could exhaust.
+    """
 
     if target.api == "responses":
         return {
@@ -196,7 +199,6 @@ def build_title_request_body(target: TitleTarget, *, user_text: str, assistant_t
             ],
             "stream": False,
             "reasoning": {"effort": TITLE_REASONING_EFFORT},
-            "max_output_tokens": TITLE_MAX_OUTPUT_TOKENS,
         }
     # AI Platform's gateway refuses reasoning parameters on chat/completions.
     return {
@@ -343,9 +345,15 @@ def first_turn_texts(
     portal_session_id: str = "",
     opencode_session_id: str = "",
 ) -> tuple[str, str]:
-    """The first user message (the member's own words when recorded) and the first assistant text after it."""
+    """The first user message (the member's own words when recorded) and the final answer of that turn.
+
+    A tool-using turn can leave several assistant messages (a preamble with
+    the tool call, then the answer); the title comes from the last assistant
+    text before the next user message, as in the native runtime.
+    """
 
     user_text = ""
+    assistant_text = ""
     for message in messages or []:
         role = adapter_message_role(message)
         if not user_text:
@@ -357,11 +365,15 @@ def first_turn_texts(
                     opencode_session_id=opencode_session_id,
                 )
             continue
-        if role == "assistant":
-            assistant_text = message_to_visible_text(message).strip()
+        if role == "user":
             if assistant_text:
-                return user_text, assistant_text
-    return user_text, ""
+                break
+            continue
+        if role == "assistant":
+            text = message_to_visible_text(message).strip()
+            if text:
+                assistant_text = text
+    return user_text, assistant_text
 
 
 def _user_display_text(message: Any, *, display_store: Any, portal_session_id: str, opencode_session_id: str) -> str:
@@ -471,9 +483,15 @@ def find_title_task(app: web.Application, portal_session_id: str) -> asyncio.Tas
 
 
 def should_generate_after_turn(app: web.Application, record: SessionRecord | None, *, ok: bool, assistant_text: str) -> bool:
-    """A real answered turn in a session that has no name yet and no title call in flight."""
+    """A real answered turn in a chat session that has no name yet and no title call in flight.
+
+    Task and delegation sessions are never listed by name, so they never pay
+    for a title (the native runtime skips the same ids).
+    """
 
     if record is None or record.deleted:
+        return False
+    if session_id_is_task_session(record.portal_session_id):
         return False
     if record.custom_title or record.generated_title:
         return False

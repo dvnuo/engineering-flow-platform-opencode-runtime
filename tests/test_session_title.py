@@ -93,12 +93,12 @@ def _chat_reply(text="Release pipeline permissions", usage=None):
     [
         ('"Release pipeline permissions"', "Release pipeline permissions"),
         ("Title: Release pipeline permissions.", "Release pipeline permissions"),
-        ("“Release   pipeline”\nSecond line ignored", "Release pipeline"),
-        ("标题：发布流水线权限问题。", "发布流水线权限问题"),
+        ("\u201cRelease   pipeline\u201d\nSecond line ignored", "Release pipeline"),
+        ("\u6807\u9898\uff1a\u53d1\u5e03\u6d41\u6c34\u7ebf\u6743\u9650\u95ee\u9898\u3002", "\u53d1\u5e03\u6d41\u6c34\u7ebf\u6743\u9650\u95ee\u9898"),
         ('"Title: Foo"', "Foo"),
         ('"Foo".', "Foo"),
         ("**Foo**", "Foo"),
-        ("_Title: “Foo”._", "Foo"),
+        ("_Title: \u201cFoo\u201d._", "Foo"),
         ("  \n\n  ", ""),
         (None, ""),
     ],
@@ -110,7 +110,7 @@ def test_clean_title_strips_wrappers_until_nothing_changes(raw, expected):
 def test_clean_title_bounds_the_length():
     cleaned = clean_title("x" * 100)
     assert len(cleaned) == session_title.TITLE_MAX_CHARS
-    assert cleaned.endswith("…")
+    assert cleaned.endswith("\u2026")
 
 
 def test_build_title_messages_carry_instructions_and_the_first_turn():
@@ -125,7 +125,7 @@ def test_build_title_messages_carry_instructions_and_the_first_turn():
 
 def test_build_title_messages_cut_long_inputs():
     prompt = build_title_messages("u" * 5000, "a" * 5000)[1]["content"]
-    assert "u" * session_title.TITLE_INPUT_MAX_CHARS + "…" in prompt
+    assert "u" * session_title.TITLE_INPUT_MAX_CHARS + "\u2026" in prompt
     assert "u" * (session_title.TITLE_INPUT_MAX_CHARS + 1) not in prompt
 
 
@@ -139,8 +139,9 @@ def test_request_body_per_family():
         ],
         "stream": False,
         "reasoning": {"effort": "low"},
-        "max_output_tokens": session_title.TITLE_MAX_OUTPUT_TOKENS,
     }
+    # Only the fields the native runtime sends to Copilot's /responses.
+    assert set(copilot) <= {"model", "input", "tools", "stream", "instructions", "reasoning"}
     ai_platform = build_title_request_body(TitleTarget("ai-platform", "gpt-5.6-luna", AI_PLATFORM_BASE), user_text=USER_TEXT, assistant_text=ASSISTANT_TEXT)
     assert ai_platform == {"model": "gpt-5.6-luna", "messages": build_title_messages(USER_TEXT, ASSISTANT_TEXT), "stream": False}
     assert "reasoning" not in ai_platform and "max_output_tokens" not in ai_platform
@@ -369,6 +370,19 @@ def test_first_turn_texts_reads_the_first_answered_turn():
     assert first_turn_texts([]) == ("", "")
 
 
+def test_first_turn_texts_pairs_the_question_with_the_final_answer_of_its_turn():
+    # A tool-using turn: a preamble, then the answer; the next user message
+    # starts the second turn.
+    messages = [
+        {"id": "u1", "role": "user", "parts": [{"type": "text", "text": USER_TEXT}]},
+        {"id": "a1", "role": "assistant", "parts": [{"type": "text", "text": "Let me read the pipeline log."}]},
+        {"id": "a2", "role": "assistant", "parts": [{"type": "text", "text": ASSISTANT_TEXT}]},
+        {"id": "u2", "role": "user", "parts": [{"type": "text", "text": "later"}]},
+        {"id": "a3", "role": "assistant", "parts": [{"type": "text", "text": "a later answer"}]},
+    ]
+    assert first_turn_texts(messages) == (USER_TEXT, ASSISTANT_TEXT)
+
+
 def test_first_turn_texts_prefers_the_members_own_words():
     class _Display:
         def get_user_message(self, *, opencode_session_id, opencode_message_id, portal_session_id=None):
@@ -493,8 +507,11 @@ def test_should_generate_after_a_real_answered_turn(tmp_path, monkeypatch):
         (_record(custom_title="Mine"), True, "a"),
         (_record(generated_title="Done"), True, "a"),
         (_record(deleted=True), True, "a"),
+        (_record(pid="task-123"), True, "a"),
+        (_record(pid="delegation:9"), True, "a"),
+        (_record(pid="agent-task-abc"), True, "a"),
     ],
-    ids=["no record", "not ok (incomplete, blocked or synthetic)", "no answer text", "manual name", "already generated", "deleted"],
+    ids=["no record", "not ok (incomplete, blocked or synthetic)", "no answer text", "manual name", "already generated", "deleted", "task session", "delegation session", "agent task session"],
 )
 def test_should_not_generate(tmp_path, monkeypatch, record, ok, assistant_text):
     app = _app(tmp_path, monkeypatch)
