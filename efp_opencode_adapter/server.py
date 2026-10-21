@@ -87,10 +87,12 @@ from .sessions_api import (
     delete_session_handler,
     edit_message_async_handler,
     edit_message_handler,
+    generate_session_title_handler,
     get_session_handler,
     list_sessions_handler,
     rename_session_handler,
     session_chatlog_handler,
+    session_name_handler,
 )
 from .settings import (
     PROFILE_CONFIG_ENV,
@@ -553,6 +555,8 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/api/sessions/{session_id}/context-usage", context_usage_handler)
     app.router.add_post("/api/sessions/{session_id}/compact", compact_session_handler)
     app.router.add_post("/api/sessions/{session_id}/rename", rename_session_handler)
+    app.router.add_get("/api/sessions/{session_id}/name", session_name_handler)
+    app.router.add_post("/api/sessions/{session_id}/title/generate", generate_session_title_handler)
     app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/edit/async", edit_message_async_handler)
     app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/edit", edit_message_handler)
     app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/delete-from-here", delete_message_from_here_handler)

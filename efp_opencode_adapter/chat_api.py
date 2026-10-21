@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import logging
@@ -43,7 +44,8 @@ from .opencode_message_adapter import (
     message_to_visible_text,
 )
 from .repository_workspace import ensure_repo_checkout, parse_create_pr_repo_request
-from .session_store import SessionDeletedError, SessionRecord
+from .session_store import SessionDeletedError, SessionRecord, session_title_metadata, session_title_metadata_for
+from .session_title import schedule_session_title, should_generate_after_turn
 from .skill_invocation import build_skill_prompt, evaluate_skill_invocation, parse_slash_invocation
 from .thinking_events import safe_preview, utc_now_iso
 from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
@@ -270,18 +272,17 @@ async def _ensure_record_for_chat(*, client, store, portal_session_id: str, titl
 
     created = await client.create_session(title=existing.title or title)
     sid = _require_opencode_session_id(created, action="partial_recovery_create_session")
-    recovered = SessionRecord(
-        existing.portal_session_id,
-        sid,
-        existing.title or title,
-        agent or existing.agent,
-        model or existing.model,
-        existing.created_at,
-        utc_now_iso(),
-        existing.last_message,
-        existing.message_count,
-        False,
-        True,
+    # Every other field (the manual and generated titles among them) survives
+    # the move to the new OpenCode session.
+    recovered = dataclasses.replace(
+        existing,
+        opencode_session_id=sid,
+        title=existing.title or title,
+        agent=agent or existing.agent,
+        model=model or existing.model,
+        updated_at=utc_now_iso(),
+        deleted=False,
+        partial_recovery=True,
     )
     store.upsert(recovered)
     return recovered, True
@@ -971,7 +972,7 @@ async def handle_chat_payload_for_app(
             request_id=request_id,
             summary="Chat started",
             runtime_events=runtime_events,
-            metadata={"opencode_session_id": record.opencode_session_id, "trace_context": trace_context},
+            metadata={"opencode_session_id": record.opencode_session_id, "trace_context": trace_context, **session_title_metadata(record)},
         )
         before_messages: list[dict[str, Any]] = []
         try:
@@ -1214,8 +1215,20 @@ async def handle_chat_payload_for_app(
                 "context_state": final_context,
                 "usage": usage_record,
                 "trace_context": trace_context,
+                **session_title_metadata(updated),
             },
         )
+        if should_generate_after_turn(app, updated, ok=ok, assistant_text=assistant_text):
+            # The first real answered turn names the session in the background
+            # from the texts at hand; the Portal reads the name back through
+            # GET /api/sessions/{id}/name.
+            schedule_session_title(
+                app,
+                portal_session_id,
+                user_text=message,
+                assistant_text=assistant_text,
+                runtime_profile=runtime_profile,
+            )
         return {
             "ok": ok,
             "completion_state": completion_state,
@@ -1285,7 +1298,7 @@ async def handle_chat_payload_for_app(
             request_id=request_id,
             summary=str(exc),
             runtime_events=runtime_events,
-            metadata={"engine": "opencode", "trace_context": trace_context},
+            metadata={"engine": "opencode", "trace_context": trace_context, **session_title_metadata_for(store, portal_session_id)},
         )
         raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
     except web.HTTPException:

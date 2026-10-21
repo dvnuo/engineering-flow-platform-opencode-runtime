@@ -13,14 +13,26 @@ from .app_keys import (
     OPENCODE_CLIENT_KEY,
     PORTAL_METADATA_CLIENT_KEY,
     SESSION_STORE_KEY,
-    TASK_BACKGROUND_TASKS_KEY,
     USER_DISPLAY_STORE_KEY,
 )
 
-from .chat_api import handle_chat_payload_for_app, portal_author_metadata_from_request
+from .background_tasks import track_background_task
+from .chat_api import (
+    _metadata_from_payload,
+    _runtime_profile_from_metadata,
+    handle_chat_payload_for_app,
+    portal_author_metadata_from_request,
+)
 from .opencode_client import OpenCodeClientError
 from .opencode_ids import new_opencode_message_id
 from .opencode_message_adapter import message_to_visible_text, to_efp_message
+from .session_store import (
+    session_display_name,
+    session_id_is_task_session,
+    session_name_source,
+    session_title_metadata_for,
+)
+from .session_title import TitleGenerationError, find_title_task, generate_session_title, schedule_title_publish
 from .thinking_events import safe_preview, utc_now_iso
 
 
@@ -522,23 +534,6 @@ async def _fork_session_preserving_prefix(
     )
 
 
-TASK_SESSION_ID_PREFIXES = (
-    "agent-task:",
-    "agent-task-",
-    "generic-task:",
-    "generic-task-",
-    "delegation:",
-    "delegation-",
-    "task-",
-)
-
-
-def _session_id_is_task_session(session_id: object) -> bool:
-    if not isinstance(session_id, str):
-        return False
-    return session_id.strip().startswith(TASK_SESSION_ID_PREFIXES)
-
-
 def _request_includes_task_sessions(request: web.Request) -> bool:
     raw = str(request.query.get("include_task_sessions", "") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
@@ -551,7 +546,7 @@ async def list_sessions_handler(request: web.Request) -> web.Response:
         (
             record
             for record in store.list_active()
-            if include_task_sessions or not _session_id_is_task_session(record.portal_session_id)
+            if include_task_sessions or not session_id_is_task_session(record.portal_session_id)
         ),
         key=lambda x: x.updated_at,
         reverse=True,
@@ -561,7 +556,8 @@ async def list_sessions_handler(request: web.Request) -> web.Response:
             "sessions": [
                 {
                     "session_id": r.portal_session_id,
-                    "name": r.title,
+                    "name": session_display_name(r),
+                    "name_source": session_name_source(r),
                     "last_message": r.last_message,
                     "updated_at": r.updated_at,
                     "message_count": r.message_count,
@@ -696,7 +692,8 @@ async def get_session_handler(request: web.Request) -> web.Response:
             "source_of_truth": "opencode",
             "session_id": sid,
             "opencode_session_id": record.opencode_session_id,
-            "name": record.title,
+            "name": session_display_name(record),
+            "name_source": session_name_source(record),
             "messages": efp_messages,
             "canonical_messages": canonical_messages,
             "metadata": {
@@ -743,7 +740,71 @@ async def rename_session_handler(request: web.Request) -> web.Response:
     except OpenCodeClientError as exc:
         if exc.status != 404:
             raise web.HTTPBadGateway(text=json.dumps({"error": "opencode_error", "detail": str(exc)}), content_type="application/json")
-    return web.json_response({"success": True, "session_id": sid, "name": title})
+    # The Portal keeps its own copy of the name for a stopped pod; told in
+    # the background so the rename never waits on it.
+    schedule_title_publish(request.app, sid, title)
+    return web.json_response({"success": True, **_session_name_payload(updated)})
+
+
+def _session_name_payload(record) -> dict[str, Any]:
+    return {
+        "session_id": record.portal_session_id,
+        "name": session_display_name(record),
+        "name_source": session_name_source(record),
+    }
+
+
+async def session_name_handler(request: web.Request) -> web.Response:
+    """The session's display name and where it came from, without its history.
+
+    GET /api/sessions/{session_id}/name
+    Returns: {"session_id", "name", "name_source": custom|generated|derived|none}
+
+    The Portal asks this after a session's first turn, when the title may
+    still be generating in the background.
+    """
+    sid = request.match_info["session_id"]
+    record = request.app[SESSION_STORE_KEY].get(sid)
+    if not record or record.deleted:
+        raise _json_not_found("session_not_found")
+    return web.json_response(_session_name_payload(record))
+
+
+async def generate_session_title_handler(request: web.Request) -> web.Response:
+    """Generate the session's title now, from its first answered turn.
+
+    POST /api/sessions/{session_id}/title/generate
+    Body: {"force": true} replaces a generated title; a manual name always stays.
+    Returns: the name payload plus "generated": whether a new title was stored.
+    """
+    sid = request.match_info["session_id"]
+    store = request.app[SESSION_STORE_KEY]
+    record = store.get(sid)
+    if not record or record.deleted:
+        raise _json_not_found("session_not_found")
+    body = await _read_json_object(request, error_prefix="title_payload") if request.can_read_body else {}
+    force = bool(body.get("force"))
+    runtime_profile = _runtime_profile_from_metadata(_metadata_from_payload(body)) or None
+
+    running = find_title_task(request.app, sid)
+    if running is not None:
+        # The first turn's background call is still at work: its answer is
+        # the one to return, not a second model call for the same session.
+        await asyncio.shield(running)
+        latest = store.get(sid) or record
+        generated = bool(latest.generated_title) and latest.generated_title != record.generated_title
+        return web.json_response({"success": True, "generated": generated, **_session_name_payload(latest)})
+
+    try:
+        title = await generate_session_title(request.app, sid, runtime_profile=runtime_profile, force=force)
+    except KeyError:
+        raise _json_not_found("session_not_found")
+    except TitleGenerationError as exc:
+        return web.json_response({"success": False, "error": exc.message}, status=exc.status_code)
+    if title:
+        schedule_title_publish(request.app, sid, title)
+    latest = store.get(sid) or record
+    return web.json_response({"success": True, "generated": title is not None, **_session_name_payload(latest)})
 
 
 async def delete_session_handler(request: web.Request) -> web.Response:
@@ -999,6 +1060,7 @@ async def _record_async_edit_failure(
                     "edited_message_id": edited_message_id,
                     "replacement_user_message_id": replacement_user_message_id,
                     "source": "message_edit_async",
+                    **session_title_metadata_for(app.get(SESSION_STORE_KEY), session_id),
                 },
             )
         except Exception:
@@ -1035,13 +1097,6 @@ async def _run_async_edit_resend(
             replacement_user_message_id=replacement_user_message_id,
             error=error,
         )
-
-
-def _track_background_task(app: web.Application, task: asyncio.Task) -> None:
-    task_set = app.get(TASK_BACKGROUND_TASKS_KEY)
-    if isinstance(task_set, set):
-        task_set.add(task)
-        task.add_done_callback(task_set.discard)
 
 
 async def _edit_message_async_from_body(request: web.Request, body: dict[str, Any]) -> web.Response:
@@ -1115,7 +1170,7 @@ async def _edit_message_async_from_body(request: web.Request, body: dict[str, An
                 replacement_user_message_id=replacement_user_message_id,
             )
         )
-        _track_background_task(request.app, task)
+        track_background_task(request.app, task)
     except Exception as exc:
         if task is not None:
             task.cancel()
