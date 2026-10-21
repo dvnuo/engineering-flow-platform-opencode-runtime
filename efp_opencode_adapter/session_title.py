@@ -73,9 +73,9 @@ TITLE_INSTRUCTIONS = (
     "Reply with the title only."
 )
 
-_TITLE_PREFIX = re.compile(r"^(?:title|session title|session name|name|标题)\s*[:：]\s*", re.IGNORECASE)
-_QUOTES = "\"'`“”‘’「」『』《》"
-_TRAILING_PUNCTUATION = ".。!！"
+_TITLE_PREFIX = re.compile(r"^(?:title|session title|session name|name|\u6807\u9898)\s*[:\uff1a]\s*", re.IGNORECASE)
+_QUOTES = "\"'`\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b"
+_TRAILING_PUNCTUATION = ".\u3002!\uff01"
 
 _inflight: set[str] = set()
 
@@ -118,7 +118,7 @@ def clean_title(raw: Any) -> str:
     text = re.sub(r"\s+", " ", text)
     text = text.rstrip(_TRAILING_PUNCTUATION).strip()
     if len(text) > TITLE_MAX_CHARS:
-        text = text[: TITLE_MAX_CHARS - 1].rstrip() + "…"
+        text = text[: TITLE_MAX_CHARS - 1].rstrip() + "\u2026"
     return text
 
 
@@ -126,7 +126,7 @@ def _excerpt(text: str) -> str:
     collapsed = re.sub(r"[ \t]+", " ", str(text or "")).strip()
     if len(collapsed) <= TITLE_INPUT_MAX_CHARS:
         return collapsed
-    return collapsed[:TITLE_INPUT_MAX_CHARS].rstrip() + "…"
+    return collapsed[:TITLE_INPUT_MAX_CHARS].rstrip() + "\u2026"
 
 
 def build_title_messages(user_text: str, assistant_text: str) -> list[dict[str, str]]:

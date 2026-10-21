@@ -72,8 +72,8 @@ def _clear_inflight():
     [
         ('"Release pipeline permissions"', "Release pipeline permissions"),
         ("Title: Release pipeline permissions.", "Release pipeline permissions"),
-        ("“Release   pipeline”\nSecond line ignored", "Release pipeline"),
-        ("标题：发布流水线权限问题。", "发布流水线权限问题"),
+        ("\u201cRelease   pipeline\u201d\nSecond line ignored", "Release pipeline"),
+        ("\u6807\u9898\uff1a\u53d1\u5e03\u6d41\u6c34\u7ebf\u6743\u9650\u95ee\u9898\u3002", "\u53d1\u5e03\u6d41\u6c34\u7ebf\u6743\u9650\u95ee\u9898"),
         ("  \n\n  ", ""),
         (None, ""),
     ],
@@ -85,7 +85,7 @@ def test_clean_title_strips_quotes_prefixes_and_periods(raw, expected):
 def test_clean_title_bounds_the_length():
     cleaned = clean_title("x" * 100)
     assert len(cleaned) == session_title.TITLE_MAX_CHARS
-    assert cleaned.endswith("…")
+    assert cleaned.endswith("\u2026")
 
 
 def test_build_title_messages_carry_instructions_and_the_first_turn():
@@ -100,7 +100,7 @@ def test_build_title_messages_carry_instructions_and_the_first_turn():
 
 def test_build_title_messages_cut_long_inputs():
     prompt = build_title_messages("u" * 5000, "a" * 5000)[1]["content"]
-    assert "u" * session_title.TITLE_INPUT_MAX_CHARS + "…" in prompt
+    assert "u" * session_title.TITLE_INPUT_MAX_CHARS + "\u2026" in prompt
     assert "u" * (session_title.TITLE_INPUT_MAX_CHARS + 1) not in prompt
 
 
