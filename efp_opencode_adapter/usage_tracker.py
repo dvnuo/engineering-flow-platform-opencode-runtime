@@ -114,6 +114,31 @@ class UsageTracker:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         return rec
 
+    def record_session_title(self, *, session_id: str, model: str | None, provider: str | None, usage: Any) -> dict:
+        """The one-shot title call after a session's first turn (session_title.py); one request, no messages.
+
+        ``usage`` is the reply's usage block itself or a payload that carries one.
+        """
+        raw = usage if isinstance(usage, dict) else {}
+        usage = _extract_usage(raw) or raw
+        rec = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "type": "session_title",
+            "session_id": session_id,
+            "request_id": "",
+            "model": model or "unknown",
+            "provider": provider or "unknown",
+            "requests": 1,
+            "messages": 0,
+            "input_tokens": _safe_int(usage.get("input_tokens") or usage.get("prompt_tokens")),
+            "output_tokens": _safe_int(usage.get("output_tokens") or usage.get("completion_tokens")),
+            "cost": _safe_float(usage.get("cost") or usage.get("total_cost")),
+        }
+        self.usage_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.usage_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        return rec
+
     def summarize(self, *, days: int = 30) -> dict:
         days = min(365, max(1, int(days)))
         cutoff = datetime.now(UTC) - timedelta(days=days)

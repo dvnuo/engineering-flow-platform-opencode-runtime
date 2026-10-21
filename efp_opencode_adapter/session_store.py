@@ -29,6 +29,8 @@ def _safe_int(value, default: int = 0) -> int:
 class SessionRecord:
     portal_session_id: str
     opencode_session_id: str
+    # The title the OpenCode session was created with (the first message cut
+    # short); kept for compatibility, shown only when nothing better exists.
     title: str
     agent: str | None
     model: str | None
@@ -38,6 +40,52 @@ class SessionRecord:
     message_count: int
     deleted: bool = False
     partial_recovery: bool = False
+    # A manual rename. Always wins and is never overwritten by generation.
+    custom_title: str | None = None
+    # The title generated after the first answered turn (session_title.py).
+    generated_title: str | None = None
+
+
+# Sessions that belong to a Portal task or delegation rather than a chat.
+TASK_SESSION_ID_PREFIXES = (
+    "agent-task:",
+    "agent-task-",
+    "generic-task:",
+    "generic-task-",
+    "delegation:",
+    "delegation-",
+    "task-",
+)
+
+
+def session_id_is_task_session(session_id: object) -> bool:
+    if not isinstance(session_id, str):
+        return False
+    return session_id.strip().startswith(TASK_SESSION_ID_PREFIXES)
+
+
+def _clean_name(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def session_display_name(record: SessionRecord) -> str:
+    """Manual name, then the generated title, then the title the session was created with."""
+
+    return _clean_name(record.custom_title) or _clean_name(record.generated_title) or _clean_name(record.title) or "Chat"
+
+
+def session_name_source(record: SessionRecord) -> str:
+    """Where ``session_display_name`` came from: custom, generated, derived or none."""
+
+    if _clean_name(record.custom_title):
+        return "custom"
+    if _clean_name(record.generated_title):
+        return "generated"
+    if _clean_name(record.title):
+        return "derived"
+    return "none"
 
 
 class SessionDeletedError(RuntimeError):
@@ -106,6 +154,9 @@ class SessionStore:
                     "message_count": _safe_int(raw.get("message_count")),
                     "deleted": bool(raw.get("deleted", False)),
                     "partial_recovery": bool(raw.get("partial_recovery", False)),
+                    # Records written before titles were generated have neither key.
+                    "custom_title": _clean_name(raw.get("custom_title")),
+                    "generated_title": _clean_name(raw.get("generated_title")),
                 }
             except Exception:
                 continue
@@ -142,7 +193,14 @@ class SessionStore:
 
     def rename(self, portal_session_id: str, title: str) -> SessionRecord:
         record = self._sessions[portal_session_id]
-        updated = SessionRecord(**{**asdict(record), "title": title, "updated_at": _utc_now_iso()})
+        updated = SessionRecord(**{**asdict(record), "title": title, "custom_title": title, "updated_at": _utc_now_iso()})
+        return self.upsert(updated)
+
+    def set_generated_title(self, portal_session_id: str, title: str) -> SessionRecord:
+        """Store the generated title; the created title and any manual name stay as they are."""
+
+        record = self._sessions[portal_session_id]
+        updated = SessionRecord(**{**asdict(record), "generated_title": _clean_name(title), "updated_at": _utc_now_iso()})
         return self.upsert(updated)
 
     def mark_deleted(self, portal_session_id: str) -> SessionRecord | None:
@@ -208,5 +266,7 @@ class SessionStore:
             message_count=max(0, int(message_count)),
             deleted=False,
             partial_recovery=record.partial_recovery,
+            custom_title=record.custom_title,
+            generated_title=record.generated_title,
         )
         return self.upsert(updated)

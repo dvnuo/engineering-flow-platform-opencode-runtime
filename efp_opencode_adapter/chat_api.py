@@ -43,7 +43,8 @@ from .opencode_message_adapter import (
     message_to_visible_text,
 )
 from .repository_workspace import ensure_repo_checkout, parse_create_pr_repo_request
-from .session_store import SessionDeletedError, SessionRecord
+from .session_store import SessionDeletedError, SessionRecord, session_display_name, session_name_source
+from .session_title import schedule_session_title, should_generate_after_turn
 from .skill_invocation import build_skill_prompt, evaluate_skill_invocation, parse_slash_invocation
 from .thinking_events import safe_preview, utc_now_iso
 from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
@@ -130,6 +131,14 @@ def _optional_str(value: Any) -> str | None:
 
 def _normalize_title(raw: Any) -> str:
     return re.sub(r"\s+", " ", raw if isinstance(raw, str) else "").strip() or "Chat"
+
+
+def _session_title_metadata(record: SessionRecord) -> dict[str, str]:
+    """``session_title`` for the Portal publish: the manual or generated name, never the derived one."""
+
+    if session_name_source(record) in {"custom", "generated"}:
+        return {"session_title": session_display_name(record)}
+    return {}
 
 
 def _model_attribution(app, model: str | None) -> dict[str, str]:
@@ -1214,8 +1223,13 @@ async def handle_chat_payload_for_app(
                 "context_state": final_context,
                 "usage": usage_record,
                 "trace_context": trace_context,
+                **_session_title_metadata(updated),
             },
         )
+        if should_generate_after_turn(record, completion_state=completion_state, assistant_text=assistant_text):
+            # The first answered turn names the session in the background;
+            # the Portal reads the name back through GET /api/sessions/{id}/name.
+            schedule_session_title(app, portal_session_id, runtime_profile=runtime_profile)
         return {
             "ok": ok,
             "completion_state": completion_state,

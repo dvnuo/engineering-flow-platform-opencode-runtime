@@ -31,6 +31,43 @@ class PortalMetadataClient:
         sid = quote(session_id, safe="")
         return f"{base_url}/api/internal/agents/{agent}/sessions/{sid}/metadata"
 
+    def _title_url(self, session_id: str) -> str:
+        base_url = (self.settings.portal_internal_base_url or "").rstrip("/")
+        agent = quote(self.settings.portal_agent_id or "", safe="")
+        sid = quote(session_id, safe="")
+        return f"{base_url}/api/internal/agents/{agent}/sessions/{sid}/title"
+
+    async def publish_session_title(self, *, session_id: str, title: str) -> dict:
+        """Tell the Portal the session's name changed (generated after the first turn, or regenerated).
+
+        Best effort like the metadata publish, but a PATCH of the title alone:
+        the full publish replaces every column of the Portal's row, and a title
+        arrives in the background with no run state to send alongside it. A
+        Portal without the endpoint answers 404 and still learns the name with
+        the next full publish (``session_title`` in the metadata).
+        """
+        normalized_title = str(title or "").strip()
+        if not self.settings.portal_internal_base_url or not self.settings.portal_agent_id or not normalized_title:
+            return {"success": False, "skipped": True}
+        url = self._title_url(session_id)
+        headers = self._headers()
+        payload = {"title": normalized_title}
+        timeout = aiohttp.ClientTimeout(total=self.settings.portal_metadata_timeout_seconds)
+        try:
+            if self._session is not None:
+                resp = await self._session.patch(url, json=payload, headers=headers, timeout=timeout)
+                async with resp:
+                    if 200 <= resp.status < 300:
+                        return {"success": True, "status": resp.status}
+                    return {"success": False, "status": resp.status, "error": safe_preview(await resp.text())}
+            async with aiohttp.ClientSession() as s:
+                async with s.patch(url, json=payload, headers=headers, timeout=timeout) as resp:
+                    if 200 <= resp.status < 300:
+                        return {"success": True, "status": resp.status}
+                    return {"success": False, "status": resp.status, "error": safe_preview(await resp.text())}
+        except Exception as exc:
+            return {"success": False, "error": safe_preview(str(exc))}
+
     async def _parse_delete_response(self, resp) -> dict:
         payload = None
         try:
