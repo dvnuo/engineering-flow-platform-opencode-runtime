@@ -86,6 +86,17 @@ def _copilot_credential_present(llm: dict) -> bool:
     return bool(_clean_string(llm.get("api_key")))
 
 
+def loopback_proxy_base_url(settings: Settings | None, provider: str) -> str:
+    """The adapter's own proxy for a provider family ("" for a family it does not front)."""
+
+    resolved = settings or Settings.from_env()
+    if provider == "github-copilot":
+        return resolved.copilot_proxy_base_url.strip().rstrip("/")
+    if provider == "ai-platform":
+        return resolved.ai_platform_proxy_base_url.strip().rstrip("/")
+    return ""
+
+
 def provider_config_from_runtime_profile(runtime_config: dict, settings: Settings | None = None) -> dict:
     llm = runtime_config.get("llm") if isinstance(runtime_config.get("llm"), dict) else {}
     provider = normalize_opencode_provider_id(llm.get("provider"))
@@ -98,11 +109,11 @@ def provider_config_from_runtime_profile(runtime_config: dict, settings: Setting
     options: dict[str, object] = {}
     base_url = llm.get("base_url") or llm.get("api_base") or llm.get("baseURL") or llm.get("endpoint")
     if provider == "github-copilot" and _copilot_credential_present(llm):
-        proxy_base_url = (settings.copilot_proxy_base_url if settings else Settings.from_env().copilot_proxy_base_url).strip().rstrip("/")
+        proxy_base_url = loopback_proxy_base_url(settings, provider)
         if proxy_base_url:
             options["baseURL"] = proxy_base_url
     elif provider == "ai-platform" and _ai_platform_credential_present(llm):
-        proxy_base_url = (settings.ai_platform_proxy_base_url if settings else Settings.from_env().ai_platform_proxy_base_url).strip().rstrip("/")
+        proxy_base_url = loopback_proxy_base_url(settings, provider)
         if proxy_base_url:
             options["baseURL"] = proxy_base_url
     elif isinstance(base_url, str) and base_url.strip():

@@ -8,11 +8,18 @@ same endpoints (GET /api/sessions/{id}/name, POST
 /api/sessions/{id}/title/generate); and the same best-effort PATCH that tells
 the Portal the name.
 
-The model call goes through the adapter's own loopback proxies
-(/api/internal/copilot, /api/internal/ai-platform), which already carry the
-member's credentials and outbound proxy settings, with a cheap model.
+The model call goes through the adapter's own loopback proxies, which already
+carry the member's credentials and outbound proxy settings, with a cheap
+model: the Copilot family on ``/responses`` (the GPT-6 line is served there
+only, the way OpenCode itself reaches it) and AI Platform on
+``/chat/completions`` (its gateway is an OpenAI-compatible chat endpoint).
 Everything here is best effort: a timeout or a provider error leaves the
 session as it was, and nothing blocks or fails the chat turn that triggered it.
+
+A client-side timeout does not stop the upstream call: the loopback proxy
+handler keeps running after this side gives up (aiohttp's
+``handler_cancellation`` is off), so a title that times out is still billed
+and simply never stored. The timeout is generous for that reason.
 """
 
 from __future__ import annotations
@@ -31,19 +38,22 @@ from .app_keys import (
     PORTAL_METADATA_CLIENT_KEY,
     SESSION_STORE_KEY,
     SETTINGS_KEY,
-    TASK_BACKGROUND_TASKS_KEY,
     USAGE_TRACKER_KEY,
     USER_DISPLAY_STORE_KEY,
 )
+from .background_tasks import find_background_task, track_background_task
+from .copilot_auto_catalog import is_auto_model
+from .copilot_plugin_auth import provider_from_runtime_config
 from .opencode_client import OpenCodeClientError
-from .opencode_config import normalize_opencode_provider_id
+from .opencode_config import loopback_proxy_base_url, normalize_opencode_provider_id
 from .opencode_message_adapter import message_id as adapter_message_id
 from .opencode_message_adapter import message_role as adapter_message_role
 from .opencode_message_adapter import message_to_visible_text
 from .profile_store import ProfileOverlayStore
-from .session_store import SessionRecord, session_id_is_task_session
+from .session_store import SessionRecord
 from .settings import Settings
 from .thinking_events import safe_preview
+from .usage_tracker import TITLE_TASK_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -52,14 +62,23 @@ logger = logging.getLogger(__name__)
 TITLE_MAX_CHARS = 60
 # Of each side of the first turn. A title needs the gist, not the transcript.
 TITLE_INPUT_MAX_CHARS = 1500
-TITLE_TIMEOUT_SECONDS = 10.0
-TITLE_TASK_TYPE = "session_title"
+# See the module docstring: the upstream call outlives a client timeout.
+TITLE_TIMEOUT_SECONDS = 30.0
+# Responses counts reasoning tokens against this budget; with effort "low"
+# that leaves room for the title itself.
+TITLE_MAX_OUTPUT_TOKENS = 200
+TITLE_REASONING_EFFORT = "low"
 
 # The cheap model per provider family, keyed by the normalized OpenCode
 # provider id. ``llm.title_model`` in the runtime profile overrides both.
 TITLE_MODELS = {
     "github-copilot": "gpt-6-luna",
     "ai-platform": "gpt-5.6-luna",
+}
+# Which OpenAI-style API each family's proxy serves for a one-shot call.
+TITLE_APIS = {
+    "github-copilot": "responses",
+    "ai-platform": "chat",
 }
 
 TITLE_INSTRUCTIONS = (
@@ -73,11 +92,10 @@ TITLE_INSTRUCTIONS = (
     "Reply with the title only."
 )
 
-_TITLE_PREFIX = re.compile(r"^(?:title|session title|session name|name|\u6807\u9898)\s*[:\uff1a]\s*", re.IGNORECASE)
-_QUOTES = "\"'`\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b"
-_TRAILING_PUNCTUATION = ".\u3002!\uff01"
-
-_inflight: set[str] = set()
+_TITLE_PREFIX = re.compile(r"^(?:title|session title|session name|name|标题)\s*[:：]\s*", re.IGNORECASE)
+_QUOTES = "\"'`“”‘’「」『』《》"
+_TRAILING_PUNCTUATION = ".。!！"
+_EMPHASIS = re.compile(r"^(\*{1,3}|_{1,3})(.+?)\1$")
 
 
 class TitleGenerationError(RuntimeError):
@@ -91,19 +109,38 @@ class TitleGenerationError(RuntimeError):
 
 @dataclass(frozen=True)
 class TitleTarget:
-    """Which loopback proxy and model answer the title call."""
+    """Which loopback proxy, API and model answer the title call."""
 
     provider: str
     model: str
     base_url: str
 
     @property
+    def api(self) -> str:
+        return TITLE_APIS.get(self.provider, "chat")
+
+    @property
     def url(self) -> str:
-        return f"{self.base_url.rstrip('/')}/chat/completions"
+        leaf = "responses" if self.api == "responses" else "chat/completions"
+        return f"{self.base_url.rstrip('/')}/{leaf}"
+
+
+def _strip_once(text: str) -> str:
+    text = _TITLE_PREFIX.sub("", text).strip()
+    text = text.strip(_QUOTES).strip()
+    emphasised = _EMPHASIS.match(text)
+    if emphasised:
+        text = emphasised.group(2).strip()
+    text = text.rstrip(_TRAILING_PUNCTUATION).strip()
+    return re.sub(r"\s+", " ", text)
 
 
 def clean_title(raw: Any) -> str:
-    """The model's reply as a name: first line, no quotes, no prefix, no period, bounded."""
+    """The model's reply as a name: first line, no quotes, prefix, emphasis or period, bounded.
+
+    The wrappers nest in any order ('"Title: Foo"', '"Foo".', '**Foo**'), so
+    the stripping repeats until nothing changes.
+    """
 
     text = ""
     for line in str(raw or "").splitlines():
@@ -111,14 +148,13 @@ def clean_title(raw: Any) -> str:
         if candidate:
             text = candidate
             break
-    if not text:
-        return ""
-    text = _TITLE_PREFIX.sub("", text).strip()
-    text = text.strip(_QUOTES).strip()
-    text = re.sub(r"\s+", " ", text)
-    text = text.rstrip(_TRAILING_PUNCTUATION).strip()
+    while text:
+        stripped = _strip_once(text)
+        if stripped == text:
+            break
+        text = stripped
     if len(text) > TITLE_MAX_CHARS:
-        text = text[: TITLE_MAX_CHARS - 1].rstrip() + "\u2026"
+        text = text[: TITLE_MAX_CHARS - 1].rstrip() + "…"
     return text
 
 
@@ -126,23 +162,48 @@ def _excerpt(text: str) -> str:
     collapsed = re.sub(r"[ \t]+", " ", str(text or "")).strip()
     if len(collapsed) <= TITLE_INPUT_MAX_CHARS:
         return collapsed
-    return collapsed[:TITLE_INPUT_MAX_CHARS].rstrip() + "\u2026"
+    return collapsed[:TITLE_INPUT_MAX_CHARS].rstrip() + "…"
 
 
-def build_title_messages(user_text: str, assistant_text: str) -> list[dict[str, str]]:
-    """The one-shot chat/completions messages: instructions plus the first turn's excerpts."""
-
-    prompt = (
+def build_title_prompt(user_text: str, assistant_text: str) -> str:
+    return (
         "User message:\n"
         f"{_excerpt(user_text)}\n\n"
         "Assistant answer:\n"
         f"{_excerpt(assistant_text)}\n\n"
         "Title:"
     )
+
+
+def build_title_messages(user_text: str, assistant_text: str) -> list[dict[str, str]]:
+    """The instructions plus the first turn's excerpts, as chat/completions messages."""
+
     return [
         {"role": "system", "content": TITLE_INSTRUCTIONS},
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": build_title_prompt(user_text, assistant_text)},
     ]
+
+
+def build_title_request_body(target: TitleTarget, *, user_text: str, assistant_text: str) -> dict[str, Any]:
+    """The one-shot, non-streaming request body in the shape the target's API expects."""
+
+    if target.api == "responses":
+        return {
+            "model": target.model,
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": TITLE_INSTRUCTIONS}]},
+                {"role": "user", "content": [{"type": "input_text", "text": build_title_prompt(user_text, assistant_text)}]},
+            ],
+            "stream": False,
+            "reasoning": {"effort": TITLE_REASONING_EFFORT},
+            "max_output_tokens": TITLE_MAX_OUTPUT_TOKENS,
+        }
+    # AI Platform's gateway refuses reasoning parameters on chat/completions.
+    return {
+        "model": target.model,
+        "messages": build_title_messages(user_text, assistant_text),
+        "stream": False,
+    }
 
 
 def _llm_config(runtime_profile: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -173,17 +234,33 @@ def _llm_config_from_overlay(settings: Settings) -> dict[str, Any]:
 
 
 def _provider_id(llm: Mapping[str, Any]) -> str:
-    provider = llm.get("provider")
-    if isinstance(provider, str) and provider.strip():
-        return normalize_opencode_provider_id(provider)
-    model = llm.get("model")
-    if isinstance(model, str) and "/" in model:
-        return normalize_opencode_provider_id(model.split("/", 1)[0])
-    return ""
+    return provider_from_runtime_config({"llm": llm}) or ""
+
+
+def _title_model(provider: str, llm: Mapping[str, Any]) -> str:
+    """The family default, unless ``llm.title_model`` names a usable model of the same family."""
+
+    default = TITLE_MODELS[provider]
+    override = llm.get("title_model")
+    if not isinstance(override, str) or not override.strip():
+        return default
+    override = override.strip()
+    if is_auto_model(override):
+        # An auto id would route the one-shot call through POST /auto and a
+        # session token it has no use for.
+        logger.warning("llm.title_model %r is an auto id; using %s for session titles", override, default)
+        return default
+    if "/" in override:
+        prefix, bare = override.split("/", 1)
+        if normalize_opencode_provider_id(prefix) != provider:
+            logger.warning("llm.title_model %r names another provider; using %s for session titles", override, default)
+            return default
+        override = bare.strip() or default
+    return override
 
 
 def resolve_title_target(settings: Settings, runtime_profile: Mapping[str, Any] | None = None) -> TitleTarget | None:
-    """The proxy and model for a title call, or None when the configured provider has no loopback proxy."""
+    """The proxy, API and model for a title call, or None when the configured provider has no loopback proxy."""
 
     llm = _llm_config(runtime_profile)
     if not _provider_id(llm):
@@ -191,52 +268,43 @@ def resolve_title_target(settings: Settings, runtime_profile: Mapping[str, Any] 
     provider = _provider_id(llm)
     if provider not in TITLE_MODELS:
         return None
-    base_url = settings.copilot_proxy_base_url if provider == "github-copilot" else settings.ai_platform_proxy_base_url
-    base_url = str(base_url or "").strip().rstrip("/")
+    base_url = loopback_proxy_base_url(settings, provider)
     if not base_url:
         return None
-    override = llm.get("title_model")
-    model = override.strip() if isinstance(override, str) and override.strip() else TITLE_MODELS[provider]
-    if "/" in model:
-        model = model.split("/", 1)[1]
-    return TitleTarget(provider=provider, model=model, base_url=base_url)
+    return TitleTarget(provider=provider, model=_title_model(provider, llm), base_url=base_url)
 
 
-def _content_text(content: Any) -> str:
+def _text_parts(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        chunks = []
-        for item in content:
-            if isinstance(item, Mapping):
-                text = item.get("text")
-                if isinstance(text, str):
-                    chunks.append(text)
-            elif isinstance(item, str):
-                chunks.append(item)
-        return "".join(chunks)
+        return "".join(
+            str(item.get("text"))
+            for item in content
+            if isinstance(item, Mapping) and isinstance(item.get("text"), str)
+        )
     return ""
 
 
-def extract_completion_text(payload: Any) -> str:
-    """The assistant text of a chat/completions reply (choices[0].message.content), or ""."""
+def extract_reply_text(payload: Any, *, api: str) -> str:
+    """The assistant text of a reply: Responses ``output[]`` message parts, or chat ``choices[0].message.content``."""
 
     if not isinstance(payload, Mapping):
         return ""
+    if api == "responses":
+        chunks = []
+        for item in payload.get("output") or []:
+            if not isinstance(item, Mapping) or item.get("type") != "message":
+                continue
+            for part in item.get("content") or []:
+                if isinstance(part, Mapping) and part.get("type") == "output_text" and isinstance(part.get("text"), str):
+                    chunks.append(part["text"])
+        return "".join(chunks)
     choices = payload.get("choices")
-    if isinstance(choices, list) and choices:
-        first = choices[0] if isinstance(choices[0], Mapping) else {}
-        message = first.get("message") if isinstance(first.get("message"), Mapping) else {}
-        text = _content_text(message.get("content"))
-        if text:
-            return text
-        text = _content_text(first.get("text"))
-        if text:
-            return text
-    output_text = payload.get("output_text")
-    if isinstance(output_text, str):
-        return output_text
-    return _content_text(payload.get("content"))
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
+        return ""
+    message = choices[0].get("message")
+    return _text_parts(message.get("content")) if isinstance(message, Mapping) else ""
 
 
 async def request_title(
@@ -246,32 +314,26 @@ async def request_title(
     assistant_text: str,
     timeout: float = TITLE_TIMEOUT_SECONDS,
 ) -> tuple[str, dict[str, Any]]:
-    """One non-streaming chat/completions call through the loopback proxy: (text, usage)."""
+    """One non-streaming call through the loopback proxy: (text, usage)."""
 
-    payload = {
-        "model": target.model,
-        "messages": build_title_messages(user_text, assistant_text),
-        "stream": False,
-    }
+    body = build_title_request_body(target, user_text=user_text, assistant_text=assistant_text)
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
-            async with session.post(target.url, json=payload) as response:
-                body = await response.read()
+            async with session.post(target.url, json=body) as response:
+                raw = await response.read()
                 if response.status >= 400:
-                    preview = safe_preview(body.decode("utf-8", errors="replace"), 300)
+                    preview = safe_preview(raw.decode("utf-8", errors="replace"), 300)
                     raise TitleGenerationError(f"Title provider answered {response.status}: {preview}")
                 try:
                     data = await response.json(content_type=None)
                 except Exception as exc:  # noqa: BLE001 - a non-JSON body is a provider failure
                     raise TitleGenerationError("Title provider returned a non-JSON reply.") from exc
-    except TitleGenerationError:
-        raise
     except asyncio.TimeoutError as exc:
         raise TitleGenerationError(f"Title generation timed out after {timeout:g}s.", status_code=504) from exc
     except aiohttp.ClientError as exc:
         raise TitleGenerationError(f"Title generation failed: {exc}") from exc
     usage = data.get("usage") if isinstance(data, Mapping) and isinstance(data.get("usage"), Mapping) else {}
-    return extract_completion_text(data), dict(usage)
+    return extract_reply_text(data, api=target.api), dict(usage)
 
 
 def first_turn_texts(
@@ -323,12 +385,15 @@ def _user_display_text(message: Any, *, display_store: Any, portal_session_id: s
 
 
 def _record_usage(app: web.Application, *, session_id: str, target: TitleTarget, usage: Mapping[str, Any]) -> None:
-    tracker = app.get(USAGE_TRACKER_KEY)
-    record = getattr(tracker, "record_session_title", None)
-    if not callable(record) or not usage:
-        return
+    """One usage row per title call, with zero tokens when the reply carried no usage block."""
+
     try:
-        record(session_id=session_id, model=target.model, provider=target.provider, usage=dict(usage))
+        app[USAGE_TRACKER_KEY].record_session_title(
+            session_id=session_id,
+            model=target.model,
+            provider=target.provider,
+            usage=dict(usage or {}),
+        )
     except Exception:  # noqa: BLE001 - accounting never fails a title
         logger.debug("session title usage was not recorded", exc_info=True)
 
@@ -339,14 +404,17 @@ async def generate_session_title(
     *,
     runtime_profile: Mapping[str, Any] | None = None,
     force: bool = False,
-    timeout: float = TITLE_TIMEOUT_SECONDS,
+    user_text: str | None = None,
+    assistant_text: str | None = None,
 ) -> str | None:
     """Generate and store a title for the session; the stored name, or None when nothing changed.
 
-    None means the session keeps the name it has: a manual name exists, or a
-    generated one does and ``force`` is false. An unknown or deleted session
-    raises ``KeyError``; no answered turn, no usable provider, a provider
-    failure and a timeout raise ``TitleGenerationError``.
+    The first turn's texts are read from OpenCode unless the caller already has
+    them (the background path right after the turn). None means the session
+    keeps the name it has: a manual name exists, or a generated one does and
+    ``force`` is false. An unknown or deleted session raises ``KeyError``; no
+    answered turn, no usable provider, a provider failure and a timeout raise
+    ``TitleGenerationError``.
     """
 
     store = app[SESSION_STORE_KEY]
@@ -362,21 +430,22 @@ async def generate_session_title(
     if target is None:
         raise TitleGenerationError("No model proxy is configured for session titles.")
 
-    client = app[OPENCODE_CLIENT_KEY]
-    try:
-        messages = await client.list_messages(record.opencode_session_id)
-    except OpenCodeClientError as exc:
-        raise TitleGenerationError(f"Could not read the session from OpenCode: {exc}") from exc
-    user_text, assistant_text = first_turn_texts(
-        messages,
-        display_store=app.get(USER_DISPLAY_STORE_KEY),
-        portal_session_id=portal_session_id,
-        opencode_session_id=record.opencode_session_id,
-    )
+    if not user_text or not assistant_text:
+        try:
+            messages = await app[OPENCODE_CLIENT_KEY].list_messages(record.opencode_session_id)
+        except OpenCodeClientError as exc:
+            raise TitleGenerationError(f"Could not read the session from OpenCode: {exc}") from exc
+        user_text, assistant_text = first_turn_texts(
+            messages,
+            display_store=app.get(USER_DISPLAY_STORE_KEY),
+            portal_session_id=portal_session_id,
+            opencode_session_id=record.opencode_session_id,
+        )
     if not user_text or not assistant_text:
         raise TitleGenerationError("The session has no completed turn to name yet.", status_code=422)
 
-    text, usage = await request_title(target, user_text=user_text, assistant_text=assistant_text, timeout=timeout)
+    text, usage = await request_title(target, user_text=user_text, assistant_text=assistant_text)
+    _record_usage(app, session_id=portal_session_id, target=target, usage=usage)
     title = clean_title(text)
     if not title:
         raise TitleGenerationError("The model returned no usable title.")
@@ -388,49 +457,54 @@ async def generate_session_title(
     if latest.custom_title:
         return None
     store.set_generated_title(portal_session_id, title)
-    _record_usage(app, session_id=portal_session_id, target=target, usage=usage)
     return title
 
 
-def should_generate_after_turn(record_before: SessionRecord | None, *, completion_state: str, assistant_text: str) -> bool:
-    """Only the first completed chat turn with an answer, in a session not yet named."""
+def title_task_name(portal_session_id: str) -> str:
+    return f"session-title:{portal_session_id}"
 
-    if record_before is None or record_before.deleted:
+
+def find_title_task(app: web.Application, portal_session_id: str) -> asyncio.Task | None:
+    """The title generation already running for this session, if any."""
+
+    return find_background_task(app, title_task_name(portal_session_id))
+
+
+def should_generate_after_turn(app: web.Application, record: SessionRecord | None, *, ok: bool, assistant_text: str) -> bool:
+    """A real answered turn in a session that has no name yet and no title call in flight."""
+
+    if record is None or record.deleted:
         return False
-    if session_id_is_task_session(record_before.portal_session_id):
+    if record.custom_title or record.generated_title:
         return False
-    if str(completion_state or "").strip().lower() != "completed":
+    if ok is not True or not str(assistant_text or "").strip():
         return False
-    if not str(assistant_text or "").strip():
-        return False
-    if record_before.message_count > 0:
-        return False
-    if record_before.custom_title or record_before.generated_title:
-        return False
-    return True
+    return find_title_task(app, record.portal_session_id) is None
 
 
 def schedule_session_title(
     app: web.Application,
     portal_session_id: str,
     *,
+    user_text: str,
+    assistant_text: str,
     runtime_profile: Mapping[str, Any] | None = None,
 ) -> asyncio.Task | None:
-    """Start the title call in the background; the task, or None when there is nothing to call."""
+    """Start the title call in the background; the task, or None when one is already running."""
 
-    if portal_session_id in _inflight:
+    if find_title_task(app, portal_session_id) is not None:
         return None
-    if resolve_title_target(app[SETTINGS_KEY], runtime_profile) is None:
-        return None
-    _inflight.add(portal_session_id)
     task = asyncio.create_task(
-        _generate_in_background(app, portal_session_id, runtime_profile=runtime_profile),
-        name=f"session-title:{portal_session_id}",
+        _generate_in_background(
+            app,
+            portal_session_id,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            runtime_profile=runtime_profile,
+        ),
+        name=title_task_name(portal_session_id),
     )
-    task_set = app.get(TASK_BACKGROUND_TASKS_KEY)
-    if isinstance(task_set, set):
-        task_set.add(task)
-        task.add_done_callback(task_set.discard)
+    track_background_task(app, task)
     return task
 
 
@@ -438,10 +512,21 @@ async def _generate_in_background(
     app: web.Application,
     portal_session_id: str,
     *,
+    user_text: str,
+    assistant_text: str,
     runtime_profile: Mapping[str, Any] | None,
 ) -> None:
+    if resolve_title_target(app[SETTINGS_KEY], runtime_profile) is None:
+        logger.debug("Session %s keeps its derived name: no model proxy for titles", portal_session_id)
+        return
     try:
-        title = await generate_session_title(app, portal_session_id, runtime_profile=runtime_profile)
+        title = await generate_session_title(
+            app,
+            portal_session_id,
+            runtime_profile=runtime_profile,
+            user_text=user_text,
+            assistant_text=assistant_text,
+        )
         if title:
             logger.info("Session %s titled: %s", portal_session_id, title)
             await publish_title_to_portal(app, portal_session_id, title)
@@ -451,34 +536,45 @@ async def _generate_in_background(
         raise
     except Exception:  # noqa: BLE001 - best effort, never a crash
         logger.warning("Session %s keeps its derived name (title generation failed)", portal_session_id, exc_info=True)
-    finally:
-        _inflight.discard(portal_session_id)
 
 
 async def publish_title_to_portal(app: web.Application, portal_session_id: str, title: str) -> None:
-    client = app.get(PORTAL_METADATA_CLIENT_KEY)
-    publish = getattr(client, "publish_session_title", None)
-    if not callable(publish):
-        return
+    """Tell the Portal the name; the client logs a failure and the next full publish carries the name anyway."""
+
     try:
-        await publish(session_id=portal_session_id, title=title)
-    except Exception:  # noqa: BLE001 - the Portal learns the name on the next publish anyway
-        logger.debug("session title publish failed", exc_info=True)
+        await app[PORTAL_METADATA_CLIENT_KEY].publish_session_title(session_id=portal_session_id, title=title)
+    except Exception:  # noqa: BLE001
+        logger.warning("Session %s: the Portal was not told the new name", portal_session_id, exc_info=True)
+
+
+def schedule_title_publish(app: web.Application, portal_session_id: str, title: str) -> asyncio.Task:
+    """The Portal PATCH as a tracked background task, so a request never waits on the Portal."""
+
+    task = asyncio.create_task(
+        publish_title_to_portal(app, portal_session_id, title),
+        name=f"session-title-publish:{portal_session_id}",
+    )
+    track_background_task(app, task)
+    return task
 
 
 __all__ = [
     "TITLE_INSTRUCTIONS",
     "TITLE_MODELS",
+    "TITLE_TASK_TYPE",
     "TitleGenerationError",
     "TitleTarget",
     "build_title_messages",
+    "build_title_request_body",
     "clean_title",
-    "extract_completion_text",
+    "extract_reply_text",
+    "find_title_task",
     "first_turn_texts",
     "generate_session_title",
     "publish_title_to_portal",
     "request_title",
     "resolve_title_target",
     "schedule_session_title",
+    "schedule_title_publish",
     "should_generate_after_turn",
 ]

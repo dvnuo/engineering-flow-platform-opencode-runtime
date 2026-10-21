@@ -13,6 +13,7 @@ from .app_keys import (
 )
 
 from .opencode_client import OpenCodeClientError, _permission_response_from_body
+from .session_store import session_title_metadata_for
 from .thinking_events import build_thinking_event
 from .trace_context import add_trace_context, build_trace_context
 
@@ -86,6 +87,7 @@ async def permission_respond_handler(request: web.Request) -> web.Response:
                     "decision": body.get("decision", ""),
                     "response": payload.get("response", ""),
                     "trace_context": trace_context,
+                    **session_title_metadata_for(request.app.get(SESSION_STORE_KEY), sid),
                 },
             )
         except Exception:
@@ -316,6 +318,7 @@ async def _publish_permission_resolved(
                 "decision": decision,
                 "response": payload.get("response", ""),
                 "trace_context": trace_context,
+                **session_title_metadata_for(request.app.get(SESSION_STORE_KEY), session_id),
             },
         )
     except Exception:

@@ -88,6 +88,30 @@ def session_name_source(record: SessionRecord) -> str:
     return "none"
 
 
+def session_title_metadata(record: SessionRecord | None) -> dict[str, str]:
+    """``session_title`` for a Portal metadata publish: the manual or generated name, never the derived one.
+
+    Every publish replaces the Portal's whole metadata column, so every publish
+    that has the record at hand sends the name again.
+    """
+
+    if record is None or session_name_source(record) not in {"custom", "generated"}:
+        return {}
+    return {"session_title": session_display_name(record)}
+
+
+def session_title_metadata_for(store: "SessionStore | None", portal_session_id: str | None) -> dict[str, str]:
+    """``session_title_metadata`` for a session id, {} when the store has no such record."""
+
+    if store is None or not portal_session_id:
+        return {}
+    try:
+        record = store.get(portal_session_id)
+    except Exception:  # noqa: BLE001 - a publish never fails over the name
+        return {}
+    return session_title_metadata(record)
+
+
 class SessionDeletedError(RuntimeError):
     pass
 
@@ -197,10 +221,15 @@ class SessionStore:
         return self.upsert(updated)
 
     def set_generated_title(self, portal_session_id: str, title: str) -> SessionRecord:
-        """Store the generated title; the created title and any manual name stay as they are."""
+        """Store the generated title; the created title and any manual name stay as they are.
+
+        ``updated_at`` is the sessions list's sort key and is left alone: a
+        title arriving in the background, or a forced regenerate, must not
+        move the session to the top.
+        """
 
         record = self._sessions[portal_session_id]
-        updated = SessionRecord(**{**asdict(record), "generated_title": _clean_name(title), "updated_at": _utc_now_iso()})
+        updated = SessionRecord(**{**asdict(record), "generated_title": _clean_name(title)})
         return self.upsert(updated)
 
     def mark_deleted(self, portal_session_id: str) -> SessionRecord | None:

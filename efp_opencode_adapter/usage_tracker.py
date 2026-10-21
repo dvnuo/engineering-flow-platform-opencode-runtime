@@ -8,6 +8,9 @@ from pathlib import Path
 
 UTC = timezone.utc
 
+# The usage row type of the one-shot session title call (session_title.py).
+TITLE_TASK_TYPE = "session_title"
+
 
 def _extract_usage(payload: Any) -> dict:
     if isinstance(payload, list):
@@ -90,46 +93,16 @@ class UsageTracker:
     def __init__(self, usage_file: Path):
         self.usage_file = usage_file
 
-    def record_chat(self, *, session_id: str, request_id: str, model: str | None, provider: str | None, response_payload: Any, input_text: str, output_text: str) -> dict:
-        usage = _extract_usage(response_payload or {})
-        input_tokens = _safe_int(usage.get("input_tokens") or usage.get("prompt_tokens"))
-        output_tokens = _safe_int(usage.get("output_tokens") or usage.get("completion_tokens"))
-        cost = _safe_float(usage.get("cost") or usage.get("total_cost"))
-
+    def _write_row(self, *, row_type: str, session_id: str, request_id: str, model: str, provider: str, messages: int, usage: dict) -> dict:
         rec = {
             "timestamp": datetime.now(UTC).isoformat(),
-            "type": "chat",
+            "type": row_type,
             "session_id": session_id,
             "request_id": request_id,
-            "model": model or _extract_text_field(response_payload, "model") or "unknown",
-            "provider": provider or _extract_text_field(response_payload, "provider") or "unknown",
+            "model": model,
+            "provider": provider,
             "requests": 1,
-            "messages": 2,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cost": cost,
-        }
-        self.usage_file.parent.mkdir(parents=True, exist_ok=True)
-        with self.usage_file.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        return rec
-
-    def record_session_title(self, *, session_id: str, model: str | None, provider: str | None, usage: Any) -> dict:
-        """The one-shot title call after a session's first turn (session_title.py); one request, no messages.
-
-        ``usage`` is the reply's usage block itself or a payload that carries one.
-        """
-        raw = usage if isinstance(usage, dict) else {}
-        usage = _extract_usage(raw) or raw
-        rec = {
-            "timestamp": datetime.now(UTC).isoformat(),
-            "type": "session_title",
-            "session_id": session_id,
-            "request_id": "",
-            "model": model or "unknown",
-            "provider": provider or "unknown",
-            "requests": 1,
-            "messages": 0,
+            "messages": messages,
             "input_tokens": _safe_int(usage.get("input_tokens") or usage.get("prompt_tokens")),
             "output_tokens": _safe_int(usage.get("output_tokens") or usage.get("completion_tokens")),
             "cost": _safe_float(usage.get("cost") or usage.get("total_cost")),
@@ -138,6 +111,34 @@ class UsageTracker:
         with self.usage_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         return rec
+
+    def record_chat(self, *, session_id: str, request_id: str, model: str | None, provider: str | None, response_payload: Any, input_text: str, output_text: str) -> dict:
+        return self._write_row(
+            row_type="chat",
+            session_id=session_id,
+            request_id=request_id,
+            model=model or _extract_text_field(response_payload, "model") or "unknown",
+            provider=provider or _extract_text_field(response_payload, "provider") or "unknown",
+            messages=2,
+            usage=_extract_usage(response_payload or {}),
+        )
+
+    def record_session_title(self, *, session_id: str, model: str | None, provider: str | None, usage: Any) -> dict:
+        """The one-shot title call after a session's first turn (session_title.py): one request, no messages.
+
+        ``usage`` is the reply's usage block itself or a payload that carries
+        one; a reply without one still counts as a request with zero tokens.
+        """
+        raw = usage if isinstance(usage, dict) else {}
+        return self._write_row(
+            row_type=TITLE_TASK_TYPE,
+            session_id=session_id,
+            request_id="",
+            model=model or "unknown",
+            provider=provider or "unknown",
+            messages=0,
+            usage=_extract_usage(raw) or raw,
+        )
 
     def summarize(self, *, days: int = 30) -> dict:
         days = min(365, max(1, int(days)))
