@@ -68,6 +68,23 @@ Portal clone the repo a second time.
 Both files are optional. A branch without them returns
 `{"welcome": null, "cards": []}` and Portal falls back to its generic welcome.
 
+## Chat attachments
+
+- `/api/chat` `attachments` are file ids from `/api/files/upload`. Text-like
+  files are parsed into the prompt; PDFs go to OpenCode as file parts, and so
+  do images while the chat provider can see them (AI Platform, or Copilot
+  with `EFP_COPILOT_VISION_VIA_CHAT=1`). The boot projection records that
+  as `vision_via_chat`, shown under `runtime_integrations.attachments` in the
+  effective-config view.
+- Images the provider cannot see, and the office formats the adapter does not
+  parse (`application/msword`, `application/vnd.ms-excel`: doc, dot, xls),
+  stay under the workspace and are described to the agent in an "Attached
+  files" handoff block instead (`efp_opencode_adapter/attachment_handoff.py`).
+  This runtime has no browser tool, so the block tells the agent the files
+  cannot be analyzed here and never to guess what they show; the native
+  runtime with the Local bridge connector analyzes them through Productivity
+  Suite.
+
 ## Interactive input contract
 Portal drives its approval card off the session rather than the permission id:
 it polls `/api/sessions/{session_id}/pending-input` to rebuild a card after a
@@ -158,8 +175,8 @@ there is no apply endpoint and no hot-apply path.
   adapter's copilot and AI Platform loopback proxies through `EFP_LLM_PROXY`
   (`none`, or a URL) and `EFP_LLM_NO_PROXY`; the other connectors' proxies
   travel in their own tool config (`EFP_<PRODUCT>_INSTANCES_<i>_PROXY`,
-  mobile-auto's `browserstack.http_proxy`/`local`, inspect-image's
-  `api.proxy`). Every proxy's credentials are exported as
+  mobile-auto's `browserstack.http_proxy`/`local`). Every proxy's
+  credentials are exported as
   `EFP_PROXY_<NAME>_USERNAME`/`_PASSWORD` for mobile-auto. The flat
   `proxy.url` shape of older profiles reads as one proxy named `default`.
   See `efp_opencode_adapter/proxy_plan.py`.

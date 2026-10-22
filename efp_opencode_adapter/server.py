@@ -297,11 +297,11 @@ async def effective_config_handler(request: web.Request) -> web.Response:
                     "llm_proxy_present": str(runtime_env.get("EFP_LLM_PROXY") or "").strip().lower() not in {"", "none", "direct", "off"},
                 },
                 "aws": {"enabled": bool(aws_status.get("configured"))},
-                "image-analysis": {
-                    **(overlay.image_analysis if overlay and overlay.image_analysis else {"configured": False, "reason": "boot projection not recorded", "model": None, "config_path": None}),
-                    "vision_via_chat": overlay.vision_via_chat if overlay else True,
-                    "config_env_present": bool(runtime_env.get("INSPECT_IMAGE_CONFIG")),
-                },
+                # Images reach the model as file parts only when the chat
+                # provider can see them; otherwise they, and the office formats
+                # the adapter does not parse, are handed to the agent for the
+                # attached-files analysis skill.
+                "attachments": {"vision_via_chat": overlay.vision_via_chat if overlay else True},
                 "mobile-auto": {
                     "enabled": bool((mobile_cfg and mobile_cfg.get("enabled") is not False) or (overlay and overlay.mobile_cli_configured)),
                     "config_path": str(settings.efp_config_path),
@@ -600,9 +600,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
             "warnings": list(projection.warnings),
             "env_hash": projection.env_hash,
             "env": dict(projection.env),
-            # chat_api: inline images only when the chat provider can see
-            # them, and tell the agent whether inspect-image is configured.
-            "image_analysis": dict(projection.image_analysis),
+            # chat_api: inline images only when the chat provider can see them.
             "vision_via_chat": projection.vision_via_chat,
         }
         # The profile's debug settings are projected for the child; apply them
