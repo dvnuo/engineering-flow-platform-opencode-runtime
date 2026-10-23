@@ -666,13 +666,12 @@ async def _build_chat_parts(app: web.Application, *, portal_session_id: str, mes
     if not attachments:
         return parts, attachment_debug
     # The boot projection recorded whether the chat provider can see images
-    # (AI Platform can; Copilot cannot since vision was disabled) and whether
-    # inspect-image is configured. Without a projection (dev, tests) images
-    # are inlined as before.
+    # (AI Platform can; Copilot cannot since vision was disabled). Without a
+    # projection (dev, tests) images are inlined as before; the files the
+    # model cannot read are described to the agent in a handoff block.
     boot_snapshot = app.get(BOOT_PROJECTION_KEY)
     boot_snapshot = boot_snapshot if isinstance(boot_snapshot, dict) else {}
     inline_images = bool(boot_snapshot.get("vision_via_chat", True))
-    image_analysis = boot_snapshot.get("image_analysis") if isinstance(boot_snapshot.get("image_analysis"), dict) else None
     try:
         attachment_parts, attachment_debug = build_opencode_attachment_parts(
             app.get(ATTACHMENT_SERVICE_KEY),
@@ -681,7 +680,6 @@ async def _build_chat_parts(app: web.Application, *, portal_session_id: str, mes
             max_text_chars=30000,
             max_inline_bytes=10 * 1024 * 1024,
             inline_images=inline_images,
-            image_analysis=image_analysis,
         )
         parts.extend(attachment_parts)
     except Exception as exc:
