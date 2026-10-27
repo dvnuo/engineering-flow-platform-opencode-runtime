@@ -30,6 +30,7 @@ from .app_keys import (
     COPILOT_TOKEN_MANAGER_KEY,
     AI_PLATFORM_TOKEN_MANAGER_KEY,
     COPILOT_AUTO_SESSION_MANAGER_KEY,
+    COPILOT_QUOTA_CACHE_KEY,
     BOOT_PROJECTION_KEY,
 )
 
@@ -66,6 +67,7 @@ from .usage_tracker import UsageTracker
 from .opencode_config import normalize_opencode_provider_id
 from .copilot_plugin_auth import CopilotTokenManager, load_copilot_plugin_credential
 from .copilot_proxy import copilot_proxy_handler
+from .copilot_quota import CopilotQuotaCache, copilot_quota_handler
 from .ai_platform_proxy import AIPlatformTokenManager, ai_platform_proxy_handler
 from .copilot_auto_session import CopilotAutoSessionManager
 from .context_api import compact_session_handler, context_usage_handler
@@ -500,6 +502,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app[COPILOT_TOKEN_MANAGER_KEY] = CopilotTokenManager(settings)
     app[AI_PLATFORM_TOKEN_MANAGER_KEY] = AIPlatformTokenManager(settings)
     app[COPILOT_AUTO_SESSION_MANAGER_KEY] = CopilotAutoSessionManager()
+    app[COPILOT_QUOTA_CACHE_KEY] = CopilotQuotaCache()
     injected_client = opencode_client is not None
     client = opencode_client or OpenCodeClient(settings)
     app[OPENCODE_CLIENT_KEY] = client
@@ -544,6 +547,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_post("/api/tasks/{task_id}/cancel", cancel_task_handler)
     app.router.add_get("/api/events", events_ws_handler)
     app.router.add_get("/api/usage", usage_handler)
+    app.router.add_get("/api/copilot/quota", copilot_quota_handler)
     app.router.add_post("/api/permissions/{permission_id}/respond", permission_respond_handler)
     app.router.add_get("/api/sessions", list_sessions_handler)
     app.router.add_post("/api/clear", clear_sessions_handler)

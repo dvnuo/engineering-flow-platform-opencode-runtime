@@ -255,3 +255,58 @@ async def test_proxy_errors_are_redacted(tmp_path, monkeypatch):
     assert "Authorization" not in text
 
     await client.close()
+
+
+async def _capturing_upstream():
+    captured = []
+
+    async def upstream_handler(request):
+        captured.append({"path_qs": request.path_qs, "headers": request.headers, "body": await request.text()})
+        return web.json_response({"ok": True})
+
+    upstream_app = web.Application()
+    upstream_app.router.add_route("*", "/{tail:.*}", upstream_handler)
+    upstream = TestServer(upstream_app)
+    await upstream.start_server()
+    return upstream, captured
+
+
+@pytest.mark.asyncio
+async def test_proxy_passes_opencodes_own_initiator_through(tmp_path, monkeypatch):
+    # OpenCode marks the first model call of a member's turn "user" and the
+    # tool-loop continuations "agent" (VS Code's semantics); the proxy keeps
+    # that label instead of relabelling everything "agent".
+    upstream, captured = await _capturing_upstream()
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = _proxy_app(Settings.from_env(), StaticTokenManager(str(upstream.make_url("/")).rstrip("/")))
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    user_turn = await client.post("/api/internal/copilot/responses", headers={"X-Initiator": "User"}, data=b"{}")
+    agent_turn = await client.post("/api/internal/copilot/responses", headers={"x-initiator": "agent"}, data=b"{}")
+
+    assert user_turn.status == 200 and agent_turn.status == 200
+    assert captured[0]["headers"].getall("x-initiator") == ["user"]
+    assert captured[1]["headers"].getall("x-initiator") == ["agent"]
+
+    await client.close()
+    await upstream.close()
+
+
+@pytest.mark.asyncio
+async def test_proxy_labels_a_request_without_or_with_an_unknown_initiator_agent(tmp_path, monkeypatch):
+    upstream, captured = await _capturing_upstream()
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = _proxy_app(Settings.from_env(), StaticTokenManager(str(upstream.make_url("/")).rstrip("/")))
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    unlabelled = await client.post("/api/internal/copilot/responses", data=b"{}")
+    unknown = await client.post("/api/internal/copilot/responses", headers={"X-Initiator": "robot"}, data=b"{}")
+
+    assert unlabelled.status == 200 and unknown.status == 200
+    assert captured[0]["headers"].getall("x-initiator") == ["agent"]
+    assert captured[1]["headers"].getall("x-initiator") == ["agent"]
+
+    await client.close()
+    await upstream.close()

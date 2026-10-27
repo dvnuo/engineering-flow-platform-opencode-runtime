@@ -63,6 +63,20 @@ def _request_is_loopback(request: web.Request) -> bool:
     return True
 
 
+_INITIATORS = frozenset({"user", "agent"})
+
+
+def _inbound_initiator(headers: Mapping[str, str]) -> str | None:
+    """OpenCode's own ``x-initiator`` (``user`` or ``agent``), or None when absent or not one of the two."""
+
+    for key, value in headers.items():
+        if str(key).lower() != "x-initiator":
+            continue
+        normalized = str(value or "").strip().lower()
+        return normalized if normalized in _INITIATORS else None
+    return None
+
+
 def _safe_request_headers(headers: Mapping[str, str]) -> dict[str, str]:
     outbound: dict[str, str] = {}
     for key, value in headers.items():
@@ -138,12 +152,20 @@ async def copilot_proxy_handler(request: web.Request) -> web.StreamResponse:
     settings = request.app[SETTINGS_KEY]
     proxy_config = outbound_proxy_config_for_url(settings, upstream)
     outbound_headers = _safe_request_headers(request.headers)
+    inbound_initiator = _inbound_initiator(request.headers)
+    for key in [key for key in outbound_headers if key.lower() == "x-initiator"]:
+        outbound_headers.pop(key)
     outbound_headers.update(COPILOT_PLUGIN_HEADERS)
     outbound_headers.update(
         {
             "Authorization": f"Bearer {internal_token.token}",
             "Openai-Intent": "conversation-edits",
-            "x-initiator": "agent",
+            # OpenCode labels the first model call of a member's turn ``user``
+            # and the tool-loop continuations ``agent`` (VS Code's semantics);
+            # the proxy passes that through and only labels a request that
+            # says nothing itself. Billing is per token on AI credits, so the
+            # label is about matching VS Code's traffic shape, not the bill.
+            "x-initiator": inbound_initiator or "agent",
         }
     )
     body = await request.read()

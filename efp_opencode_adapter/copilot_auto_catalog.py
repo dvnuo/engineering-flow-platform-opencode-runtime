@@ -9,6 +9,7 @@ aligned.
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Mapping
 
 AUTO_MODEL_ID = "auto"
@@ -34,25 +35,69 @@ SUPPORTED_COPILOT_MODEL_IDS = ("gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.
 # Copilot's catalog (GET /models with the API-version header, Business plan,
 # 2026-10-20) carries OpenAI's windows for the GPT-6 line: 1,050,000 tokens
 # for Astra and 6.1 Sol, 1,000,000 for Sol and Luna, 128,000 of output held
-# back; its pricing has a 272,000-token base tier and a long-context tier
-# above it, the window being the full one either way. The generated
-# opencode.json carries these so OpenCode's accounting matches the gateway's
-# (models.dev rounds the whole line to 1,050,000).
+# back. Copilot bills per token (AI credits) and the line has a 272,000-token
+# prompt tier: one request whose prompt exceeds it bills at the "long context"
+# rates, twice the default ones (see copilot_pricing). The generated
+# opencode.json therefore declares the default tier's window by default
+# (272k prompt + 128k output = 400k), so OpenCode's automatic compaction runs
+# before a session's requests reach the expensive tier; setting
+# EFP_OPENCODE_COPILOT_LONG_CONTEXT=1 declares the catalog's full windows
+# instead, for members who accept long-context pricing. The Portal's context
+# meter uses the declared window as its denominator either way.
+COPILOT_LONG_CONTEXT_ENV = "EFP_OPENCODE_COPILOT_LONG_CONTEXT"
+COPILOT_OUTPUT_TOKENS = 128000
+COPILOT_DEFAULT_TIER_PROMPT_TOKENS = 272000
+COPILOT_DEFAULT_TIER_CONTEXT_TOKENS = COPILOT_DEFAULT_TIER_PROMPT_TOKENS + COPILOT_OUTPUT_TOKENS
+COPILOT_LONG_CONTEXT_MODEL_LIMITS: dict[str, dict[str, int]] = {
+    "gpt-6-astra": {"context": 1050000, "output": COPILOT_OUTPUT_TOKENS},
+    "gpt-6-luna": {"context": 1000000, "output": COPILOT_OUTPUT_TOKENS},
+    "gpt-6-sol": {"context": 1000000, "output": COPILOT_OUTPUT_TOKENS},
+    "gpt-6.1-sol": {"context": 1050000, "output": COPILOT_OUTPUT_TOKENS},
+}
+# The default-tier table: what opencode.json declares unless long context is on.
 COPILOT_MODEL_LIMITS: dict[str, dict[str, int]] = {
-    "gpt-6-astra": {"context": 1050000, "output": 128000},
-    "gpt-6-luna": {"context": 1000000, "output": 128000},
-    "gpt-6-sol": {"context": 1000000, "output": 128000},
-    "gpt-6.1-sol": {"context": 1050000, "output": 128000},
+    model: {"context": COPILOT_DEFAULT_TIER_CONTEXT_TOKENS, "output": COPILOT_OUTPUT_TOKENS}
+    for model in COPILOT_LONG_CONTEXT_MODEL_LIMITS
 }
-# What opencode.json declares for the auto ids so OpenCode accepts them. The
-# proxy sends the model Copilot picks per turn; the declared limit is the
-# fallback model's, and a pick whose prompt cap cannot hold the conversation
-# is not admitted (see copilot_auto_session).
-COPILOT_AUTO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
-    AUTO_MODEL_ID: {"name": "Auto (Balance)", "limit": {"context": 1000000, "output": 128000}},
-    "auto-efficiency": {"name": "Auto (Efficiency)", "limit": {"context": 1000000, "output": 128000}},
-    "auto-intelligence": {"name": "Auto (Intelligence)", "limit": {"context": 1000000, "output": 128000}},
+_AUTO_MODEL_NAMES = {
+    AUTO_MODEL_ID: "Auto (Balance)",
+    "auto-efficiency": "Auto (Efficiency)",
+    "auto-intelligence": "Auto (Intelligence)",
 }
+
+
+def copilot_long_context_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether EFP_OPENCODE_COPILOT_LONG_CONTEXT asks for the catalog's full windows."""
+
+    source = os.environ if environ is None else environ
+    raw = source.get(COPILOT_LONG_CONTEXT_ENV)
+    if raw is None:
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def copilot_model_limits_table(*, long_context: bool | None = None) -> dict[str, dict[str, int]]:
+    """``{model: {"context", "output"}}`` for the pickable Copilot models: default tier, or the full windows."""
+
+    enabled = copilot_long_context_enabled() if long_context is None else bool(long_context)
+    source = COPILOT_LONG_CONTEXT_MODEL_LIMITS if enabled else COPILOT_MODEL_LIMITS
+    return {model: dict(limit) for model, limit in source.items()}
+
+
+def copilot_auto_model_configs(*, long_context: bool | None = None) -> dict[str, dict[str, Any]]:
+    """What opencode.json declares for the auto ids so OpenCode accepts them.
+
+    The proxy sends the model Copilot picks per turn; the declared limit is
+    the fallback model's, and a pick whose prompt cap cannot hold the
+    conversation is not admitted (see copilot_auto_session).
+    """
+
+    fallback = copilot_model_limits_table(long_context=long_context)[DEFAULT_AUTO_FALLBACK_MODEL]
+    return {auto_id: {"name": name, "limit": dict(fallback)} for auto_id, name in _AUTO_MODEL_NAMES.items()}
+
+
+# The default-tier declarations; opencode_config asks for the live table.
+COPILOT_AUTO_MODEL_CONFIGS: dict[str, dict[str, Any]] = copilot_auto_model_configs(long_context=False)
 COPILOT_AUTO_MODEL_CONFIG = COPILOT_AUTO_MODEL_CONFIGS[AUTO_MODEL_ID]
 
 REASONING_EFFORT_LADDER = ("none", "low", "medium", "high", "xhigh", "max")
@@ -119,11 +164,17 @@ def copilot_model_limits(entry: Any) -> dict[str, int] | None:
     return {"context": window, "prompt": max(1, prompt), "output": max(1, output)}
 
 
-def static_model_limits(model: Any) -> dict[str, int] | None:
-    """The pinned limits for a model the member can pick, or None."""
+def static_model_limits(model: Any, *, long_context: bool | None = None) -> dict[str, int] | None:
+    """The pinned limits for a model the member can pick, or None.
+
+    The default tier's window unless long context is on (the env flag, or the
+    caller's say): the prompt cap is then 272k, the tier's threshold, so the
+    admission rule and the fallback budget agree with what opencode.json
+    declares.
+    """
 
     model_id = _normalize_model_id(model)
-    pinned = COPILOT_MODEL_LIMITS.get(model_id) if model_id else None
+    pinned = copilot_model_limits_table(long_context=long_context).get(model_id) if model_id else None
     if pinned is None:
         return None
     return {"context": pinned["context"], "prompt": pinned["context"] - pinned["output"], "output": pinned["output"]}
@@ -218,7 +269,12 @@ __all__ = [
     "COPILOT_AUTO_MODEL_CONFIG",
     "COPILOT_AUTO_MODEL_CONFIGS",
     "COPILOT_AUTO_TIERS",
+    "COPILOT_DEFAULT_TIER_CONTEXT_TOKENS",
+    "COPILOT_DEFAULT_TIER_PROMPT_TOKENS",
+    "COPILOT_LONG_CONTEXT_ENV",
+    "COPILOT_LONG_CONTEXT_MODEL_LIMITS",
     "COPILOT_MODEL_LIMITS",
+    "COPILOT_OUTPUT_TOKENS",
     "DEFAULT_AUTO_FALLBACK_MODEL",
     "DEFAULT_AUTO_TIER",
     "REASONING_EFFORT_LADDER",
@@ -227,7 +283,10 @@ __all__ = [
     "auto_pick_refusal",
     "auto_tier_for",
     "clamp_reasoning_effort",
+    "copilot_auto_model_configs",
+    "copilot_long_context_enabled",
     "copilot_model_limits",
+    "copilot_model_limits_table",
     "is_auto_model",
     "preferred_model_limits",
     "static_model_limits",

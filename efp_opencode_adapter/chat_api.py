@@ -1157,6 +1157,16 @@ async def handle_chat_payload_for_app(
         await _publish_event(bus, runtime_events, terminal)
 
         updated = store.update_after_chat(portal_session_id, message, assistant_text, model, agent)
+        # OpenCode books tokens per assistant message (one per model step);
+        # the send response is only the last one, so the run's cost comes from
+        # every assistant message this request created.
+        run_messages = [
+            candidate
+            for candidate in (after_messages if isinstance(after_messages, list) else [])
+            if isinstance(candidate, dict)
+            and adapter_message_role(candidate).lower() == "assistant"
+            and adapter_message_id(candidate) in assistant_message_ids
+        ]
         usage_record = usage_tracker.record_chat(
             session_id=portal_session_id,
             request_id=request_id,
@@ -1165,6 +1175,8 @@ async def handle_chat_payload_for_app(
             response_payload=response_payload,
             input_text=message,
             output_text=assistant_text,
+            run_messages=run_messages,
+            iterations=len(assistant_message_ids) or None,
         )
         usage_record["request_id"] = trace_context.get("request_id", usage_record.get("request_id", ""))
         final_context = _context_state(message, "completed" if completion_state == "completed" else completion_state, assistant_text)
