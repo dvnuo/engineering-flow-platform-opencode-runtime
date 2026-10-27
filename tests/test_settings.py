@@ -116,3 +116,14 @@ def test_chat_submit_timeout_env_is_floored_at_300(monkeypatch):
     settings = Settings.from_env()
 
     assert settings.chat_submit_timeout_seconds == 300
+
+
+def test_copilot_long_context_is_off_unless_the_env_says_so(monkeypatch):
+    monkeypatch.delenv("EFP_OPENCODE_COPILOT_LONG_CONTEXT", raising=False)
+    assert Settings.from_env().copilot_long_context is False
+    for raw in ("1", "true", "YES", " on "):
+        monkeypatch.setenv("EFP_OPENCODE_COPILOT_LONG_CONTEXT", raw)
+        assert Settings.from_env().copilot_long_context is True
+    for raw in ("0", "false", "", "maybe"):
+        monkeypatch.setenv("EFP_OPENCODE_COPILOT_LONG_CONTEXT", raw)
+        assert Settings.from_env().copilot_long_context is False

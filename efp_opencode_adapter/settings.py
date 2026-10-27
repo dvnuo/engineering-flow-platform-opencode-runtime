@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .copilot_auto_catalog import copilot_long_context_enabled
+
 PROFILE_CONFIG_ENV = "EFP_PROFILE_CONFIG"
 PROFILE_REVISION_ENV = "EFP_PROFILE_REVISION"
 PROFILE_ID_ENV = "EFP_PROFILE_ID"
@@ -108,6 +110,10 @@ class Settings:
     copilot_github_api_base_url: str = "https://api.github.com"
     copilot_api_base_url: str = "https://api.enterprise.githubcopilot.com"
     ai_platform_proxy_base_url: str = "http://127.0.0.1:8000/api/internal/ai-platform"
+    # EFP_OPENCODE_COPILOT_LONG_CONTEXT=1: opencode.json declares Copilot's
+    # full GPT-6 windows (long-context pricing accepted) instead of the
+    # default tier's 400k (copilot_auto_catalog).
+    copilot_long_context: bool = False
 
     @classmethod
     def from_env(cls, opencode_url: str | None = None) -> "Settings":
@@ -151,4 +157,5 @@ class Settings:
             copilot_github_api_base_url=copilot_github_api_base_url,
             copilot_api_base_url=copilot_api_base_url,
             ai_platform_proxy_base_url=ai_platform_proxy_base_url,
+            copilot_long_context=copilot_long_context_enabled(),
         )

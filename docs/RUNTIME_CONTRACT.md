@@ -52,8 +52,39 @@ At minimum, runtime provides:
 - `/api/sessions/{session_id}/permission/respond`
 - `/api/tasks/execute`
 - `/api/queue/status`
+- `/api/usage`
+- `/api/copilot/quota`
 - `/api/server-files/*`
 - `/api/events/ws`
+
+## Usage and Copilot credits
+- `/api/chat` answers carry `usage` with the run's `input_tokens` (the whole
+  prompt, cached tokens included), `cached_input_tokens`, `cache_write_tokens`,
+  `output_tokens`, `reasoning_tokens`, `iterations` (assistant steps),
+  `cache_hit_ratio`, `estimated_credits` (GitHub AI credits, 1 credit = $0.01,
+  from the published Copilot price table in `copilot_pricing.py`; null for a
+  model the table does not know) and `pricing` (`model`, `tier` `default` or
+  `long_context`, `threshold_tokens`, `source: static`). OpenCode itself
+  reports a cost of 0 for Copilot models, so the estimate is what the Portal
+  shows.
+- `/api/usage` sums the same fields per model and provider over the period
+  (`total_cached_input_tokens`, `total_reasoning_tokens`,
+  `total_estimated_credits` next to the older totals).
+- `/api/sessions/{session_id}/context-usage` adds `budget_tokens` (the
+  declared window minus the output reserve), `billing_threshold_tokens` (the
+  prompt size above which the long-context tier bills, 272,000 for the GPT-6
+  line) and `billing_tier` for the latest request.
+- `/api/copilot/quota` reads GitHub's internal `copilot_internal/user` with the
+  member's Copilot credential and returns `available`, `plan`, `reset_date`,
+  `snapshots` (one per quota id with `entitlement` / `remaining` / `used` /
+  `percent_remaining` / `unlimited`), `credits` when a snapshot names them,
+  `raw_keys` and `error`. The endpoint is unofficial on GitHub's side, so a
+  changed shape degrades to `available: false` rather than failing; answers
+  are cached for a minute.
+- opencode.json declares the GPT-6 models with the default pricing tier's
+  window (400,000 tokens: 272k prompt + 128k output) so OpenCode compacts
+  before a request bills at long-context rates; `EFP_OPENCODE_COPILOT_LONG_CONTEXT=1`
+  declares the catalog's full windows instead.
 
 ## Assistant personalization
 `/api/personalization` serves the greeting and starter cards from the agents

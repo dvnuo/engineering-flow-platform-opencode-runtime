@@ -27,6 +27,8 @@ def test_chat_run_recovery_routes_are_registered_without_removed_long_run_contro
     assert ("POST", "/api/sessions/{session_id}/hard-reset") not in routes
     assert ("GET", "/api/sessions/{session_id}/status") in routes
     assert ("*", "/api/internal/copilot/{tail}") in routes
+    assert ("GET", "/api/usage") in routes
+    assert ("GET", "/api/copilot/quota") in routes
 
 
 @pytest.mark.asyncio

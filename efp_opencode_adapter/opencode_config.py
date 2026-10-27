@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .copilot_auto_catalog import COPILOT_AUTO_MODEL_CONFIGS, COPILOT_MODEL_LIMITS
+from .copilot_auto_catalog import copilot_auto_model_configs, copilot_long_context_enabled, copilot_model_limits_table
 from .index_loader import load_skills_index
 from .permission_generator import build_permission
 from .settings import Settings
@@ -133,11 +133,13 @@ def provider_config_from_runtime_profile(runtime_config: dict, settings: Setting
         options.setdefault("apiKey", COPILOT_PROXY_API_KEY_PLACEHOLDER)
         # The auto ids are not in models.dev: declare them so OpenCode accepts
         # them. The local proxy sends the model Copilot picks per turn
-        # (copilot_auto_session). The GPT-6 rows carry Copilot's catalog
-        # windows (1M for Sol and Luna, 1.05M for Astra and 6.1 Sol) so
-        # OpenCode's accounting matches the gateway's.
-        models = {auto_id: dict(config) for auto_id, config in COPILOT_AUTO_MODEL_CONFIGS.items()}
-        models.update({model: {"limit": dict(limit)} for model, limit in COPILOT_MODEL_LIMITS.items()})
+        # (copilot_auto_session). The GPT-6 rows declare the default pricing
+        # tier's window (272k prompt + 128k output) so OpenCode compacts before
+        # a request bills at long-context rates; EFP_OPENCODE_COPILOT_LONG_CONTEXT=1
+        # declares the catalog's full windows instead (copilot_auto_catalog).
+        long_context = settings.copilot_long_context if settings is not None else copilot_long_context_enabled()
+        models = {auto_id: dict(config) for auto_id, config in copilot_auto_model_configs(long_context=long_context).items()}
+        models.update({model: {"limit": dict(limit)} for model, limit in copilot_model_limits_table(long_context=long_context).items()})
         return {
             "provider": {
                 provider: {

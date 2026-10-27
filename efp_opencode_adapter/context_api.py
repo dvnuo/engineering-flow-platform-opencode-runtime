@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from aiohttp import web
 
 from .app_keys import OPENCODE_CLIENT_KEY, SESSION_STORE_KEY
+from .copilot_pricing import billing_threshold_tokens, pricing_tier
 from .opencode_client import OpenCodeClientError
 from .opencode_config import normalize_opencode_provider_id
 from .thinking_events import utc_now_iso
@@ -237,8 +238,18 @@ def _context_window_tokens(
     provider_id: str | None,
     model_id: str | None,
 ) -> int | None:
+    return _model_limits(providers, provider_id, model_id)[0]
+
+
+def _model_limits(
+    providers: Mapping[str, Any] | None,
+    provider_id: str | None,
+    model_id: str | None,
+) -> tuple[int | None, int | None]:
+    """``(context window, output reserve)`` tokens OpenCode declares for the model, each None when unknown."""
+
     if not providers or not provider_id or not model_id:
-        return None
+        return None, None
     all_providers = providers.get("all")
     if isinstance(all_providers, Mapping):
         candidates = list(all_providers.values())
@@ -268,12 +279,23 @@ def _context_window_tokens(
         else:
             model = None
         if not isinstance(model, Mapping):
-            return None
+            return None, None
         limit = model.get("limit")
         limit = limit if isinstance(limit, Mapping) else {}
-        parsed = _safe_int(limit.get("context") or model.get("contextWindow"))
-        return parsed or None
-    return None
+        context = _safe_int(limit.get("context") or model.get("contextWindow")) or None
+        output = _safe_int(limit.get("output") or model.get("maxOutputTokens")) or None
+        return context, output
+    return None, None
+
+
+def _budget_tokens(context_window_tokens: int | None, output_limit_tokens: int | None) -> int | None:
+    """The prompt budget OpenCode compacts to: the declared window minus its output reserve."""
+
+    if not context_window_tokens:
+        return None
+    if output_limit_tokens and output_limit_tokens < context_window_tokens:
+        return context_window_tokens - output_limit_tokens
+    return context_window_tokens
 
 
 def _percent(numerator: int, denominator: int | None) -> float | None:
@@ -378,8 +400,17 @@ async def _build_snapshot(client: Any, record: Any, messages: list[dict[str, Any
         tool_definition_tokens=tool_definition_tokens,
     )
     used_tokens = actual_input_tokens or sum(categories_by_id.values())
-    context_window_tokens = _context_window_tokens(
+    context_window_tokens, output_limit_tokens = _model_limits(
         providers, provider_id, model_id
+    )
+    # Copilot bills per token and the GPT-6 line doubles its prices once one
+    # request's prompt passes 272k tokens: the meter says which tier the latest
+    # request billed at, and where the line is, next to the window itself.
+    threshold_tokens = billing_threshold_tokens(model_id)
+    billing_tier = (
+        pricing_tier(model_id, actual_input_tokens)
+        if actual_input_tokens and threshold_tokens is not None
+        else None
     )
     categories = [
         {
@@ -406,6 +437,9 @@ async def _build_snapshot(client: Any, record: Any, messages: list[dict[str, Any
         "used_tokens": used_tokens,
         "context_window_tokens": context_window_tokens,
         "usage_percent": _percent(used_tokens, context_window_tokens),
+        "budget_tokens": _budget_tokens(context_window_tokens, output_limit_tokens),
+        "billing_threshold_tokens": threshold_tokens,
+        "billing_tier": billing_tier,
         "categories": categories,
         "model": {
             "provider_id": provider_id,

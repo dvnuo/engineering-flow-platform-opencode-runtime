@@ -17,6 +17,7 @@ from efp_opencode_adapter import copilot_auto_session as mod
 from efp_opencode_adapter.app_keys import COPILOT_AUTO_SESSION_MANAGER_KEY, COPILOT_TOKEN_MANAGER_KEY, SETTINGS_KEY
 from efp_opencode_adapter.copilot_auto_catalog import (
     COPILOT_AUTO_MODEL_CONFIGS,
+    COPILOT_LONG_CONTEXT_ENV,
     COPILOT_MODEL_LIMITS,
     allowed_reasoning_efforts,
     auto_pick_refusal,
@@ -267,7 +268,9 @@ async def test_auto_falls_back_to_the_default_model_when_the_route_is_refused(tm
     routing = client.app[COPILOT_AUTO_SESSION_MANAGER_KEY].last_routing
     assert routing.fallback_reason.startswith("auto route unavailable")
     assert routing.tier == "balance"
-    assert routing.limits == {"context": 1000000, "prompt": 872000, "output": 128000}
+    # Without a catalog the fallback budgets the pinned row: the default
+    # pricing tier's window, the same one opencode.json declares.
+    assert routing.limits == {"context": 400000, "prompt": 272000, "output": 128000}
     await client.close()
     await upstream.close()
 
@@ -399,8 +402,12 @@ def test_model_limits_helpers_follow_the_native_runtime():
     assert copilot_model_limits({"id": "x", "capabilities": {"limits": {"max_context_window_tokens": 100000}}}) == {"context": 100000, "prompt": 75000, "output": 25000}
     assert copilot_model_limits({"id": "x", "capabilities": {"limits": {"max_context_window_tokens": "big"}}}) is None
     assert copilot_model_limits({"id": "x"}) is None
-    assert static_model_limits("github-copilot/gpt-6-sol") == {"context": 1000000, "prompt": 872000, "output": 128000}
-    assert static_model_limits("gpt-6.1-sol") == {"context": 1050000, "prompt": 922000, "output": 128000}
+    # The pinned rows declare the default pricing tier's window (272k prompt +
+    # 128k output) unless long context is asked for.
+    assert static_model_limits("github-copilot/gpt-6-sol") == {"context": 400000, "prompt": 272000, "output": 128000}
+    assert static_model_limits("gpt-6.1-sol") == {"context": 400000, "prompt": 272000, "output": 128000}
+    assert static_model_limits("gpt-6.1-sol", long_context=True) == {"context": 1050000, "prompt": 922000, "output": 128000}
+    assert static_model_limits("gpt-6-luna", long_context=True) == {"context": 1000000, "prompt": 872000, "output": 128000}
     assert static_model_limits("mai-code-1.1-flash") is None
     # The first source given wins, smaller or larger than the others.
     assert preferred_model_limits(copilot_model_limits(LUNA_OLD_SCHEMA), copilot_model_limits(LUNA_AUTO)) == copilot_model_limits(LUNA_OLD_SCHEMA)
@@ -468,7 +475,31 @@ def test_opencode_config_declares_the_auto_ids_and_pins_the_gpt_6_limits(tmp_pat
     models = provider_cfg["models"]
     assert set(models) == set(AUTO_MODEL_IDS) | set(COPILOT_MODEL_LIMITS)
     assert models["auto"] == COPILOT_AUTO_MODEL_CONFIGS["auto"]
-    assert models["auto"]["limit"] == {"context": 1000000, "output": 128000}
+    # The default pricing tier's window: OpenCode compacts before a request
+    # bills at long-context rates.
+    assert models["auto"]["limit"] == {"context": 400000, "output": 128000}
     assert models["auto-intelligence"]["name"] == "Auto (Intelligence)"
+    assert models["gpt-6.1-sol"] == {"limit": {"context": 400000, "output": 128000}}
+    assert models["gpt-6-luna"] == {"limit": {"context": 400000, "output": 128000}}
+
+
+def test_long_context_env_declares_the_catalog_windows(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv(COPILOT_LONG_CONTEXT_ENV, "1")
+    assert static_model_limits("gpt-6.1-sol") == {"context": 1050000, "prompt": 922000, "output": 128000}
+    assert static_model_limits("github-copilot/gpt-6-sol") == {"context": 1000000, "prompt": 872000, "output": 128000}
+    assert static_model_limits("gpt-6-sol", long_context=False) == {"context": 400000, "prompt": 272000, "output": 128000}
+    settings = Settings.from_env()
+    assert settings.copilot_long_context is True
+    cfg, _, _ = build_opencode_config(
+        settings,
+        {"llm": {"provider": "github_copilot", "model": "auto", "api_key": "ghu_source"}},
+    )
+    models = cfg["provider"]["github-copilot"]["models"]
     assert models["gpt-6.1-sol"] == {"limit": {"context": 1050000, "output": 128000}}
+    assert models["gpt-6-astra"] == {"limit": {"context": 1050000, "output": 128000}}
     assert models["gpt-6-luna"] == {"limit": {"context": 1000000, "output": 128000}}
+    assert models["auto"]["limit"] == {"context": 1000000, "output": 128000}
+    monkeypatch.setenv(COPILOT_LONG_CONTEXT_ENV, "0")
+    assert Settings.from_env().copilot_long_context is False
+    assert static_model_limits("gpt-6.1-sol") == {"context": 400000, "prompt": 272000, "output": 128000}

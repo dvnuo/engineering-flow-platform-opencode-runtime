@@ -181,6 +181,11 @@ async def test_context_usage_and_manual_compact_share_portal_contract(tmp_path, 
         assert payload["engine"] == "opencode"
         assert payload["used_tokens"] == 800
         assert payload["usage_percent"] == 40.0
+        # A model the Copilot price table does not know has no billing tier;
+        # the budget is the declared window when no output reserve is declared.
+        assert payload["budget_tokens"] == 2_000
+        assert payload["billing_threshold_tokens"] is None
+        assert payload["billing_tier"] is None
         assert {item["id"] for item in payload["categories"]} == {
             "instructions",
             "tool_definitions",
@@ -214,6 +219,68 @@ async def test_context_usage_and_manual_compact_share_portal_contract(tmp_path, 
                 "auto": False,
             }
         ]
+    finally:
+        await client.close()
+
+
+class Gpt6ContextOpenCodeClient(ContextOpenCodeClient):
+    async def list_providers(self, timeout_seconds=30):
+        return {
+            "all": [
+                {
+                    "id": "github-copilot",
+                    "models": {"gpt-6.1-sol": {"limit": {"context": 400_000, "output": 128_000}}},
+                }
+            ]
+        }
+
+
+def _gpt6_messages(input_tokens: int) -> list[dict]:
+    return [
+        {
+            "info": {
+                "id": "u-1",
+                "role": "user",
+                "model": {"providerID": "github-copilot", "modelID": "gpt-6.1-sol"},
+            },
+            "parts": [{"type": "text", "text": "Inspect the repository"}],
+        },
+        {
+            "info": {
+                "id": "a-1",
+                "role": "assistant",
+                "tokens": {"input": input_tokens, "cache": {"read": 0, "write": 0}},
+            },
+            "parts": [{"type": "text", "text": "Done"}],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_usage_reports_the_copilot_billing_tier_and_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    fake = Gpt6ContextOpenCodeClient()
+    fake.sessions["oc-tier"] = {"id": "oc-tier", "title": "Tier"}
+    fake.messages["oc-tier"] = _gpt6_messages(800)
+    app = create_app(Settings.from_env(), opencode_client=fake)
+    app[SESSION_STORE_KEY].upsert(
+        SessionRecord("portal-tier", "oc-tier", "Tier", None, "github-copilot/gpt-6.1-sol", "a", "b", "", 2)
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        payload = await (await client.get("/api/sessions/portal-tier/context-usage")).json()
+        assert payload["context_window_tokens"] == 400_000
+        # The declared window minus the output reserve is what OpenCode compacts to.
+        assert payload["budget_tokens"] == 272_000
+        assert payload["billing_threshold_tokens"] == 272_000
+        assert payload["billing_tier"] == "default"
+
+        # One request above the threshold billed at long-context rates.
+        fake.messages["oc-tier"] = _gpt6_messages(300_000)
+        payload = await (await client.get("/api/sessions/portal-tier/context-usage")).json()
+        assert payload["used_tokens"] == 300_000
+        assert payload["billing_tier"] == "long_context"
     finally:
         await client.close()
 
