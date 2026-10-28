@@ -43,6 +43,7 @@ from .opencode_message_adapter import (
     message_role as adapter_message_role,
     message_to_visible_text,
 )
+from .reply_language import prepend_reply_language_block, resolve_reply_language
 from .repository_workspace import ensure_repo_checkout, parse_create_pr_repo_request
 from .session_store import SessionDeletedError, SessionRecord, session_title_metadata, session_title_metadata_for
 from .session_title import schedule_session_title, should_generate_after_turn
@@ -888,6 +889,12 @@ async def handle_chat_payload_for_app(
     agent = _optional_str(payload.get("agent")) or _optional_str(metadata.get("agent"))
     system = _optional_str(payload.get("system")) or _optional_str(metadata.get("system"))
     system = f"{system}{FINAL_RESPONSE_CONTRACT_SUFFIX}" if system else FINAL_RESPONSE_CONTRACT_SUFFIX.strip()
+    # The member's "Reply language" block leads the per-turn system string,
+    # which OpenCode appends to its own prompt on every step of the turn; the
+    # skill-prompt path sends the same variable. Without a block the string
+    # is exactly what it was before the setting existed.
+    reply_language = resolve_reply_language(metadata)
+    system = prepend_reply_language_block(system, reply_language)
     attachments = payload.get("attachments")
     initial_user_message_id = _requested_message_id(payload)
 
@@ -1238,6 +1245,7 @@ async def handle_chat_payload_for_app(
                 user_text=message,
                 assistant_text=assistant_text,
                 runtime_profile=runtime_profile,
+                reply_language=reply_language,
             )
         return {
             "ok": ok,

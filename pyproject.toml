@@ -32,3 +32,7 @@ build-backend = "setuptools.build_meta"
 include = ["efp_opencode_adapter*"]
 exclude = ["tests*", "runtime_contract_tests*", "integration*", "scripts*", "docs*"]
 namespaces = false
+
+[tool.setuptools.package-data]
+# The "Reply language" block texts, read at runtime by efp_opencode_adapter/reply_language.py.
+efp_opencode_adapter = ["prompts/*.json"]

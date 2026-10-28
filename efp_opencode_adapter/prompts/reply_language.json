@@ -1,0 +1,22 @@
+{
+  "_comment": "Texts of the 'Reply language' system-prompt block, selected by BCP 47 tag; the opencode runtime ships the same texts. Non-ASCII characters stay JSON-escaped: source files in this repository are ASCII only.",
+  "block": "Reply language: {display_name}.\n{language_sentence}\n{mode_sentence}\nKeep code, commands, file paths, identifiers, error text, product names and established technical terms exactly as they are, usually in English.\nEverything you write into a repository or an external system stays in English unless the user asks otherwise: code and comments, commit messages, pull request titles and descriptions, documentation, tickets and wiki pages.\nThis setting comes from the member's Portal language preference and wins over earlier notes about reply language.",
+  "mode_sentences": {
+    "soft": "This is the member's default; when the user's latest message is clearly written in another language, reply in that language instead.",
+    "strict": "Always reply in {display_name}, even when the user writes in another language, unless the user explicitly asks you to switch."
+  },
+  "languages": {
+    "en": {
+      "display_name": "English",
+      "language_sentence": "Write your prose in English."
+    },
+    "zh-Hans": {
+      "display_name": "Simplified Chinese",
+      "language_sentence": "Write your prose in Simplified Chinese as used in mainland China (\u7b80\u4f53\u4e2d\u6587)."
+    },
+    "zh-Hant-HK": {
+      "display_name": "Traditional Chinese (Hong Kong)",
+      "language_sentence": "Write your prose in Traditional Chinese characters using Standard Written Chinese with Hong Kong vocabulary (\u7e41\u9ad4\u4e2d\u6587\uff0c\u9999\u6e2f\u7528\u8a9e\uff1a\u8edf\u4ef6\u3001\u4f3a\u670d\u5668\u3001\u7db2\u7d61\u3001\u767b\u5165\u3001\u8a2d\u5b9a\u3001\u9810\u8a2d), not vernacular Cantonese and not Taiwan vocabulary."
+    }
+  }
+}

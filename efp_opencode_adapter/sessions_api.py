@@ -26,6 +26,7 @@ from .chat_api import (
 from .opencode_client import OpenCodeClientError
 from .opencode_ids import new_opencode_message_id
 from .opencode_message_adapter import message_to_visible_text, to_efp_message
+from .reply_language import prepend_reply_language_block, resolve_reply_language
 from .session_store import (
     session_display_name,
     session_id_is_task_session,
@@ -784,7 +785,11 @@ async def generate_session_title_handler(request: web.Request) -> web.Response:
         raise _json_not_found("session_not_found")
     body = await _read_json_object(request, error_prefix="title_payload") if request.can_read_body else {}
     force = bool(body.get("force"))
-    runtime_profile = _runtime_profile_from_metadata(_metadata_from_payload(body)) or None
+    metadata = _metadata_from_payload(body)
+    runtime_profile = _runtime_profile_from_metadata(metadata) or None
+    # The Portal's proxy fills portal_user in here as on chat, so a forced
+    # title follows the reply language the answers were written under.
+    reply_language = resolve_reply_language(metadata)
 
     running = find_title_task(request.app, sid)
     if running is not None:
@@ -796,7 +801,7 @@ async def generate_session_title_handler(request: web.Request) -> web.Response:
         return web.json_response({"success": True, "generated": generated, **_session_name_payload(latest)})
 
     try:
-        title = await generate_session_title(request.app, sid, runtime_profile=runtime_profile, force=force)
+        title = await generate_session_title(request.app, sid, runtime_profile=runtime_profile, reply_language=reply_language, force=force)
     except KeyError:
         raise _json_not_found("session_not_found")
     except TitleGenerationError as exc:
@@ -1239,8 +1244,11 @@ async def edit_message_handler(request: web.Request) -> web.Response:
         raise _json_bad_gateway("opencode_edit_failed", detail=_opencode_detail(exc), metadata=metadata)
     except Exception as exc:
         raise _json_bad_gateway("opencode_edit_failed", detail=_unexpected_upstream_detail(exc), metadata=metadata)
+    # The edit body carries the caller's own system text, without the chat
+    # path's contract suffix; the member's "Reply language" block still leads it.
+    system = prepend_reply_language_block(body.get("system"), resolve_reply_language(body.get("metadata")))
     try:
-        response_payload = await client.send_message(updated_record.opencode_session_id, parts=[{"type": "text", "text": content}], model=body.get("model") or updated_record.model, agent=body.get("agent") or updated_record.agent, system=body.get("system"))
+        response_payload = await client.send_message(updated_record.opencode_session_id, parts=[{"type": "text", "text": content}], model=body.get("model") or updated_record.model, agent=body.get("agent") or updated_record.agent, system=system)
     except OpenCodeClientError as exc:
         raise _json_bad_gateway("opencode_edit_resend_failed", detail=_opencode_detail(exc), metadata=metadata)
     except Exception as exc:

@@ -50,6 +50,7 @@ from .opencode_message_adapter import message_id as adapter_message_id
 from .opencode_message_adapter import message_role as adapter_message_role
 from .opencode_message_adapter import message_to_visible_text
 from .profile_store import ProfileOverlayStore
+from .reply_language import ReplyLanguage
 from .session_store import SessionRecord, session_id_is_task_session
 from .settings import Settings
 from .thinking_events import safe_preview
@@ -78,16 +79,31 @@ TITLE_APIS = {
     "ai-platform": "chat",
 }
 
+# The answer was written under the member's "Reply language" block (strict,
+# or following the member's message), so with that setting the title follows
+# the answer; without it the user's message is the only language signal.
+TITLE_LANGUAGE_RULE = "- The same language as the user's message."
+TITLE_LANGUAGE_RULE_REPLY_LANGUAGE = "- The same language as the assistant's answer."
+
 TITLE_INSTRUCTIONS = (
     "You name chat sessions for a list of past conversations. "
     "Given the first message of a conversation and the assistant's answer, reply with a short title.\n"
     "Rules:\n"
     "- A noun phrase of at most 40 characters (about 20 characters for Chinese, Japanese or Korean).\n"
-    "- The same language as the user's message.\n"
+    f"{TITLE_LANGUAGE_RULE}\n"
     "- Name the topic or task, not the fact that it was asked or answered.\n"
     "- No quotes, no trailing period, no prefix such as 'Title:' or 'Session about'.\n"
     "Reply with the title only."
 )
+
+
+def title_instructions(reply_language: ReplyLanguage | None = None) -> str:
+    """The system instructions for the title call, for the member's reply language if one applies."""
+
+    if reply_language is None:
+        return TITLE_INSTRUCTIONS
+    return TITLE_INSTRUCTIONS.replace(TITLE_LANGUAGE_RULE, TITLE_LANGUAGE_RULE_REPLY_LANGUAGE, 1)
+
 
 _TITLE_PREFIX = re.compile(r"^(?:title|session title|session name|name|\u6807\u9898)\s*[:\uff1a]\s*", re.IGNORECASE)
 _QUOTES = "\"'`\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b"
@@ -172,16 +188,27 @@ def build_title_prompt(user_text: str, assistant_text: str) -> str:
     )
 
 
-def build_title_messages(user_text: str, assistant_text: str) -> list[dict[str, str]]:
+def build_title_messages(
+    user_text: str,
+    assistant_text: str,
+    *,
+    reply_language: ReplyLanguage | None = None,
+) -> list[dict[str, str]]:
     """The instructions plus the first turn's excerpts, as chat/completions messages."""
 
     return [
-        {"role": "system", "content": TITLE_INSTRUCTIONS},
+        {"role": "system", "content": title_instructions(reply_language)},
         {"role": "user", "content": build_title_prompt(user_text, assistant_text)},
     ]
 
 
-def build_title_request_body(target: TitleTarget, *, user_text: str, assistant_text: str) -> dict[str, Any]:
+def build_title_request_body(
+    target: TitleTarget,
+    *,
+    user_text: str,
+    assistant_text: str,
+    reply_language: ReplyLanguage | None = None,
+) -> dict[str, Any]:
     """The one-shot, non-streaming request body in the shape the target's API expects.
 
     The Responses body carries only the fields the native runtime sends to
@@ -194,7 +221,7 @@ def build_title_request_body(target: TitleTarget, *, user_text: str, assistant_t
         return {
             "model": target.model,
             "input": [
-                {"role": "system", "content": [{"type": "input_text", "text": TITLE_INSTRUCTIONS}]},
+                {"role": "system", "content": [{"type": "input_text", "text": title_instructions(reply_language)}]},
                 {"role": "user", "content": [{"type": "input_text", "text": build_title_prompt(user_text, assistant_text)}]},
             ],
             "stream": False,
@@ -203,7 +230,7 @@ def build_title_request_body(target: TitleTarget, *, user_text: str, assistant_t
     # AI Platform's gateway refuses reasoning parameters on chat/completions.
     return {
         "model": target.model,
-        "messages": build_title_messages(user_text, assistant_text),
+        "messages": build_title_messages(user_text, assistant_text, reply_language=reply_language),
         "stream": False,
     }
 
@@ -314,11 +341,12 @@ async def request_title(
     *,
     user_text: str,
     assistant_text: str,
+    reply_language: ReplyLanguage | None = None,
     timeout: float = TITLE_TIMEOUT_SECONDS,
 ) -> tuple[str, dict[str, Any]]:
     """One non-streaming call through the loopback proxy: (text, usage)."""
 
-    body = build_title_request_body(target, user_text=user_text, assistant_text=assistant_text)
+    body = build_title_request_body(target, user_text=user_text, assistant_text=assistant_text, reply_language=reply_language)
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
             async with session.post(target.url, json=body) as response:
@@ -418,6 +446,7 @@ async def generate_session_title(
     force: bool = False,
     user_text: str | None = None,
     assistant_text: str | None = None,
+    reply_language: ReplyLanguage | None = None,
 ) -> str | None:
     """Generate and store a title for the session; the stored name, or None when nothing changed.
 
@@ -426,7 +455,9 @@ async def generate_session_title(
     keeps the name it has: a manual name exists, or a generated one does and
     ``force`` is false. An unknown or deleted session raises ``KeyError``; no
     answered turn, no usable provider, a provider failure and a timeout raise
-    ``TitleGenerationError``.
+    ``TitleGenerationError``. ``reply_language`` is the member's resolved reply
+    language when one applies to the session's prompt; the title then follows
+    the answer instead of the question.
     """
 
     store = app[SESSION_STORE_KEY]
@@ -456,7 +487,7 @@ async def generate_session_title(
     if not user_text or not assistant_text:
         raise TitleGenerationError("The session has no completed turn to name yet.", status_code=422)
 
-    text, usage = await request_title(target, user_text=user_text, assistant_text=assistant_text)
+    text, usage = await request_title(target, user_text=user_text, assistant_text=assistant_text, reply_language=reply_language)
     _record_usage(app, session_id=portal_session_id, target=target, usage=usage)
     title = clean_title(text)
     if not title:
@@ -507,6 +538,7 @@ def schedule_session_title(
     user_text: str,
     assistant_text: str,
     runtime_profile: Mapping[str, Any] | None = None,
+    reply_language: ReplyLanguage | None = None,
 ) -> asyncio.Task | None:
     """Start the title call in the background; the task, or None when one is already running."""
 
@@ -519,6 +551,7 @@ def schedule_session_title(
             user_text=user_text,
             assistant_text=assistant_text,
             runtime_profile=runtime_profile,
+            reply_language=reply_language,
         ),
         name=title_task_name(portal_session_id),
     )
@@ -533,6 +566,7 @@ async def _generate_in_background(
     user_text: str,
     assistant_text: str,
     runtime_profile: Mapping[str, Any] | None,
+    reply_language: ReplyLanguage | None = None,
 ) -> None:
     if resolve_title_target(app[SETTINGS_KEY], runtime_profile) is None:
         logger.debug("Session %s keeps its derived name: no model proxy for titles", portal_session_id)
@@ -544,6 +578,7 @@ async def _generate_in_background(
             runtime_profile=runtime_profile,
             user_text=user_text,
             assistant_text=assistant_text,
+            reply_language=reply_language,
         )
         if title:
             logger.info("Session %s titled: %s", portal_session_id, title)
@@ -595,4 +630,5 @@ __all__ = [
     "schedule_session_title",
     "schedule_title_publish",
     "should_generate_after_turn",
+    "title_instructions",
 ]
