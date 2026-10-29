@@ -1,9 +1,9 @@
 {
-  "_comment": "Texts of the 'Reply language' system-prompt block, selected by BCP 47 tag; the opencode runtime ships the same texts. Non-ASCII characters stay JSON-escaped: source files in this repository are ASCII only.",
-  "block": "Reply language: {display_name}.\n{language_sentence}\n{mode_sentence}\nKeep code, commands, file paths, identifiers, error text, product names and established technical terms exactly as they are, usually in English.\nEverything you write into a repository or an external system stays in English unless the user asks otherwise: code and comments, commit messages, pull request titles and descriptions, documentation, tickets and wiki pages.\nThis setting comes from the member's Portal language preference and wins over earlier notes about reply language.",
+  "_comment": "Texts of the 'Reply language' system-prompt block, selected by BCP 47 tag; the native and opencode runtimes ship the same file. Non-ASCII characters stay JSON-escaped: source files in this repository are ASCII only.",
+  "block": "Reply language: {display_name}.\n{language_sentence}\n{mode_sentence}\nKeep code, commands, file paths, identifiers, error text, product names and established technical terms exactly as they are, usually in English.\nEverything you write into a repository or an external system stays in English unless the user asks otherwise: code and comments, commit messages, pull request titles and descriptions, documentation, tickets and wiki pages.\nThis setting comes from the member's Portal language preference.",
   "mode_sentences": {
-    "soft": "This is the member's default; when the user's latest message is clearly written in another language, reply in that language instead.",
-    "strict": "Always reply in {display_name}, even when the user writes in another language, unless the user explicitly asks you to switch."
+    "soft": "This is the member's default, taken from their Portal language rather than chosen for replies. When the member clearly writes to you in another language, or asks for a particular reply language in this chat or in a saved note, reply in that language instead. Messages the Portal sends on the member's behalf, such as \"Continue\", a request to fix a diagram or a notice from a panel, do not change the language.",
+    "strict": "Always reply in {display_name}, even when the user writes in another language, unless the user explicitly asks you to switch. The member chose this in the Portal, so it wins over earlier notes about reply language."
   },
   "languages": {
     "en": {

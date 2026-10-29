@@ -60,12 +60,16 @@ LANGUAGE_SENTENCES = {
     ),
 }
 SOFT_SENTENCE = (
-    "This is the member's default; when the user's latest message is clearly written in another language, "
-    "reply in that language instead."
+    "This is the member's default, taken from their Portal language rather than chosen for replies. "
+    "When the member clearly writes to you in another language, or asks for a particular reply language "
+    "in this chat or in a saved note, reply in that language instead. "
+    "Messages the Portal sends on the member's behalf, such as \"Continue\", a request to fix a diagram "
+    "or a notice from a panel, do not change the language."
 )
 STRICT_SENTENCE = (
     "Always reply in {display_name}, even when the user writes in another language, "
-    "unless the user explicitly asks you to switch."
+    "unless the user explicitly asks you to switch. "
+    "The member chose this in the Portal, so it wins over earlier notes about reply language."
 )
 BLOCK_TAIL = (
     "Keep code, commands, file paths, identifiers, error text, product names and established technical terms "
@@ -73,7 +77,7 @@ BLOCK_TAIL = (
     "Everything you write into a repository or an external system stays in English unless the user asks "
     "otherwise: code and comments, commit messages, pull request titles and descriptions, documentation, "
     "tickets and wiki pages.\n"
-    "This setting comes from the member's Portal language preference and wins over earlier notes about reply language."
+    "This setting comes from the member's Portal language preference."
 )
 TODAYS_SYSTEM = FINAL_RESPONSE_CONTRACT_SUFFIX.strip()
 COPILOT_PROFILE = {"config": {"llm": {"provider": "github_copilot", "model": "gpt-6-sol"}}}
@@ -169,7 +173,7 @@ def test_texts_file_is_ascii_escaped_and_packaged():
     assert b"\\u7b80\\u4f53\\u4e2d\\u6587" in raw
     assert Path(reply_language_module.__file__).read_bytes().isascii()
     assert Path(__file__).read_bytes().isascii()
-    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
     assert "prompts/*.json" in pyproject["tool"]["setuptools"]["package-data"]["efp_opencode_adapter"]
 
 
@@ -437,3 +441,13 @@ async def test_title_calls_follow_the_turns_reply_language(tmp_path, monkeypatch
     finally:
         await client.close()
         await proxy.close()
+
+
+def test_a_missing_texts_file_keeps_todays_prompt(monkeypatch, tmp_path):
+    monkeypatch.setattr(reply_language_module, "REPLY_LANGUAGE_TEXTS_PATH", tmp_path / "missing.json")
+    reply_language_module._texts.cache_clear()
+    try:
+        metadata = {"portal_user": {"id": "77", "reply_language": "zh-Hans", "reply_language_strict": True}}
+        assert reply_language_module.resolve_reply_language(metadata) is None
+    finally:
+        reply_language_module._texts.cache_clear()

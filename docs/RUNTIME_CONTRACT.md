@@ -123,9 +123,11 @@ permission answer, message-edit and `title/generate` request:
 
 - `metadata.portal_user.reply_language`: `en`, `zh-Hans` or `zh-Hant-HK`.
 - `metadata.portal_user.reply_language_strict`: `true` when the member chose
-  the language explicitly (always reply in it); `false` when the Portal
-  resolved it from the UI language or the browser, so the assistant may
-  follow the language of the member's latest message instead.
+  the language explicitly (always reply in it until they ask to switch in the
+  chat; it wins over saved notes); `false` when the Portal resolved it from
+  the UI language or the browser, so it is only a default: the member's own
+  messages and requests about the reply language win over it, while messages
+  the Portal sends on the member's behalf, such as "Continue", do not.
 
 A missing or unknown value, and `en` without `reply_language_strict: true`,
 change nothing: the request behaves exactly as it did before the setting
