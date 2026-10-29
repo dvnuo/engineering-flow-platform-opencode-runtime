@@ -116,6 +116,32 @@ Both files are optional. A branch without them returns
   runtime with the Local bridge connector analyzes them through Productivity
   Suite.
 
+## Reply language
+The Portal sends the member's language preference in the trusted
+`metadata.portal_user` object of every proxied chat, stream, question and
+permission answer, message-edit and `title/generate` request:
+
+- `metadata.portal_user.reply_language`: `en`, `zh-Hans` or `zh-Hant-HK`.
+- `metadata.portal_user.reply_language_strict`: `true` when the member chose
+  the language explicitly (always reply in it until they ask to switch in the
+  chat; it wins over saved notes); `false` when the Portal resolved it from
+  the UI language or the browser, so it is only a default: the member's own
+  messages and requests about the reply language win over it, while messages
+  the Portal sends on the member's behalf, such as "Continue", do not.
+
+A missing or unknown value, and `en` without `reply_language_strict: true`,
+change nothing: the request behaves exactly as it did before the setting
+existed. Otherwise the adapter renders the "Reply language" block (texts in
+`efp_opencode_adapter/prompts/reply_language.json`, shared verbatim with the
+native runtime) and puts it first in the per-turn `system` string, ahead of
+the request's own `system` text and the runtime-contract suffix; OpenCode
+appends that string at the very end of its system prompt for every step of
+the turn. The block is never a message part. It reaches the chat and stream
+paths, slash-skill prompts and both message-edit paths; OpenCode 1.14.39's
+`/session/{id}/command` body has no `system` field, so a native OpenCode
+command runs without it. With a block in force, session titles follow the
+language of the assistant's answer instead of the user's message.
+
 ## Interactive input contract
 Portal drives its approval card off the session rather than the permission id:
 it polls `/api/sessions/{session_id}/pending-input` to rebuild a card after a
