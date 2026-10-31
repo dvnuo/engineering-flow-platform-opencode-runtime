@@ -1,8 +1,8 @@
 """The member's reply language: a Portal preference rendered as one system-prompt block.
 
-The Portal resolves each member's language (an explicit "Assistant replies
-in" choice, else the UI language or the browser's) and sends it with every
-proxied request as ``metadata.portal_user.reply_language`` plus
+The Portal resolves each member's language (the Language chosen in the
+account menu, its only language setting, else the browser's) and sends it
+with every proxied request as ``metadata.portal_user.reply_language`` plus
 ``reply_language_strict`` (true when the member chose it). The texts live in
 ``prompts/reply_language.json``, JSON-escaped so the repository stays ASCII
 and shared verbatim with the native runtime, so wording changes never touch
@@ -35,8 +35,8 @@ class ReplyLanguage:
     """A reply language that changes the prompt.
 
     ``tag`` is one of the tags in the texts file; ``strict`` is whether the
-    member chose the language explicitly (always reply in it) rather than the
-    Portal resolving it from the UI language (follow the member's message).
+    member chose the Portal's language (always reply in it) rather than the
+    Portal taking it from the browser (a default the member may override).
     """
 
     tag: str
