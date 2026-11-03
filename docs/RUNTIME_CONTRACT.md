@@ -76,11 +76,19 @@ At minimum, runtime provides:
   line) and `billing_tier` for the latest request.
 - `/api/copilot/quota` reads GitHub's internal `copilot_internal/user` with the
   member's Copilot credential and returns `available`, `plan`, `reset_date`,
-  `snapshots` (one per quota id with `entitlement` / `remaining` / `used` /
-  `percent_remaining` / `unlimited`), `credits` when a snapshot names them,
-  `raw_keys` and `error`. The endpoint is unofficial on GitHub's side, so a
-  changed shape degrades to `available: false` rather than failing; answers
-  are cached for a minute.
+  `reset_date_utc`, `token_based_billing`, `snapshots` (one per quota id with
+  `entitlement` / `remaining` / `used` / `credits_used` / `percent_remaining` /
+  `unlimited` / `has_quota` / `token_based_billing` / `reset_at` / overage
+  fields), `credits`, `raw_keys` and `error`. Under usage-based billing
+  (`token_based_billing: true`) the `premium_interactions` snapshot counts AI
+  credits and is projected as `credits` `{id, label: "AI credits", included,
+  used, remaining, percent_remaining, unlimited, pooled, has_quota, exhausted,
+  overage_count, overage_permitted, reset_at}`: a per-seat allotment has
+  `included` / `remaining`, a pooled organization allotment is `unlimited` per
+  user (`included` and `remaining` null), `used` is `credits_used` and
+  `exhausted` means `has_quota: false`. The endpoint is unofficial on
+  GitHub's side, so a changed shape degrades to `available: false` rather
+  than failing; answers are cached for a minute.
 - opencode.json declares the GPT-6 models with the default pricing tier's
   window (400,000 tokens: 272k prompt + 128k output) so OpenCode compacts
   before a request bills at long-context rates; `EFP_OPENCODE_COPILOT_LONG_CONTEXT=1`
