@@ -53,7 +53,90 @@ def test_parse_reads_snapshots_plan_reset_date_and_credits():
     assert credits["label"] == "AI credits"
     # percent_remaining is derived when the answer leaves it out.
     assert credits["percent_remaining"] == 21.7
-    assert payload["credits"] == {"included": 1900, "used": 1487.5, "remaining": 412.5, "unlimited": False}
+    assert payload["token_based_billing"] is None
+    assert payload["credits"]["id"] == "ai_credits"
+    assert payload["credits"]["label"] == "AI credits"
+    assert payload["credits"]["included"] == 1900
+    assert payload["credits"]["used"] == 1487.5
+    assert payload["credits"]["remaining"] == 412.5
+    assert payload["credits"]["unlimited"] is False
+    assert payload["credits"]["pooled"] is False
+    assert payload["credits"]["exhausted"] is False
+
+
+# What ``copilot_internal/user`` answered on 2026-11-02 for an individual plan
+# after Copilot's move to usage-based billing: the premium snapshot counts AI
+# credits (1500 = the plan's $15) and every snapshot says token_based_billing.
+TOKEN_BILLING_SAMPLE = {
+    "copilot_plan": "individual",
+    "quota_reset_date": "2026-12-01",
+    "quota_reset_date_utc": "2026-12-01T00:00:00Z",
+    "token_based_billing": True,
+    "quota_snapshots": {
+        "chat": {"credits_used": 0, "entitlement": 0, "has_quota": True, "percent_remaining": 100, "quota_id": "chat", "remaining": 0, "token_based_billing": True, "unlimited": True},
+        "premium_interactions": {"credits_used": 320.5, "entitlement": 1500, "has_quota": True, "overage_count": 0, "overage_permitted": False, "percent_remaining": 78.63, "quota_id": "premium_interactions", "quota_remaining": 1179.5, "quota_reset_at": 0, "remaining": 1179.5, "token_based_billing": True, "unlimited": False},
+    },
+}
+
+# A Business seat whose organization pools the allotment, as VS Code reads it:
+# unlimited per user, credits_used the only moving number, has_quota false
+# once the pool is spent.
+POOLED_SAMPLE = {
+    "copilot_plan": "business",
+    "quota_reset_date": "2026-12-01",
+    "token_based_billing": True,
+    "quota_snapshots": {
+        "premium_interactions": {"credits_used": 412.25, "entitlement": 0, "has_quota": True, "overage_permitted": False, "percent_remaining": 100, "quota_id": "premium_interactions", "quota_reset_at": 1764547200, "remaining": 0, "token_based_billing": True, "unlimited": True},
+    },
+}
+
+
+def test_token_based_billing_reads_the_premium_snapshot_as_credits():
+    payload = parse_copilot_quota(TOKEN_BILLING_SAMPLE, fetched_at="t")
+    assert payload["token_based_billing"] is True
+    assert payload["reset_date_utc"] == "2026-12-01T00:00:00Z"
+    by_id = {snapshot["id"]: snapshot for snapshot in payload["snapshots"]}
+    premium = by_id["premium_interactions"]
+    assert premium["label"] == "AI credits"
+    assert premium["used"] == 320.5
+    assert premium["credits_used"] == 320.5
+    assert premium["has_quota"] is True
+    assert premium["token_based_billing"] is True
+    assert premium["reset_at"] is None
+    assert by_id["chat"]["used"] == 0
+    credits = payload["credits"]
+    assert credits["id"] == "premium_interactions"
+    assert credits["label"] == "AI credits"
+    assert credits["included"] == 1500
+    assert credits["remaining"] == 1179.5
+    assert credits["used"] == 320.5
+    assert credits["percent_remaining"] == 78.63
+    assert credits["pooled"] is False
+    assert credits["exhausted"] is False
+
+
+def test_a_pooled_allotment_shows_credits_used_and_exhaustion():
+    credits = parse_copilot_quota(POOLED_SAMPLE, fetched_at="t")["credits"]
+    assert credits["pooled"] is True
+    assert credits["included"] is None
+    assert credits["remaining"] is None
+    assert credits["percent_remaining"] is None
+    assert credits["used"] == 412.25
+    assert credits["exhausted"] is False
+    assert credits["reset_at"] == 1764547200
+
+    spent = {**POOLED_SAMPLE, "quota_snapshots": {"premium_interactions": {**POOLED_SAMPLE["quota_snapshots"]["premium_interactions"], "has_quota": False}}}
+    exhausted = parse_copilot_quota(spent, fetched_at="t")["credits"]
+    assert exhausted["exhausted"] is True
+    assert exhausted["has_quota"] is False
+
+
+def test_the_snapshot_flag_counts_when_the_top_level_one_is_missing():
+    payload = {key: value for key, value in TOKEN_BILLING_SAMPLE.items() if key != "token_based_billing"}
+    parsed = parse_copilot_quota(payload, fetched_at="t")
+    assert parsed["token_based_billing"] is True
+    assert parsed["credits"]["label"] == "AI credits"
+    assert unavailable_quota("down")["token_based_billing"] is None
 
 
 def test_parse_tolerates_list_shaped_snapshots_and_odd_payloads():

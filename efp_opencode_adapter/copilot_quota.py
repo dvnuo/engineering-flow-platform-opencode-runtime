@@ -5,8 +5,14 @@ with the member's GitHub OAuth token to show how much of the plan is left:
 the answer carries ``quota_snapshots`` (one entry per quota id such as
 ``premium_interactions``, ``chat`` or ``completions``, each with
 ``entitlement`` / ``remaining`` / ``percent_remaining`` / ``unlimited`` and
-overage fields), a ``quota_reset_date`` and the plan name. It is an internal
-API without a published contract, so everything here parses defensively:
+overage fields), a ``quota_reset_date`` and the plan name. Since Copilot moved
+to usage-based billing (``token_based_billing``) the ``premium_interactions``
+snapshot counts AI credits, the way VS Code's status bar reads it: a per-seat
+allotment has ``entitlement`` / ``remaining``, a pooled organization allotment
+is ``unlimited`` per user with ``credits_used`` as the only moving number and
+``has_quota: false`` once the pool is spent; that snapshot (or one whose id
+names credits) is surfaced as ``credits``. It is an internal API without a
+published contract, so everything here parses defensively:
 unknown shapes degrade to ``available: false`` with an error string, never an
 exception, and the top-level keys seen ride along as ``raw_keys`` so an
 unexpected answer can be understood from the Portal.
@@ -44,11 +50,16 @@ QUOTA_FAILURE_CACHE_TTL_SECONDS = 15
 
 SNAPSHOT_LABELS = {
     "premium_interactions": "Premium requests",
+    "premium_models": "Premium requests",
     "chat": "Chat",
     "completions": "Code completions",
     "ai_credits": "AI credits",
     "credits": "AI credits",
 }
+CREDITS_LABEL = "AI credits"
+# Under usage-based billing these snapshots count AI credits (VS Code reads
+# ``premium_models`` first, then ``premium_interactions``).
+CREDIT_SNAPSHOT_IDS = ("premium_models", "premium_interactions")
 
 
 def _now_iso() -> str:
@@ -80,7 +91,11 @@ def _label_for(snapshot_id: str) -> str:
     return snapshot_id.replace("_", " ").strip().capitalize() or "Quota"
 
 
-def _parse_snapshot(snapshot_id: str, raw: Mapping[str, Any]) -> dict[str, Any]:
+def _flag(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _parse_snapshot(snapshot_id: str, raw: Mapping[str, Any], *, token_based_billing: bool | None = None) -> dict[str, Any]:
     entitlement = _number(raw.get("entitlement"))
     if entitlement is None:
         entitlement = _number(raw.get("quota_entitlement"))
@@ -89,21 +104,67 @@ def _parse_snapshot(snapshot_id: str, raw: Mapping[str, Any]) -> dict[str, Any]:
         remaining = _number(raw.get("quota_remaining"))
     percent_remaining = _number(raw.get("percent_remaining"))
     unlimited = bool(raw.get("unlimited"))
+    snapshot_billing = _flag(raw.get("token_based_billing"))
+    credits_billing = token_based_billing if token_based_billing is not None else snapshot_billing
+    credits_used = _number(raw.get("credits_used"))
+    # A per-seat allotment counts down: used is what left the entitlement
+    # (the basis percent_remaining shares). A pooled allotment has no
+    # per-user entitlement, so credits_used is the only number that moves.
     used = None
     if not unlimited and entitlement is not None and remaining is not None:
         used = max(0.0, entitlement - remaining)
+    elif credits_used is not None:
+        used = max(0.0, credits_used)
     if percent_remaining is None and not unlimited and entitlement and remaining is not None:
         percent_remaining = round(max(0.0, min(100.0, remaining / entitlement * 100.0)), 1)
+    reset_at = _number(raw.get("quota_reset_at"))
+    label = _label_for(snapshot_id)
+    if credits_billing and snapshot_id in CREDIT_SNAPSHOT_IDS:
+        label = CREDITS_LABEL
     return {
         "id": snapshot_id,
-        "label": _label_for(snapshot_id),
+        "label": label,
         "entitlement": entitlement,
         "remaining": remaining,
         "used": used,
+        "credits_used": credits_used,
         "percent_remaining": percent_remaining,
         "unlimited": unlimited,
+        "has_quota": _flag(raw.get("has_quota")),
+        "token_based_billing": snapshot_billing,
+        "reset_at": int(reset_at) if reset_at is not None and reset_at > 0 else None,
         "overage_count": _number(raw.get("overage_count")),
         "overage_permitted": raw.get("overage_permitted") if isinstance(raw.get("overage_permitted"), bool) else None,
+    }
+
+
+def _credits_snapshot(snapshots: list[dict[str, Any]], *, token_based_billing: bool | None) -> dict[str, Any] | None:
+    """The snapshot that counts AI credits, as the Portal's balance chip reads it."""
+
+    chosen = next((snapshot for snapshot in snapshots if "credit" in snapshot["id"].lower()), None)
+    if chosen is None and token_based_billing:
+        by_id = {snapshot["id"]: snapshot for snapshot in snapshots}
+        chosen = next((by_id[identifier] for identifier in CREDIT_SNAPSHOT_IDS if identifier in by_id), None)
+    if chosen is None:
+        return None
+    unlimited = bool(chosen.get("unlimited"))
+    has_quota = chosen.get("has_quota")
+    percent_remaining = None if unlimited else chosen.get("percent_remaining")
+    exhausted = (has_quota is False) if unlimited else (percent_remaining is not None and percent_remaining <= 0)
+    return {
+        "id": chosen["id"],
+        "label": CREDITS_LABEL,
+        "included": None if unlimited else chosen.get("entitlement"),
+        "used": chosen.get("used"),
+        "remaining": None if unlimited else chosen.get("remaining"),
+        "percent_remaining": percent_remaining,
+        "unlimited": unlimited,
+        "pooled": unlimited,
+        "has_quota": has_quota,
+        "exhausted": exhausted,
+        "overage_count": chosen.get("overage_count"),
+        "overage_permitted": chosen.get("overage_permitted"),
+        "reset_at": chosen.get("reset_at"),
     }
 
 
@@ -129,6 +190,8 @@ def unavailable_quota(error: str, *, fetched_at: str | None = None) -> dict[str,
         "fetched_at": fetched_at or _now_iso(),
         "plan": None,
         "reset_date": None,
+        "reset_date_utc": None,
+        "token_based_billing": None,
         "snapshots": [],
         "credits": None,
         "raw_keys": [],
@@ -142,18 +205,14 @@ def parse_copilot_quota(payload: Any, *, fetched_at: str | None = None) -> dict[
     stamp = fetched_at or _now_iso()
     if not isinstance(payload, Mapping):
         return unavailable_quota("copilot quota returned a non-object JSON response", fetched_at=stamp)
-    snapshots = [_parse_snapshot(snapshot_id, raw) for snapshot_id, raw in _iter_snapshots(payload.get("quota_snapshots"))]
-    credits = None
-    for snapshot in snapshots:
-        if "credit" not in snapshot["id"].lower():
-            continue
-        credits = {
-            "included": snapshot["entitlement"],
-            "used": snapshot["used"],
-            "remaining": snapshot["remaining"],
-            "unlimited": snapshot["unlimited"],
-        }
-        break
+    token_based_billing = _flag(payload.get("token_based_billing"))
+    snapshots = [
+        _parse_snapshot(snapshot_id, raw, token_based_billing=token_based_billing)
+        for snapshot_id, raw in _iter_snapshots(payload.get("quota_snapshots"))
+    ]
+    if token_based_billing is None:
+        flags = [snapshot["token_based_billing"] for snapshot in snapshots if snapshot["token_based_billing"] is not None]
+        token_based_billing = any(flags) if flags else None
     plan = _text(payload.get("copilot_plan")) or _text(payload.get("plan")) or _text(payload.get("access_type_sku"))
     reset_date = _text(payload.get("quota_reset_date")) or _text(payload.get("quota_reset_date_utc")) or _text(payload.get("reset_date"))
     return {
@@ -162,8 +221,10 @@ def parse_copilot_quota(payload: Any, *, fetched_at: str | None = None) -> dict[
         "fetched_at": stamp,
         "plan": plan,
         "reset_date": reset_date,
+        "reset_date_utc": _text(payload.get("quota_reset_date_utc")),
+        "token_based_billing": token_based_billing,
         "snapshots": snapshots,
-        "credits": credits,
+        "credits": _credits_snapshot(snapshots, token_based_billing=token_based_billing),
         "raw_keys": sorted(str(key) for key in payload.keys()),
         "error": None,
     }
