@@ -17,6 +17,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from efp_opencode_adapter import vision
 from efp_opencode_adapter.app_keys import ATTACHMENT_SERVICE_KEY, BOOT_PROJECTION_KEY
 from efp_opencode_adapter.attachment_handoff import (
+    ATTACHED_FILES_HEADER,
+    ATTACHED_FILES_RULE,
     HANDOFF_HEADER,
     HANDOFF_NO_BROWSER_TOOL,
     build_attachment_handoff,
@@ -79,18 +81,30 @@ def test_forwarded_mime_types():
 
 def test_build_attachment_handoff_text():
     files = [
-        {"path": "/workspace/uploads/s1/f1/shot.png", "name": "shot.png", "content_type": "image/png", "size_bytes": 12},
-        {"path": "/workspace/uploads/s1/f2/plan.xls", "name": "Q3 plan.xls", "content_type": "application/vnd.ms-excel", "size_bytes": 2048},
-        {"path": "", "name": "ignored.png", "content_type": "image/png", "size_bytes": 1},
+        {"path": "/workspace/uploads/s1/f1/shot.png", "name": "shot.png", "content_type": "image/png", "size_bytes": 12, "status": "unreadable"},
+        {"path": "/workspace/uploads/s1/f2/plan.xls", "name": "Q3 plan.xls", "content_type": "application/vnd.ms-excel", "size_bytes": 2048, "status": "unreadable"},
+        {"path": "/workspace/uploads/s1/f3/notes.txt", "name": "notes.txt", "content_type": "text/plain", "size_bytes": 10, "status": "excerpt"},
+        {"path": "", "name": "ignored.png", "content_type": "image/png", "size_bytes": 1, "status": "unreadable"},
     ]
     text = build_attachment_handoff(files)
-    assert text.startswith(HANDOFF_HEADER)
-    assert "- /workspace/uploads/s1/f1/shot.png (image/png, 12 bytes)" in text
-    assert '- /workspace/uploads/s1/f2/plan.xls (application/vnd.ms-excel, 2048 bytes, attached as "Q3 plan.xls")' in text
+    assert text.startswith(ATTACHED_FILES_HEADER)
+    assert "- /workspace/uploads/s1/f1/shot.png (image/png, 12 bytes; not readable by the chat model)" in text
+    assert (
+        '- /workspace/uploads/s1/f2/plan.xls (application/vnd.ms-excel, 2048 bytes, attached as "Q3 plan.xls"; '
+        "not readable by the chat model)"
+    ) in text
+    assert "- /workspace/uploads/s1/f3/notes.txt (text/plain, 10 bytes; an excerpt of it is in this prompt)" in text
     assert "ignored.png" not in text
+    assert text.index(ATTACHED_FILES_RULE) > text.index("notes.txt")
+    assert text.index(HANDOFF_HEADER) > text.index(ATTACHED_FILES_RULE)
     assert text.endswith(HANDOFF_NO_BROWSER_TOOL)
     assert "inspect-image" not in text and "never guess" in text
     assert build_attachment_handoff([]) == ""
+
+    # Nothing the model cannot read: the list and the rule, no analysis wording.
+    readable = build_attachment_handoff([files[2]])
+    assert readable.startswith(ATTACHED_FILES_HEADER) and readable.endswith(ATTACHED_FILES_RULE)
+    assert HANDOFF_HEADER not in readable and HANDOFF_NO_BROWSER_TOOL not in readable
 
 
 def test_attachment_parts_hand_unreadable_files_to_the_agent():
@@ -104,23 +118,36 @@ def test_attachment_parts_hand_unreadable_files_to_the_agent():
         svc, "s1", [image["file_id"], sheet["file_id"], note["file_id"]], inline_images=False
     )
     assert not any(part.get("type") == "file" for part in parts)
-    handoff = next(part for part in parts if part.get("type") == "text" and part.get("text", "").startswith(HANDOFF_HEADER))
+    # The list of every file with its workspace path leads the parts.
+    handoff = parts[0]
+    assert handoff["type"] == "text" and handoff["text"].startswith(ATTACHED_FILES_HEADER)
     assert handoff["synthetic"] is True
-    assert image["workspace_path"] in handoff["text"] and sheet["workspace_path"] in handoff["text"]
-    assert "(image/png, 11 bytes)" in handoff["text"]
-    assert HANDOFF_NO_BROWSER_TOOL in handoff["text"]
-    assert any("hello file" in part.get("text", "") for part in parts if part.get("type") == "text")
+    assert f"- {image['workspace_path']} (image/png, 11 bytes; not readable by the chat model)" in handoff["text"]
+    assert f"- {sheet['workspace_path']} (application/vnd.ms-excel, 16 bytes; not readable by the chat model)" in handoff["text"]
+    assert f"- {note['workspace_path']} (text/plain, 10 bytes; an excerpt of it is in this prompt)" in handoff["text"]
+    assert ATTACHED_FILES_RULE in handoff["text"] and HANDOFF_NO_BROWSER_TOOL in handoff["text"]
+    excerpt = next(part for part in parts if part.get("type") == "text" and "hello file" in part.get("text", ""))
+    assert f"## notes.txt ({note['workspace_path']})" in excerpt["text"]
     by_id = {entry.get("file_id"): entry for entry in debug}
     assert by_id[image["file_id"]]["action"] == "attachment_handoff" and by_id[image["file_id"]]["inlined"] is False
     assert by_id[image["file_id"]]["path"] == image["workspace_path"]
     assert by_id[sheet["file_id"]]["action"] == "attachment_handoff"
+    assert by_id[note["file_id"]]["action"] == "text_context" and by_id[note["file_id"]]["path"] == note["workspace_path"]
 
-    # With a provider that sees images the image is a file part again; the
-    # spreadsheet still goes to the handoff block.
+    # With a provider that sees images the image is a file part again, listed
+    # as such; the spreadsheet is still the one the model cannot read.
     parts, _debug = build_opencode_attachment_parts(svc, "s1", [image["file_id"], sheet["file_id"]], inline_images=True)
     assert any(part.get("type") == "file" and part.get("mime") == "image/png" for part in parts)
-    handoff = next(part for part in parts if part.get("type") == "text" and part.get("text", "").startswith(HANDOFF_HEADER))
-    assert sheet["workspace_path"] in handoff["text"] and image["workspace_path"] not in handoff["text"]
+    handoff = parts[0]
+    assert handoff["text"].startswith(ATTACHED_FILES_HEADER)
+    assert f"- {image['workspace_path']} (image/png, 11 bytes; sent to the model as a file part)" in handoff["text"]
+    assert f"- {sheet['workspace_path']} (application/vnd.ms-excel, 16 bytes; not readable by the chat model)" in handoff["text"]
+    assert HANDOFF_NO_BROWSER_TOOL in handoff["text"]
+
+    # Only readable files: no analysis wording at all.
+    parts, _debug = build_opencode_attachment_parts(svc, "s1", [note["file_id"]])
+    assert parts[0]["text"].startswith(ATTACHED_FILES_HEADER) and parts[0]["text"].endswith(ATTACHED_FILES_RULE)
+    assert HANDOFF_NO_BROWSER_TOOL not in parts[0]["text"]
 
 
 # --- boot projection and chat -----------------------------------------------------------
@@ -184,6 +211,6 @@ async def test_chat_hands_off_the_files_the_provider_cannot_read():
 
     parts = captured["parts"]
     assert not any(part.get("type") == "file" for part in parts)
-    handoff = next(part for part in parts if part.get("type") == "text" and part.get("text", "").startswith(HANDOFF_HEADER))
+    handoff = next(part for part in parts if part.get("type") == "text" and part.get("text", "").startswith(ATTACHED_FILES_HEADER))
     assert img["workspace_path"] in handoff["text"] and memo["workspace_path"] in handoff["text"]
-    assert HANDOFF_NO_BROWSER_TOOL in handoff["text"]
+    assert HANDOFF_HEADER in handoff["text"] and HANDOFF_NO_BROWSER_TOOL in handoff["text"]
