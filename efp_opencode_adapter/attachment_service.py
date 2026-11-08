@@ -297,16 +297,19 @@ def build_opencode_attachment_parts(
 ) -> tuple[list[dict], list[dict]]:
     """Message parts for the attachments.
 
-    ``inline_images`` is False when the chat provider cannot see images
-    (GitHub Copilot since vision was disabled): images are then not sent as
-    file parts but described in a handoff block that points the agent at the
-    workspace copy. The office formats the adapter does not parse (doc, dot,
-    xls) always go into that block; ``attachment_handoff.py`` says what it
-    tells the agent.
+    Text-like files go in as an excerpt (``max_text_chars`` across them), PDFs
+    as file parts, images as file parts only while ``inline_images`` (False
+    for a chat provider that cannot see images: GitHub Copilot since vision
+    was disabled). Whatever reached the model, every attachment is listed in
+    an "Attached files" block with its workspace path: a request to process
+    the file takes the file, not the excerpt. The office formats the adapter
+    does not parse (doc, dot, xls), and images the provider cannot see, are
+    marked as not readable there; ``attachment_handoff.py`` says what the
+    block tells the agent.
     """
     parts: list[dict] = []
     debug: list[dict] = []
-    handoff_files: list[dict[str, Any]] = []
+    attached_files: list[dict[str, Any]] = []
     has_attachments = bool(attachments)
     if not service and has_attachments:
         return [_attachment_context_part("Attachments were provided, but the attachment service is unavailable.")], [{"status": "error", "error": "attachment_service_unavailable"}]
@@ -319,7 +322,7 @@ def build_opencode_attachment_parts(
     if any(item.get("error") == "attachments_not_list" for item in normalize_debug):
         parts.append(_attachment_context_part("Attachments could not be processed: attachments must be a list."))
         return parts, debug
-    text_blocks: list[str] = ["Attached files:\n"]
+    text_blocks: list[str] = ["Attached file excerpts:\n"]
     used = len(text_blocks[0])
     text_added = False
     text_budget_exhausted = False
@@ -334,11 +337,15 @@ def build_opencode_attachment_parts(
             content_type = meta.get("content_type") or "application/octet-stream"
             raw = original_path.read_bytes()
             size = len(raw)
-            item = {"file_id": fid, "name": name, "content_type": content_type, "size": size, "status": "ok"}
+            workspace_path = str(meta.get("workspace_path") or original_path)
+            item = {"file_id": fid, "name": name, "content_type": content_type, "size": size, "status": "ok", "path": workspace_path}
+            listed = {"path": workspace_path, "name": name, "content_type": content_type, "size_bytes": size, "status": ""}
+            attached_files.append(listed)
 
             parsed_file = base / "parsed.json"
             if parsed_file.exists() or _is_supported_text(name, content_type, raw):
                 if text_budget_exhausted:
+                    listed["status"] = "omitted"
                     item.update({"action": "text_context", "truncated": True})
                     debug.append(item)
                     continue
@@ -354,9 +361,10 @@ def build_opencode_attachment_parts(
                     if parsed.get("success"):
                         text = parsed.get("text", "")
                 if text:
-                    block = f"\n## {name}\n{text}\n"
+                    block = f"\n## {name} ({workspace_path})\n{text}\n"
                     used, truncated = _append_truncated(text_blocks, block, used, max_text_chars)
                     text_added = True
+                    listed["status"] = "excerpt"
                     item.update({"action": action, "truncated": bool(truncated)})
                     debug.append(item)
                     if truncated:
@@ -364,9 +372,8 @@ def build_opencode_attachment_parts(
                     continue
 
             if (content_type.startswith("image/") and not inline_images) or is_forwarded_mime(content_type):
-                handoff_path = str(meta.get("workspace_path") or original_path)
-                handoff_files.append({"path": handoff_path, "name": name, "content_type": content_type, "size_bytes": size})
-                item.update({"action": "attachment_handoff", "inlined": False, "path": handoff_path})
+                listed["status"] = "unreadable"
+                item.update({"action": "attachment_handoff", "inlined": False})
                 debug.append(item)
                 continue
 
@@ -378,14 +385,17 @@ def build_opencode_attachment_parts(
                         parts.append(_attachment_context_part(f"Attached PDF: {name} ({content_type}, {size} bytes). The binary PDF is included as a file part."))
                     import base64
                     parts.append({"type": "file", "mime": content_type, "filename": name, "url": f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"})
+                    listed["status"] = "file_part"
                     item.update({"action": "inline_file", "inlined": True})
                 else:
                     parts.append(_attachment_context_part(f"Attached file {name} ({content_type}, {size} bytes) was not inlined because it exceeds the {max_inline_bytes} byte inline limit."))
+                    listed["status"] = "omitted"
                     item.update({"action": "inline_file", "inlined": False})
                 debug.append(item)
                 continue
 
             parts.append(_attachment_context_part(f"Attached file {name} ({content_type}, {size} bytes) is uploaded, but this runtime cannot parse or inline this file type yet."))
+            listed["status"] = "not_parsed"
             item.update({"action": "unsupported", "status": "ok"})
             debug.append(item)
         except Exception as exc:
@@ -395,8 +405,10 @@ def build_opencode_attachment_parts(
 
     if text_added and len(text_blocks) > 1:
         parts.insert(0, _attachment_context_part("".join(text_blocks)))
-    if handoff_files:
-        parts.append(_attachment_context_part(build_attachment_handoff(handoff_files)))
+    # The list of every attachment with its workspace path leads the parts:
+    # the excerpts are previews, the paths are what a tool reads.
+    if attached_files:
+        parts.insert(0, _attachment_context_part(build_attachment_handoff(attached_files)))
 
     return parts, debug
 def build_attachment_context(session_id: str, attachments: list[dict], *, settings: Settings | None = None, max_chars: int = 30000) -> str:
