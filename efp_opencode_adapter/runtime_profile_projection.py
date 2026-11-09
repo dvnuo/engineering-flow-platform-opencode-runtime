@@ -322,8 +322,14 @@ def project_canonical_for_runtime(
     if isinstance(llm, dict):
         projected_llm = project_llm_for_runtime(llm, runtime_type)
         max_context_tokens = projected_llm.pop("max_context_tokens", None)
+        max_steps = projected_llm.pop("max_steps", None)
         projected["llm"] = projected_llm
         if not is_opencode_runtime_type(runtime_type) and isinstance(max_context_tokens, int):
             projected["max_context_tokens"] = max_context_tokens
+        # The Model provider's step limit is the loop cap both runtimes read:
+        # RuntimeConfig.max_iterations on native (interactive chats), the
+        # primary agent's steps on OpenCode (build_opencode_config).
+        if isinstance(max_steps, int) and not isinstance(max_steps, bool) and max_steps > 0:
+            projected["max_iterations"] = max_steps
     projected = strip_opencode_runtime_restrictions(projected, runtime_type)
     return _with_native_cli_tool_instructions(projected, runtime_type)

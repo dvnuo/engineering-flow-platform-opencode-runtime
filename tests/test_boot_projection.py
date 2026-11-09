@@ -78,6 +78,20 @@ def test_project_canonical_transforms_copilot_llm_to_opencode_form():
     assert canonical["llm"]["max_context_tokens"] == 1_000_000
 
 
+def test_project_canonical_turns_the_step_limit_into_max_iterations():
+    # The Portal stores the Model provider connector's Max steps per message as
+    # llm.max_steps; the projection hands it to build_opencode_config as the
+    # loop cap, under the same name the native runtime reads.
+    canonical = {"llm": {"provider": "github_copilot", "model": "gpt-5.6-terra", "max_steps": 60}}
+    projected = project_canonical_for_runtime(canonical, "opencode")
+    assert "max_steps" not in projected["llm"]
+    assert projected["max_iterations"] == 60
+    assert canonical["llm"]["max_steps"] == 60
+    assert "max_iterations" not in project_canonical_for_runtime(
+        {"llm": {"provider": "github_copilot", "model": "gpt-5.6-terra"}}, "opencode"
+    )
+
+
 def test_project_canonical_coerces_non_copilot_provider_to_copilot():
     # GitHub Copilot is the only supported provider: a non-copilot provider is
     # coerced to github-copilot at projection time (including a model's provider
