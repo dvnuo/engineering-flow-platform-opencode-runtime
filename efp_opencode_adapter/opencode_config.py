@@ -160,6 +160,19 @@ def provider_config_from_runtime_profile(runtime_config: dict, settings: Setting
     return {"provider": {provider: {"options": options}}}
 
 
+# Model calls one prompt may take before OpenCode disables the tools and asks
+# for a text answer, unless the runtime profile sets a step limit (the Model
+# provider connector's Max steps per message, projected to ``max_iterations``).
+DEFAULT_AGENT_STEPS = 40
+
+
+def agent_steps_from_runtime_profile(runtime_config: dict | None) -> int:
+    """The primary agent's ``steps``: the profile's step limit, else the default."""
+
+    configured = _int_or_none((runtime_config or {}).get("max_iterations")) if isinstance(runtime_config, dict) else None
+    return configured if configured is not None else DEFAULT_AGENT_STEPS
+
+
 def build_opencode_config(settings: Settings, runtime_config: dict | None = None) -> tuple[dict, str, list[str]]:
     runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
     skills_index = load_skills_index(settings)
@@ -175,7 +188,7 @@ def build_opencode_config(settings: Settings, runtime_config: dict | None = None
             "efp-main": {
                 "description": "Portal managed OpenCode primary agent",
                 "mode": "primary",
-                "steps": 40,
+                "steps": agent_steps_from_runtime_profile(runtime_config),
                 "permission": {},
             }
         },

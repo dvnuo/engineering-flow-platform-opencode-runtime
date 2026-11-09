@@ -1,6 +1,6 @@
 import json
 
-from efp_opencode_adapter.opencode_config import EFP_WORKSPACE_INSTRUCTIONS_GLOB, build_opencode_config, model_from_runtime_profile, normalize_opencode_provider_id, provider_config_from_runtime_profile, write_opencode_config
+from efp_opencode_adapter.opencode_config import DEFAULT_AGENT_STEPS, EFP_WORKSPACE_INSTRUCTIONS_GLOB, agent_steps_from_runtime_profile, build_opencode_config, model_from_runtime_profile, normalize_opencode_provider_id, provider_config_from_runtime_profile, write_opencode_config
 from efp_opencode_adapter.settings import Settings
 
 
@@ -19,6 +19,8 @@ def test_build_opencode_config_defaults(tmp_path, monkeypatch):
     assert "prompt" not in cfg["agent"]["efp-main"]
     assert cfg["agent"]["efp-main"]["permission"] == {}
     assert "permission" in updated and "agent" in updated and "instructions" in updated
+    # Without a profile step limit the primary agent keeps the adapter default.
+    assert cfg["agent"]["efp-main"]["steps"] == 40
 
 
 def test_model_mapping():
@@ -200,3 +202,21 @@ def test_write_opencode_config_uses_workspace_instruction_glob_only(tmp_path, mo
     written = json.loads(settings.opencode_config_path.read_text(encoding="utf-8"))
     assert written["instructions"] == [EFP_WORKSPACE_INSTRUCTIONS_GLOB]
     assert not (settings.workspace_dir / ".opencode" / "instructions").exists()
+
+
+def test_agent_steps_follow_the_profile_step_limit(tmp_path, monkeypatch):
+    # The Model provider connector's Max steps per message reaches the adapter
+    # as the projected max_iterations and becomes the primary agent's steps.
+    monkeypatch.setenv("EFP_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "workspace/.opencode/opencode.json"))
+    settings = Settings.from_env()
+
+    cfg, _, _ = build_opencode_config(settings, {"max_iterations": 120})
+    assert cfg["agent"]["efp-main"]["steps"] == 120
+
+    assert DEFAULT_AGENT_STEPS == 40
+    assert agent_steps_from_runtime_profile({"max_iterations": 7}) == 7
+    # Nothing, nonsense or a non-positive value keeps the default.
+    for runtime_config in (None, {}, {"max_iterations": 0}, {"max_iterations": "lots"}, {"max_iterations": -1}):
+        assert agent_steps_from_runtime_profile(runtime_config) == 40, runtime_config
