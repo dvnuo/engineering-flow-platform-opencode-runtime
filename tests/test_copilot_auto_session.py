@@ -178,6 +178,8 @@ async def test_auto_turn_is_routed_once_and_sent_as_the_picked_model_with_the_se
     assert sent["reasoning"] == {"effort": "high"}
     assert [call["path"] for call in calls["chat"]] == ["/responses", "/responses"]
     assert all(call["headers"]["Copilot-Session-Token"] == "sess-1" for call in calls["chat"])
+    # The session token only counts (auto billing, the discount) on a request that names an API version.
+    assert all(call["headers"]["X-GitHub-Api-Version"] == "2026-01-09" for call in calls["chat"])
     assert all(call["headers"]["Authorization"] == "Bearer tid=INTERNAL_TOKEN" for call in calls["chat"])
     manager = client.app[COPILOT_AUTO_SESSION_MANAGER_KEY]
     routing = manager.last_routing
