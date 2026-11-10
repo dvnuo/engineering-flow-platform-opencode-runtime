@@ -59,8 +59,9 @@ logger = logging.getLogger(__name__)
 
 AUTO_ROUTE_PATH = "/auto"
 MODELS_PATH = "/models"
-# VS Code's CAPI client stamps this API version on every request; without it
-# the auto routes answer 404.
+# VS Code's CAPI client stamps this API version on its ``/auto`` and
+# ``/models`` calls; without it the auto routes answer 404. (Chat calls get
+# their own version in copilot_proxy.)
 AUTO_API_VERSION = "2026-08-01"
 # Route again this close to the session token's expires_at (VS Code's
 # five-minute rule; the token lasts 24 h).
