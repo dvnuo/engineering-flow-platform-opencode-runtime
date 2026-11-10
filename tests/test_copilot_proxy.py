@@ -109,6 +109,8 @@ async def test_proxy_forwards_chat_and_responses_to_upstream_with_internal_token
     assert captured[0]["headers"]["Copilot-Integration-Id"] == "vscode-chat"
     assert captured[0]["headers"]["Openai-Intent"] == "conversation-edits"
     assert captured[0]["headers"]["x-initiator"] == "agent"
+    assert captured[0]["headers"]["X-GitHub-Api-Version"] == "2026-01-09"
+    assert captured[1]["headers"]["X-GitHub-Api-Version"] == "2026-01-09"
     encoded = json.dumps(captured)
     assert "ghu_SHOULD_NOT_FORWARD" not in encoded
     assert "X-Api-Key" not in encoded
@@ -307,6 +309,29 @@ async def test_proxy_labels_a_request_without_or_with_an_unknown_initiator_agent
     assert unlabelled.status == 200 and unknown.status == 200
     assert captured[0]["headers"].getall("x-initiator") == ["agent"]
     assert captured[1]["headers"].getall("x-initiator") == ["agent"]
+
+    await client.close()
+    await upstream.close()
+
+
+@pytest.mark.asyncio
+async def test_proxy_stamps_one_api_version_on_chat_calls_and_none_on_a_get(tmp_path, monkeypatch):
+    # Without X-GitHub-Api-Version the gateway ignores Copilot-Session-Token,
+    # so an auto-routed request is billed as the plain model.
+    upstream, captured = await _capturing_upstream()
+    monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(tmp_path / "state"))
+    app = _proxy_app(Settings.from_env(), StaticTokenManager(str(upstream.make_url("/")).rstrip("/")))
+    client = TestClient(TestServer(app))
+    await client.start_server()
+
+    plain = await client.post("/api/internal/copilot/responses", data=b"{}")
+    own = await client.post("/api/internal/copilot/responses", headers={"x-github-api-version": "2020-01-01"}, data=b"{}")
+    listing = await client.get("/api/internal/copilot/models")
+
+    assert plain.status == 200 and own.status == 200 and listing.status == 200
+    assert captured[0]["headers"].getall("X-GitHub-Api-Version") == ["2026-01-09"]
+    assert captured[1]["headers"].getall("X-GitHub-Api-Version") == ["2026-01-09"]
+    assert "X-GitHub-Api-Version" not in captured[2]["headers"]
 
     await client.close()
     await upstream.close()

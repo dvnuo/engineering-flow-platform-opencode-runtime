@@ -64,6 +64,11 @@ def _request_is_loopback(request: web.Request) -> bool:
 
 
 _INITIATORS = frozenset({"user", "agent"})
+# The API version VS Code stamps on its chat requests. Without one the gateway
+# ignores ``Copilot-Session-Token``: an auto-routed request is billed as the
+# plain model, with no auto discount (measured 2026-11-10 against a business
+# seat). OpenCode sends none itself.
+CHAT_API_VERSION = "2026-01-09"
 
 
 def _inbound_initiator(headers: Mapping[str, str]) -> str | None:
@@ -168,6 +173,12 @@ async def copilot_proxy_handler(request: web.Request) -> web.StreamResponse:
             "x-initiator": inbound_initiator or "agent",
         }
     )
+    if request.method == "POST":
+        # Chat calls only: a GET (the model list) keeps the answer shape
+        # OpenCode already reads.
+        for key in [key for key in outbound_headers if key.lower() == "x-github-api-version"]:
+            outbound_headers.pop(key)
+        outbound_headers["X-GitHub-Api-Version"] = CHAT_API_VERSION
     body = await request.read()
     if request.method == "POST" and body:
         # Copilot "auto" is routed here the way VS Code does it: the body's
