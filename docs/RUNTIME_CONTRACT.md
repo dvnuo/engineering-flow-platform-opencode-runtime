@@ -48,6 +48,7 @@ At minimum, runtime provides:
 - `/api/capabilities`
 - `/api/permissions/respond`
 - `/api/personalization`
+- `/api/workspace/repos`
 - `/api/sessions/{session_id}/pending-input`
 - `/api/sessions/{session_id}/permission/respond`
 - `/api/tasks/execute`
@@ -106,6 +107,65 @@ Portal clone the repo a second time.
 
 Both files are optional. A branch without them returns
 `{"welcome": null, "cards": []}` and Portal falls back to its generic welcome.
+
+A card needs a `title` and at least one way to build its prompt:
+
+- `prompt`, with an optional `input` (`label`, `placeholder`) -- the legacy
+  form; what the member types replaces `{{input}}`. An `input` may also carry
+  `source` (the id of a picker Portal offers, such as `github.branches`),
+  `params` (a small flat mapping handed to that source) and `multiline: true`.
+- `fields` + `template` -- a form of one to six named fields; each value
+  replaces its `{{name}}` in the template. A field has `name`, `label`,
+  `type` (`text`, `textarea`, `choice` or `file`; `text` when missing),
+  `placeholder` and `required` (true unless it says otherwise), plus `source`
+  / `params` on a `text` field, `options` (`{value, label}`) and `multiple`
+  on a `choice`, `accept` (lower-cased extensions) on a `file`, and an
+  optional `default` (a string or a list of strings, as written; on a
+  `choice` only values among its options, and only the first unless it is
+  `multiple`).
+
+The runtime only checks shapes; what a `source` means is Portal's business.
+Invalid keys are dropped, never raised. `fields` and `template` are valid
+together or dropped together: an unknown `type`, a missing, malformed or
+repeated `name`, a `choice` with no option, a seventh field, or a template
+placeholder that names no field drops both, and the card falls back to its
+`prompt` if it has one.
+
+Without a version the endpoint answers in the legacy shape -- `{title,
+description, icon, prompt, input?}`, leaving out any card that has no
+`prompt` -- so an older Portal never receives a card it cannot send. With
+`?v=2` (any integer of 2 or more) a card also carries its `fields` and
+`template`, and a card that only has the form is sent with `prompt: ""` and
+no `input`.
+
+## Workspace repositories
+`GET /api/workspace/repos` lists the git repositories cloned in the workspace,
+for Portal's "branches in this workspace" picker. It is read-only and takes no
+parameters: which directories are looked at is never the caller's choice.
+
+The answer is `{"repos": [...], "truncated": bool}`. Each entry has `path`
+(workspace-relative, forward slashes), `name`, `remote_url` (the origin URL
+without its userinfo), `host` and `repo` (parsed from an https, `ssh://` or
+`git@host:owner/name.git` origin; both empty without one), `branch` (empty on
+a detached HEAD), `head`, `upstream` (empty when the branch tracks nothing),
+`default_branch` (from `refs/remotes/origin/HEAD`, empty when unknown),
+`ahead` (commits the upstream does not have, else `origin/<default_branch>`;
+null when there is neither), `dirty` (tracked files changed; null when git
+did not answer in time) and `last_commit_at` (UTC, ISO 8601).
+
+- Scanned, in this order: `repos/*`, `repos/*/*`, `EFP_WORKSPACE_REPOS_DIR`
+  (the same two levels, when it is set to another directory inside the
+  workspace), `.efp_runtime/repositories/*` and the workspace root's direct
+  children. A repository is a directory holding a `.git` entry. One that
+  resolves outside the workspace is skipped, and the workspace root itself is
+  never listed.
+- At most 30 repositories, newest commit first. Every git command is a local
+  query with a 3 second timeout, `GIT_TERMINAL_PROMPT=0` and
+  `GIT_OPTIONAL_LOCKS=0`: nothing is fetched and nothing is written. The
+  whole listing has an 8 second budget; `truncated` is true when it ran out or
+  when more than 30 repositories were found.
+- A repository git cannot read (no commit yet, a broken clone) is left out
+  rather than failing the listing.
 
 ## Chat attachments
 

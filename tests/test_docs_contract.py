@@ -15,7 +15,7 @@ def test_docs_contract_sections_and_keywords():
         '## Failure modes and expected status',
     ]:
         assert section in runtime
-    for token in [':8000', ':4096', 'Portal only calls adapter', 'must not be exposed', '/root/.local/share/opencode', '/root/.local/share/efp-compat', 'runtime-only', '/api/tasks/execute', '/api/capabilities', '/api/skills', '/api/personalization', '/api/sessions/{session_id}/pending-input', '/api/sessions/{session_id}/permission/respond', 'question_response_unsupported', '/workspace/.opencode/skills', 'Portal provides skills only', 'External tools subsystem removed / not supported']:
+    for token in [':8000', ':4096', 'Portal only calls adapter', 'must not be exposed', '/root/.local/share/opencode', '/root/.local/share/efp-compat', 'runtime-only', '/api/tasks/execute', '/api/capabilities', '/api/skills', '/api/personalization', '/api/workspace/repos', '/api/sessions/{session_id}/pending-input', '/api/sessions/{session_id}/permission/respond', 'question_response_unsupported', '/workspace/.opencode/skills', 'Portal provides skills only', 'External tools subsystem removed / not supported']:
         assert token in runtime
     for forbidden in ['## Tools asset mapping', 'tools-index', 'tools_index', '/app/tools', 'EFP_TOOLS_DIR', 'OPENCODE_TOOLS_DIR', 'tool_mapping', 'opencode_tools', 'RUNTIME_CONTRACT_EXPECT_LEGACY_TOOL', 'RUNTIME_CONTRACT_EXPECT_OPENCODE_TOOL', 'RUNTIME_CONTRACT_EXPECT_TOOL_MAPPING', 'RUNTIME_CONTRACT_EXPECT_EFP_TOOL']:
         assert forbidden not in runtime
