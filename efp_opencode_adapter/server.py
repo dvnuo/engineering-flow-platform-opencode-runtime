@@ -60,6 +60,7 @@ from .permissions_api import (
     session_question_respond_handler,
 )
 from .personalization_api import personalization_handler
+from .workspace_repos_api import workspace_repos_handler
 from .portal_metadata_client import PortalMetadataClient
 from .recovery import RecoveryManager
 from .usage_api import usage_handler
@@ -529,6 +530,7 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_get("/api/internal/opencode-effective-config", effective_config_handler)
     app.router.add_get("/api/capabilities", capabilities_handler)
     app.router.add_get("/api/personalization", personalization_handler)
+    app.router.add_get("/api/workspace/repos", workspace_repos_handler)
     app.router.add_get("/api/queue/status", queue_status_handler)
     app.router.add_get("/api/skills", skills_handler)
     app.router.add_get("/api/git-info", git_info_handler)
