@@ -47,6 +47,7 @@ from .reply_language import prepend_reply_language_block, resolve_reply_language
 from .repository_workspace import ensure_repo_checkout, parse_create_pr_repo_request
 from .session_store import SessionDeletedError, SessionRecord, session_title_metadata, session_title_metadata_for
 from .session_title import schedule_session_title, should_generate_after_turn
+from .session_user import prepend_session_user_block, resolve_session_user
 from .skill_invocation import build_skill_prompt, evaluate_skill_invocation, parse_slash_invocation
 from .thinking_events import safe_preview, utc_now_iso
 from .trace_context import add_trace_context, build_trace_context, profile_version_from_metadata
@@ -889,6 +890,12 @@ async def handle_chat_payload_for_app(
     agent = _optional_str(payload.get("agent")) or _optional_str(metadata.get("agent"))
     system = _optional_str(payload.get("system")) or _optional_str(metadata.get("system"))
     system = f"{system}{FINAL_RESPONSE_CONTRACT_SUFFIX}" if system else FINAL_RESPONSE_CONTRACT_SUFFIX.strip()
+    # The "Session user" block names the member who is asking: the model
+    # otherwise only knows the shared CLI credentials, so "my tickets"
+    # silently becomes the service account's tickets. It is prepended first
+    # so that it follows the "Reply language" block; a request without
+    # portal_user keeps its string unchanged.
+    system = prepend_session_user_block(system, resolve_session_user(metadata))
     # The member's "Reply language" block leads the per-turn system string,
     # which OpenCode appends to its own prompt on every step of the turn; the
     # skill-prompt path sends the same variable. Without a block the string
