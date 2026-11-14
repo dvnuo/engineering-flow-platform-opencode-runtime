@@ -34,6 +34,7 @@ from .session_store import (
     session_title_metadata_for,
 )
 from .session_title import TitleGenerationError, find_title_task, generate_session_title, schedule_title_publish
+from .session_user import prepend_session_user_block, resolve_session_user
 from .thinking_events import safe_preview, utc_now_iso
 
 
@@ -1246,7 +1247,12 @@ async def edit_message_handler(request: web.Request) -> web.Response:
         raise _json_bad_gateway("opencode_edit_failed", detail=_unexpected_upstream_detail(exc), metadata=metadata)
     # The edit body carries the caller's own system text, without the chat
     # path's contract suffix; the member's "Reply language" block still leads it.
-    system = prepend_reply_language_block(body.get("system"), resolve_reply_language(body.get("metadata")))
+    # The "Session user" block follows that one (so it is prepended first): the
+    # model otherwise only knows the shared CLI credentials, so "my tickets"
+    # silently becomes the service account's tickets.
+    edit_metadata = body.get("metadata")
+    system = prepend_session_user_block(body.get("system"), resolve_session_user(edit_metadata))
+    system = prepend_reply_language_block(system, resolve_reply_language(edit_metadata))
     try:
         response_payload = await client.send_message(updated_record.opencode_session_id, parts=[{"type": "text", "text": content}], model=body.get("model") or updated_record.model, agent=body.get("agent") or updated_record.agent, system=system)
     except OpenCodeClientError as exc:

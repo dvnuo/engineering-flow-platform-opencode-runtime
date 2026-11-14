@@ -210,6 +210,19 @@ paths, slash-skill prompts and both message-edit paths; OpenCode 1.14.39's
 command runs without it. With a block in force, session titles follow the
 language of the assistant's answer instead of the user's message.
 
+## Session user
+The same `metadata.portal_user` object names the member who is asking:
+`username`, `display_name`, `id` and, when the Portal knows it,
+`github_login`. An assistant's CLIs sign in with the member's Portal
+connectors, usually a shared service account, so the adapter renders those
+fields as a "Session user" block with identity rules
+(`efp_opencode_adapter/session_user.py`, the rules shared verbatim with the
+native runtime) at the front of the per-turn `system` string, after the
+"Reply language" block when there is one: "my tickets" then means the
+member's, not the service account's. A request without `portal_user`, or with
+neither a `username` nor a `display_name` in it, keeps its `system` string
+unchanged.
+
 ## Interactive input contract
 Portal drives its approval card off the session rather than the permission id:
 it polls `/api/sessions/{session_id}/pending-input` to rebuild a card after a
