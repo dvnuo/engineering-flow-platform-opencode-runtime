@@ -126,3 +126,40 @@ async def test_publish_session_metadata_put_uses_quoted_raw_path_and_headers(mon
     assert got["auth"] == "Bearer tok" and got["token"] == "tok"
     assert got["raw_path"] == "/api/internal/agents/agent%201/sessions/s%2F1%20x%252/metadata"
     await server.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "trust_token, expected",
+    [("5ca1ab1e", "5ca1ab1e"), (" 5ca1ab1e \n", "5ca1ab1e"), (None, None), ("   ", None)],
+)
+async def test_every_portal_call_carries_the_trust_token_when_the_pod_has_one(monkeypatch, trust_token, expected):
+    got = []
+
+    async def ok(request):
+        got.append((request.method, request.headers.get("X-Portal-Trust-Token")))
+        return web.json_response({"ok": True}, status=200)
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", ok)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("PORTAL_INTERNAL_BASE_URL", _base(server))
+    monkeypatch.setenv("PORTAL_AGENT_ID", "agent")
+    if trust_token is None:
+        monkeypatch.delenv("EFP_PORTAL_TRUST_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("EFP_PORTAL_TRUST_TOKEN", trust_token)
+
+    client = PortalMetadataClient(Settings.from_env())
+    published = await client.publish_session_metadata(
+        session_id="s1",
+        latest_event_type="chat.completed",
+        latest_event_state="done",
+    )
+    titled = await client.publish_session_title(session_id="s1", title="Name")
+    deleted = await client.delete_session_metadata("s1")
+    await server.close()
+
+    assert published["success"] is True and titled["success"] is True and deleted["success"] is True
+    assert got == [("PUT", expected), ("PATCH", expected), ("DELETE", expected)]

@@ -12,6 +12,9 @@ def isolated_runtime_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("EFP_ADAPTER_STATE_DIR", str(state))
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(state / "xdg-data" / "opencode"))
     monkeypatch.setenv("OPENCODE_CONFIG", str(workspace / ".opencode" / "opencode.json"))
+    # An assistant pod has a Portal trust token in its environment; a test says
+    # itself whether the pod has one.
+    monkeypatch.delenv("EFP_PORTAL_TRUST_TOKEN", raising=False)
 
 
 def pytest_pyfunc_call(pyfuncitem):

@@ -62,9 +62,9 @@ LOG_TAIL_PREVIEW_CHARS = 20000
 
 REDACTED = "***REDACTED***"
 # Secrets reach the child through the profile projection env, not the adapter's
-# own os.environ (runtime_env strips MANAGED_EXTERNAL_ENV_KEYS); these three are
-# the only ones the adapter process itself still holds.
-ADAPTER_OWN_SECRET_ENV_KEYS = ("PORTAL_INTERNAL_TOKEN", "OPENAI_API_KEY", "GITHUB_TOKEN")
+# own os.environ (runtime_env strips MANAGED_EXTERNAL_ENV_KEYS); these are the
+# only ones the adapter process itself still holds.
+ADAPTER_OWN_SECRET_ENV_KEYS = ("PORTAL_INTERNAL_TOKEN", "EFP_PORTAL_TRUST_TOKEN", "OPENAI_API_KEY", "GITHUB_TOKEN")
 # Short values would shred ordinary log text without protecting anything.
 MIN_REDACTED_SECRET_LENGTH = 6
 AWS_SECRET_ACCESS_KEY_LENGTH = 40

@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 import aiohttp
 
+from .portal_trust import PORTAL_TRUST_TOKEN_HEADER, portal_trust_token
 from .settings import Settings
 from .thinking_events import safe_preview, utc_now_iso
 
@@ -24,6 +25,10 @@ class PortalMetadataClient:
         if self.settings.portal_internal_token:
             headers["Authorization"] = f"Bearer {self.settings.portal_internal_token}"
             headers["X-Portal-Internal-Token"] = self.settings.portal_internal_token
+        # How the Portal tells this assistant's runtime from any other pod.
+        trust_token = portal_trust_token()
+        if trust_token:
+            headers[PORTAL_TRUST_TOKEN_HEADER] = trust_token
         return headers
 
     def _session_url(self, session_id: str, leaf: str) -> str:

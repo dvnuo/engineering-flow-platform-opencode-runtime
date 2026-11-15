@@ -62,6 +62,7 @@ from .permissions_api import (
 from .personalization_api import personalization_handler
 from .workspace_repos_api import workspace_repos_handler
 from .portal_metadata_client import PortalMetadataClient
+from .portal_trust import log_portal_trust_status, portal_trust_middleware
 from .recovery import RecoveryManager
 from .usage_api import usage_handler
 from .usage_tracker import UsageTracker
@@ -481,7 +482,9 @@ async def flush_chatlog_store(app: web.Application) -> None:
 def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None, *, start_event_bridge: bool | None = None, opencode_process_manager: OpenCodeProcessManager | None = None) -> web.Application:
     app = web.Application(
         client_max_size=resolve_upload_client_max_size(),
-        middlewares=[request_logging_middleware],
+        # The request log is outermost so a refused request still leaves its
+        # http.end line; the trust check runs before every route's handler.
+        middlewares=[request_logging_middleware, portal_trust_middleware],
     )
     app[SETTINGS_KEY] = settings
     state_paths = ensure_state_dirs(settings)
@@ -568,6 +571,11 @@ def create_app(settings: Settings, opencode_client: OpenCodeClient | None = None
     app.router.add_post("/api/sessions/{session_id}/messages/{message_id}/delete-from-here", delete_message_from_here_handler)
     app.router.add_get("/api/sessions/{session_id}", get_session_handler)
     app.router.add_delete("/api/sessions/{session_id}", delete_session_handler)
+
+    async def _report_portal_trust(app):
+        log_portal_trust_status()
+
+    app.on_startup.append(_report_portal_trust)
 
     async def _run_recovery(app):
         try:
