@@ -58,8 +58,10 @@ def test_runtime_env_build_and_redact(tmp_path, monkeypatch):
     # jira/confluence/jenkins now flow through the EFP_-prefixed convention, not
     # the old flat JIRA_*/CONFLUENCE_* vars.
     assert r.env["EFP_JIRA_INSTANCES_0_BASE_URL"] == "https://j"
-    assert r.env["EFP_JIRA_INSTANCES_0_AUTH_USERNAME"] == "u"
-    assert r.env["EFP_JIRA_INSTANCES_0_AUTH_API_KEY"] == "x"
+    # A company-hosted Jira takes its token as Bearer, without the username.
+    assert r.env["EFP_JIRA_INSTANCES_0_AUTH_TYPE"] == "bearer_token"
+    assert r.env["EFP_JIRA_INSTANCES_0_AUTH_TOKEN"] == "x"
+    assert "EFP_JIRA_INSTANCES_0_AUTH_USERNAME" not in r.env
     assert "JIRA_EMAIL" not in r.env and "JIRA_API_TOKEN" not in r.env
     aws_credentials = Path(r.env["AWS_SHARED_CREDENTIALS_FILE"])
     efp_config = Path(r.env["EFP_CONFIG"])
@@ -354,21 +356,40 @@ def test_redacted_github_placeholder_not_in_json_or_env(tmp_path, monkeypatch):
 def test_atlassian_username_api_token_projects_basic_api_key(tmp_path, monkeypatch):
     s = _settings(tmp_path, monkeypatch)
     cfg = {
-        "jira": {"enabled": True, "instances": [{"name": "j", "url": "https://j/", "username": "j@example.com", "api_token": "jt", "api_version": "3"}]},
-        "confluence": {"enabled": True, "instances": [{"name": "c", "url": "https://c/wiki/", "username": "c@example.com", "api_token": "ct"}]},
+        "jira": {"enabled": True, "instances": [{"name": "j", "url": "https://j.atlassian.net/", "username": "j@example.com", "api_token": "jt", "api_version": "3"}]},
+        "confluence": {"enabled": True, "instances": [{"name": "c", "url": "https://c.atlassian.net/wiki/", "username": "c@example.com", "api_token": "ct"}]},
     }
     env = build_runtime_env_from_config(s, cfg).env
-    assert env["EFP_JIRA_INSTANCES_0_BASE_URL"] == "https://j"
+    assert env["EFP_JIRA_INSTANCES_0_BASE_URL"] == "https://j.atlassian.net"
     assert env["EFP_JIRA_INSTANCES_0_API_VERSION"] == "3"
     assert env["EFP_JIRA_INSTANCES_0_AUTH_TYPE"] == "basic_api_key"
     assert env["EFP_JIRA_INSTANCES_0_AUTH_USERNAME"] == "j@example.com"
     assert env["EFP_JIRA_INSTANCES_0_AUTH_API_KEY"] == "jt"
-    assert env["EFP_CONFLUENCE_INSTANCES_0_BASE_URL"] == "https://c/wiki"
+    assert env["EFP_CONFLUENCE_INSTANCES_0_BASE_URL"] == "https://c.atlassian.net/wiki"
     assert env["EFP_CONFLUENCE_INSTANCES_0_AUTH_TYPE"] == "basic_api_key"
     assert env["EFP_CONFLUENCE_INSTANCES_0_AUTH_API_KEY"] == "ct"
     # The former flat JIRA_*/CONFLUENCE_* + EFP_*_INSTANCES_JSON vars are gone.
     for key in ("JIRA_EMAIL", "JIRA_API_TOKEN", "EFP_JIRA_INSTANCES_JSON", "CONFLUENCE_EMAIL", "CONFLUENCE_API_TOKEN", "EFP_CONFLUENCE_INSTANCES_JSON"):
         assert key not in env
+
+
+def test_company_hosted_atlassian_username_token_projects_bearer_token(tmp_path, monkeypatch):
+    # A Data Center personal access token is accepted as Bearer only: sent as
+    # Basic beside the username the site answers 401.
+    s = _settings(tmp_path, monkeypatch)
+    cfg = {
+        "jira": {"enabled": True, "instances": [{"name": "j", "url": "https://jira.corp.example/", "username": "alice", "token": "jt"}]},
+        "confluence": {"enabled": True, "instances": [{"name": "c", "url": "https://wiki.corp.example/", "username": "alice", "password": "old-pw", "token": "ct"}]},
+    }
+    env = build_runtime_env_from_config(s, cfg).env
+    assert env["EFP_JIRA_INSTANCES_0_AUTH_TYPE"] == "bearer_token"
+    assert env["EFP_JIRA_INSTANCES_0_AUTH_TOKEN"] == "jt"
+    assert env["EFP_CONFLUENCE_INSTANCES_0_AUTH_TYPE"] == "bearer_token"
+    assert env["EFP_CONFLUENCE_INSTANCES_0_AUTH_TOKEN"] == "ct"
+    for product in ("JIRA", "CONFLUENCE"):
+        for field in ("USERNAME", "PASSWORD", "API_KEY"):
+            assert f"EFP_{product}_INSTANCES_0_AUTH_{field}" not in env
+    assert "old-pw" not in json.dumps(env)
 
 
 def test_jira_username_password_projects_basic_password_and_default_api_version(tmp_path, monkeypatch):
