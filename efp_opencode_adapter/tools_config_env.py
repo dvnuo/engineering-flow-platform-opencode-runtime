@@ -18,6 +18,13 @@ from typing import Any
 
 from .proxy_plan import build_proxy_plan, hostname_of
 
+# The two products whose rows sign in by the Atlassian rule
+# (_build_atlassian_auth), and the hosts Atlassian runs itself: every other
+# Jira or Confluence address is a site a company hosts (Data Center).
+_ATLASSIAN_PRODUCTS = ("jira", "confluence")
+_ATLASSIAN_CLOUD_HOST_SUFFIXES = (".atlassian.net", ".jira.com")
+_ATLASSIAN_CLOUD_API_HOST = "api.atlassian.com"
+
 
 def build_tools_config_json(effective_config: dict[str, Any]) -> dict[str, Any]:
     """Build the tools config payload (RootConfig-shaped dict) for the Go CLIs.
@@ -166,7 +173,7 @@ def _build_product_instances(product_config: Any, *, product: str) -> list[dict[
         if not base_url:
             continue
         name = _unique_instance_name(str(raw.get("name") or f"{product}-{index}").strip(), used_names, product, index)
-        auth = _build_auth(raw)
+        auth = _build_auth(raw, product=product)
         if product == "jira":
             api_version = "3" if str(raw.get("api_version") or "").strip() == "3" else "2"
             instance = {
@@ -250,11 +257,64 @@ def _default_instance_name(product_config: Any, instances: list[dict[str, Any]])
     return preferred if preferred in names else str(instances[0].get("name") or "")
 
 
-def _build_auth(raw: dict[str, Any]) -> dict[str, str]:
+def _is_atlassian_cloud(base_url: str) -> bool:
+    host = hostname_of(base_url)
+    return host == _ATLASSIAN_CLOUD_API_HOST or host.endswith(_ATLASSIAN_CLOUD_HOST_SUFFIXES)
+
+
+def _build_atlassian_auth(*, username: str, password: str, api_key: str, token: str, base_url: str) -> dict[str, str]:
+    """Pick the credential of a Jira or Confluence row.
+
+    A token decides it. On Atlassian Cloud a token is an API token, which
+    signs in as Basic together with the account email. Anywhere else it is a
+    Data Center personal access token, which the site accepts as Bearer only:
+    sent as Basic beside a username it is answered 401, so the username is
+    left out. A token without a username is Bearer everywhere. Only a row
+    with no token signs in with its username and password.
+
+    This is the Portal's ``instance_auth_headers``
+    (app/services/connector_http.py), which its Test button and pickers sign
+    in with, and the native runtime's ``_build_auth``
+    (src/external_cli/profile_config.py). Keep the three the same, or the
+    credential a member's Test proved is not the one the CLI sends.
+    """
+    if api_key or token:
+        if username and _is_atlassian_cloud(base_url):
+            return {
+                "type": "basic_api_key",
+                "username": username,
+                "secret": api_key or token,
+                "stdin_flag": "--api-key-stdin",
+            }
+        return {
+            "type": "bearer_token",
+            "secret": token or api_key,
+            "stdin_flag": "--token-stdin",
+        }
+    if username and password:
+        return {
+            "type": "basic_password",
+            "username": username,
+            "secret": password,
+            "stdin_flag": "--password-stdin",
+        }
+    return {}
+
+
+def _build_auth(raw: dict[str, Any], *, product: str = "") -> dict[str, str]:
     username = _string_or_empty(raw.get("username"))
     password = _string_or_empty(raw.get("password"))
     api_key = _string_or_empty(raw.get("api_key") or raw.get("api_token"))
     token = _string_or_empty(raw.get("token") or raw.get("access_token"))
+    if product in _ATLASSIAN_PRODUCTS:
+        return _build_atlassian_auth(
+            username=username,
+            password=password,
+            api_key=api_key,
+            token=token,
+            base_url=_profile_instance_base_url(raw),
+        )
+    # Jenkins: a username with an API token is Basic wherever it is hosted.
     if username and password:
         return {
             "type": "basic_password",

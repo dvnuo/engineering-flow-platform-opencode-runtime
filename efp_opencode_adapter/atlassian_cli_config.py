@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .tools_config_env import _is_atlassian_cloud
+
 _REDACTED_VALUES = {"***redacted***", "[redacted]", "redacted"}
 
 
@@ -77,12 +79,16 @@ def _build_auth(item: dict[str, Any]) -> dict[str, str] | None:
     username = _first_text(item.get("username"), item.get("email"))
     password = _clean_secret(item.get("password"))
     api_key = _first_clean_secret(item.get("token"), item.get("api_token"), item.get("api_key"))
+    # The choice tools_config_env._build_atlassian_auth makes for the CLI env,
+    # so the auth_type reported here is the one the CLI signs in with: a token
+    # is Basic with the account email on Atlassian Cloud and Bearer on a
+    # company-hosted site, and a password signs in only when there is no token.
+    if api_key:
+        if username and _is_atlassian_cloud(_normalize_base_url(item)):
+            return {"type": "basic_api_key", "username": username, "api_key": api_key}
+        return {"type": "bearer_token", "token": api_key}
     if username and password:
         return {"type": "basic_password", "username": username, "password": password}
-    if username and api_key:
-        return {"type": "basic_api_key", "username": username, "api_key": api_key}
-    if api_key:
-        return {"type": "bearer_token", "token": api_key}
     return None
 
 

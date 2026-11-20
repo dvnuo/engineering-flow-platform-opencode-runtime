@@ -7,6 +7,8 @@ a path segment (e.g. EFP_JIRA_INSTANCES_0_BASE_URL).
 
 from __future__ import annotations
 
+import pytest
+
 from efp_opencode_adapter.tools_config_env import (
     build_cli_env,
     build_tools_config_json,
@@ -19,7 +21,7 @@ SAMPLE = {
     "jira": {
         "enabled": True,
         "instances": [
-            {"name": "jira-main", "url": "https://jira.example/", "username": "svc@example.com", "api_token": "jtok", "project": "QA", "api_version": "3"},
+            {"name": "jira-main", "url": "https://acme.atlassian.net/", "username": "svc@example.com", "api_token": "jtok", "project": "QA", "api_version": "3"},
         ],
     },
     "confluence": {
@@ -42,10 +44,10 @@ SAMPLE = {
 def test_build_cli_env_projects_jira_confluence_jenkins_instances():
     env = build_cli_env(SAMPLE)
 
-    # Jira: username + api_token -> basic_api_key.
+    # Jira on Atlassian Cloud: username + api_token -> basic_api_key.
     assert env["EFP_JIRA_DEFAULT_INSTANCE"] == "jira-main"
     assert env["EFP_JIRA_INSTANCES_0_NAME"] == "jira-main"
-    assert env["EFP_JIRA_INSTANCES_0_BASE_URL"] == "https://jira.example"
+    assert env["EFP_JIRA_INSTANCES_0_BASE_URL"] == "https://acme.atlassian.net"
     assert env["EFP_JIRA_INSTANCES_0_API_VERSION"] == "3"
     assert env["EFP_JIRA_INSTANCES_0_REST_PATH"] == "/rest/api/3"
     assert env["EFP_JIRA_INSTANCES_0_AUTH_TYPE"] == "basic_api_key"
@@ -93,6 +95,68 @@ def test_jira_username_password_defaults_to_api_version_2():
     assert env["EFP_JIRA_INSTANCES_0_REST_PATH"] == "/rest/api/2"
     assert env["EFP_JIRA_INSTANCES_0_AUTH_TYPE"] == "basic_password"
     assert env["EFP_JIRA_INSTANCES_0_AUTH_PASSWORD"] == "p"
+
+
+_CLOUD_API_KEY = {"type": "basic_api_key", "username": "me@example.test", "api_key": "tok"}
+_BEARER = {"type": "bearer_token", "token": "tok"}
+
+
+@pytest.mark.parametrize("product", ["jira", "confluence"])
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        # Atlassian Cloud: an API token signs in as Basic with the account email.
+        ({"url": "https://acme.atlassian.net", "username": "me@example.test", "token": "tok"}, _CLOUD_API_KEY),
+        ({"url": "https://ACME.Atlassian.NET/wiki/", "username": "me@example.test", "token": "tok"}, _CLOUD_API_KEY),
+        ({"url": "https://acme.jira.com", "username": "me@example.test", "api_token": "tok"}, _CLOUD_API_KEY),
+        (
+            {"url": "https://api.atlassian.com/ex/confluence/0f1e2d3c", "username": "me@example.test", "token": "tok"},
+            _CLOUD_API_KEY,
+        ),
+        # A saved password does not outrank the token the member added later.
+        (
+            {"url": "https://acme.atlassian.net", "username": "me@example.test", "password": "pw", "token": "tok"},
+            _CLOUD_API_KEY,
+        ),
+        ({"url": "https://acme.atlassian.net", "token": "tok"}, _BEARER),
+        # A company-hosted site (Data Center): its personal access token is
+        # accepted as Bearer only, so the username beside it is left out.
+        ({"url": "https://wiki.corp.example.test", "username": "me", "token": "tok"}, _BEARER),
+        ({"url": "https://jira.corp.example.test:8443/jira", "username": "me", "api_token": "tok"}, _BEARER),
+        ({"url": "https://wiki.corp.example.test", "username": "me", "password": "pw", "token": "tok"}, _BEARER),
+        ({"url": "https://wiki.corp.example.test", "token": "tok"}, _BEARER),
+        # A company's own host is not Atlassian's because it ends alike.
+        ({"url": "https://notatlassian.net", "username": "me", "token": "tok"}, _BEARER),
+        ({"url": "https://acme.atlassian.net.corp.example.test", "username": "me", "token": "tok"}, _BEARER),
+        # No token: the username and password sign in, on either kind of site.
+        (
+            {"url": "https://wiki.corp.example.test", "username": "me", "password": "pw"},
+            {"type": "basic_password", "username": "me", "password": "pw"},
+        ),
+        (
+            {"url": "https://acme.atlassian.net", "username": "me", "password": "pw"},
+            {"type": "basic_password", "username": "me", "password": "pw"},
+        ),
+    ],
+)
+def test_build_tools_config_json_signs_in_to_an_atlassian_row_like_the_portal_test(product, row, expected):
+    # The same choice as the Portal's instance_auth_headers and the native
+    # runtime's _build_auth, so the credential a member's Test button proved
+    # is the one the CLI sends.
+    root = build_tools_config_json({product: {"enabled": True, "instances": [row]}})
+    assert root[product]["instances"][0]["auth"] == expected
+
+
+def test_build_tools_config_json_keeps_basic_for_a_jenkins_username_with_a_token():
+    # A Jenkins API token is Basic with its username wherever Jenkins is
+    # hosted, and a password still comes first there.
+    row = {"name": "ci", "url": "https://ci.corp.example.test", "username": "me", "token": "tok"}
+    root = build_tools_config_json({"jenkins": {"enabled": True, "instances": [row]}})
+    assert root["jenkins"]["instances"][0]["auth"] == {"type": "basic_api_key", "username": "me", "api_key": "tok"}
+
+    row["password"] = "pw"
+    root = build_tools_config_json({"jenkins": {"enabled": True, "instances": [row]}})
+    assert root["jenkins"]["instances"][0]["auth"] == {"type": "basic_password", "username": "me", "password": "pw"}
 
 
 def test_flatten_encoding_rules():

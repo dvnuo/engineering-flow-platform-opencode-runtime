@@ -20,12 +20,25 @@ def test_jira_username_password_becomes_basic_password():
 
 
 @pytest.mark.parametrize("key", ["token", "api_token", "api_key"])
-def test_username_token_variants_become_basic_api_key(key):
+def test_username_token_variants_become_basic_api_key_on_atlassian_cloud(key):
     cfg, _ = build_atlassian_cli_config({
-        "jira": {"enabled": True, "instances": [{"name": "jira-main", "base_url": "https://jira.example", "username": "svc", key: "secret"}]},
+        "jira": {"enabled": True, "instances": [{"name": "jira-main", "base_url": "https://acme.atlassian.net", "username": "svc", key: "secret"}]},
     })
 
     assert cfg["jira"]["instances"][0]["auth"] == {"type": "basic_api_key", "username": "svc", "api_key": "secret"}
+
+
+@pytest.mark.parametrize("key", ["token", "api_token", "api_key"])
+def test_username_token_variants_become_bearer_token_on_a_company_hosted_site(key):
+    # A Data Center personal access token is accepted as Bearer only, so the
+    # status reports what the CLI env carries (tools_config_env).
+    cfg, _ = build_atlassian_cli_config({
+        "jira": {"enabled": True, "instances": [{"name": "jira-main", "base_url": "https://jira.example", "username": "svc", key: "secret"}]},
+        "confluence": {"enabled": True, "instances": [{"name": "docs", "url": "https://docs.example", "username": "svc", "password": "pw", key: "secret"}]},
+    })
+
+    assert cfg["jira"]["instances"][0]["auth"] == {"type": "bearer_token", "token": "secret"}
+    assert cfg["confluence"]["instances"][0]["auth"] == {"type": "bearer_token", "token": "secret"}
 
 
 def test_token_only_becomes_bearer_token():
