@@ -617,6 +617,18 @@ async def test_child_output_redacts_secrets_taken_from_the_spawn_env(
 
 
 @pytest.mark.asyncio
+async def test_child_output_redacts_the_portal_trust_token(monkeypatch, tmp_path, caplog):
+    """The adapter holds the token in its own environment, and the child
+    inherits it: a child line that prints it must not reach pod stdout."""
+    _clear_adapter_secret_env(monkeypatch)
+    secret = "3f9c0d5e7a1b4c6d8e2f0a1b3c5d7e9f"
+    monkeypatch.setenv("EFP_PORTAL_TRUST_TOKEN", secret)
+    forwarded = await _forwarded_lines(monkeypatch, tmp_path, caplog, f"INFO caller presented {secret} to the adapter", {})
+    assert secret not in "\n".join(forwarded)
+    assert "***REDACTED***" in forwarded[0]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "line,secret",
     [

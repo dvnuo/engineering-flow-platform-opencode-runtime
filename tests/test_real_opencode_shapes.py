@@ -86,6 +86,26 @@ def test_portal_author_metadata_requires_portal_source_header():
     assert portal_author_metadata_from_request(_NoIdentityRequest()) == {}
 
 
+def test_portal_author_metadata_needs_the_trust_token_once_the_pod_has_one(monkeypatch):
+    # The header alone is believed only on a pod without EFP_PORTAL_TRUST_TOKEN
+    # (the test above); tests/test_portal_trust.py covers the rest.
+    identity = {"X-Portal-Author-Source": "portal", "X-Portal-User-Id": "user-2", "X-Portal-User-Name": "Bob"}
+
+    class _MarkerOnlyRequest:
+        headers = identity
+
+    class _WrongTokenRequest:
+        headers = {**identity, "X-Portal-Trust-Token": "5ca1ab1f"}
+
+    class _PortalRequest:
+        headers = {**identity, "X-Portal-Trust-Token": "5ca1ab1e"}
+
+    monkeypatch.setenv("EFP_PORTAL_TRUST_TOKEN", "5ca1ab1e")
+    assert portal_author_metadata_from_request(_MarkerOnlyRequest()) == {}
+    assert portal_author_metadata_from_request(_WrongTokenRequest()) == {}
+    assert portal_author_metadata_from_request(_PortalRequest())["author_id"] == "user-2"
+
+
 def test_extract_assistant_text_supports_opencode_info_parts_shape():
     payload = {"info": {"id": "a1", "role": "assistant"}, "parts": [{"type": "text", "text": "assistant text"}]}
     assert extract_assistant_text(payload) == "assistant text"

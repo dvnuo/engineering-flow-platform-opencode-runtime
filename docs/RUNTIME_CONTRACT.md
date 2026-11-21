@@ -30,6 +30,10 @@ This repository provides an OpenCode-based runtime adapter for EFP-facing APIs.
 - `EFP_PROFILE_REVISION` (profile revision string from the Secret)
 - `EFP_PROFILE_ID` (profile id, or `none` for unbound agents)
 
+Optional:
+- `EFP_PORTAL_TRUST_TOKEN` (per-assistant secret injected by the Portal; while it is set the adapter serves only
+  requests that carry it, see "Portal trust token" below; unset means no check)
+
 ## Required mounted directories
 - `/workspace`
 - `/workspace/.opencode/skills`
@@ -57,6 +61,20 @@ At minimum, runtime provides:
 - `/api/copilot/quota`
 - `/api/server-files/*`
 - `/api/events/ws`
+
+### Portal trust token
+- The Portal injects `EFP_PORTAL_TRUST_TOKEN` (a per-assistant secret) into the pod and sends it as
+  `X-Portal-Trust-Token` on every request, the `GET /api/events` WebSocket handshake included.
+- While the variable is set, one middleware (`efp_opencode_adapter/portal_trust.py`) answers
+  `401 {"error": "portal_trust_token_required"}` to every request without the right token, on every route, and
+  `X-Portal-Author-Source: portal` is believed only together with the token.
+- Served without the token: `GET /health`, `GET /actuator/health`, `GET /ready` (the kubelet's readiness probe and
+  the Portal's status check cannot hold it), and callers on the pod's own loopback interface (socket peer
+  `127.0.0.1` or `::1`; a request carrying `Forwarded`, `X-Forwarded-For` or `X-Real-IP` never counts as one).
+  The OpenCode child reaches `/api/internal/copilot/*` and `/api/internal/ai-platform/*` that way.
+- The adapter sends the same value as `X-Portal-Trust-Token` on its calls to the Portal's `/api/internal/*` API.
+- A pod without the variable (created before the Portal injected it, or local development) serves every caller
+  as before and logs one warning at startup.
 
 ## Usage and Copilot credits
 - `/api/chat` answers carry `usage` with the run's `input_tokens` (the whole

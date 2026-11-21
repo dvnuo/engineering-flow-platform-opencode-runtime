@@ -11,6 +11,9 @@ OpenCode runtime adapter for EFP-compatible runtime image.
 - Portal provides skills input only (`EFP_SKILLS_DIR`, default `/app/skills`).
 - Tool capability comes from OpenCode built-in tools + runtime permission/profile policy.
 - Runtime does not read/sync/generate/index external tools repos or manifests.
+- `EFP_PORTAL_TRUST_TOKEN` (injected by the Portal): while it is set, the adapter answers `401` to any request
+  without that value in `X-Portal-Trust-Token`, except probes and loopback callers, and sends it on its own calls
+  to the Portal. See "Portal trust token" in `docs/RUNTIME_CONTRACT.md`.
 
 ## Local development
 ```bash

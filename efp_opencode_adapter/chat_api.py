@@ -43,6 +43,7 @@ from .opencode_message_adapter import (
     message_role as adapter_message_role,
     message_to_visible_text,
 )
+from .portal_trust import is_trusted_portal_request
 from .reply_language import prepend_reply_language_block, resolve_reply_language
 from .repository_workspace import ensure_repo_checkout, parse_create_pr_repo_request
 from .session_store import SessionDeletedError, SessionRecord, session_title_metadata, session_title_metadata_for
@@ -69,8 +70,8 @@ RECOVERABLE_SEND_ACCEPTANCE_PROBE_SECONDS = 5.0
 def portal_author_metadata_from_request(request: web.Request) -> dict[str, str]:
     """Read author headers from the trusted internal Portal-to-runtime proxy."""
     headers = getattr(request, "headers", {})
-    source = str(headers.get("X-Portal-Author-Source") or "").strip().lower()
-    if source != "portal":
+    # The author-source header, plus the Portal trust token once the pod has one.
+    if not is_trusted_portal_request(request):
         return {}
 
     def _clean(name: str, max_length: int) -> str:
