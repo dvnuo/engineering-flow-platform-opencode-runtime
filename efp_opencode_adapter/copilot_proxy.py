@@ -22,6 +22,9 @@ _REQUEST_HEADER_BLOCKLIST = {
     "content-length",
     "authorization",
     "x-api-key",
+    # The Portal's per-assistant secret (portal_trust.py) is for this adapter
+    # alone: it never travels on to GitHub or the AI Platform.
+    "x-portal-trust-token",
     "connection",
     "keep-alive",
     "proxy-authenticate",

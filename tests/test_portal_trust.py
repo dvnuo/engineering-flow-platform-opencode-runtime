@@ -447,3 +447,12 @@ async def test_the_adapter_reports_the_trust_status_once_at_startup(tmp_path, mo
         finally:
             await client.close()
     assert len(_trust_records(caplog, logging.WARNING)) == 1
+
+
+def test_the_model_proxies_never_pass_the_trust_token_on():
+    # A header of this adapter alone: the proxies copy a caller's headers to
+    # GitHub and the AI Platform, and this one must not be among them.
+    from efp_opencode_adapter.copilot_proxy import _safe_request_headers
+
+    kept = _safe_request_headers({"X-Portal-Trust-Token": "secret", "x-portal-trust-token": "secret", "X-Initiator": "agent"})
+    assert kept == {"X-Initiator": "agent"}
